@@ -16,6 +16,99 @@ A sophisticated algorithmic trading bot that processes TradingView webhook signa
 - **🎯 Market Structure Aware**: Respects chart patterns, pivot points, and volume profiles
 - **📈 Dual Direction Support**: Works for both long positions (support) and short positions (resistance)
 
+## 🛡️ Advanced DCA Order Management
+
+### Progressive Price Improvement System
+
+The bot implements a sophisticated order management system that prevents excessive DCA orders while maintaining technical analysis integrity. This system uses **progressive thresholds** that increase with each DCA attempt, ensuring meaningful price movements.
+
+#### Progressive Threshold Calculation
+```python
+# Progressive DCA thresholds (logarithmic scaling)
+DCA 1: 1.5% minimum price improvement required
+DCA 2: 2.7% minimum price improvement required (1.5% × 1.8)
+DCA 3: 4.9% minimum price improvement required (2.7% × 1.8)
+DCA 4+: 6.0% minimum price improvement required (capped)
+```
+
+**Rationale:**
+- **Early DCAs (1-2)**: Lower thresholds allow quick response to support breaches
+- **Later DCAs (3+)**: Higher thresholds prevent position over-concentration
+- **Logarithmic scaling**: Mirrors martingale position sizing progression
+- **Technical priority**: Support/resistance levels override thresholds when confidence is high
+
+#### Order State Protection
+
+**Pending Order Prevention:**
+```yaml
+# Configuration
+strategies:
+  dca:
+    max_pending_orders_per_position: 1  # Prevents order spam
+```
+
+**Protection Logic:**
+1. **Duplicate Order Prevention**: Checks for existing pending DCA orders before placing new ones
+2. **Position Lifecycle Tracking**: Each position cycle has unique ID to prevent cross-contamination
+3. **Market Structure Respect**: Technical levels take precedence over arbitrary thresholds
+
+#### Real-World Application Example
+
+**Scenario: HIMS Position Management**
+```
+Initial Entry: BUY 100 HIMS @ $320.00
+Current Price: $321.56 → $321.43 → $321.21 (rapid price changes)
+
+TRADITIONAL APPROACH (PROBLEMATIC):
+❌ $321.56: DCA placed (meets 2% arbitrary threshold)
+❌ $321.43: DCA placed (0.04% movement) → DANGEROUS ORDER SPAM
+❌ $321.21: DCA placed (0.07% movement) → EXCESSIVE EXPOSURE
+
+ENHANCED APPROACH (INTELLIGENT):
+✅ $321.56: DCA 1 placed (1.5% threshold met + support breach)
+🚫 $321.43: DCA blocked (pending order exists + insufficient 2.7% movement)
+✅ $314.00: DCA 2 allowed (pending filled + 2.7% threshold met)
+```
+
+#### Configuration Options
+
+**Progressive Threshold Settings:**
+```yaml
+strategies:
+  dca:
+    base_threshold_percent: 1.5        # First DCA threshold
+    progressive_multiplier: 1.8        # Logarithmic scaling factor
+    max_threshold_percent: 6.0         # Maximum threshold cap
+    max_pending_orders_per_position: 1 # Order spam prevention
+```
+
+**Customization Guidelines:**
+- **Conservative trading**: Increase `base_threshold_percent` to 2.0%
+- **Aggressive trading**: Decrease `base_threshold_percent` to 1.0%
+- **Faster progression**: Increase `progressive_multiplier` to 2.0
+- **Higher risk tolerance**: Increase `max_threshold_percent` to 8.0%
+
+### Integration with Technical Analysis
+
+**Priority Hierarchy:**
+1. **Support/Resistance Breach** (Primary trigger)
+2. **Progressive Price Threshold** (Secondary filter)
+3. **Pending Order State** (Tertiary protection)
+
+**Example Decision Flow:**
+```python
+if support_breached and confidence > 70%:
+    if no_pending_dca_orders:
+        if price_improvement >= progressive_threshold:
+            place_dca_order()  # All conditions met
+        else:
+            log_insufficient_movement()  # Technical valid, but too small
+    else:
+        log_pending_order_exists()  # Wait for current order to fill
+else:
+    log_no_technical_signal()  # No support breach detected
+```
+
 ### 🔧 **Core Trading Features**
 - **TradingView Integration**: Webhook endpoints for receiving trading signals
 - **Advanced Position Management**: Long/short positions with trailing stops
@@ -166,6 +259,19 @@ python tests/test_webhook_concurrency.py
 ### Performance Impact
 - **Before**: 7+ seconds per webhook, blocking subsequent requests
 - **After**: < 1 second per webhook, unlimited concurrent handling
+- Prevented unnecessary retries for permanent business logic errors
+
+### Testing the Fix
+
+```bash
+# Verify webhook responsiveness
+python tests/test_webhook_concurrency.py
+
+# Expected results:
+# ✅ All responses < 2 seconds
+# ✅ Multiple concurrent requests work
+# ✅ Signal processing continues in background
+```
 
 ## 📊 Monitoring
 
