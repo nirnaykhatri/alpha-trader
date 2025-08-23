@@ -1,0 +1,527 @@
+# Trading Bot Configuration
+# This file contains all configurable parameters for the trading bot
+# Modify these values according to your trading preferences and API credentials
+
+# API Configuration
+api:
+  alpaca:
+    # Alpaca API credentials (required)
+    # Get these from your Alpaca account dashboard
+    api_key: "PKWLXOI64JFC86XJIUEY"  # Your Alpaca API key
+    secret_key: "qqlEiBXGcyhwbRsv46IbnV8exvZ6o5XfWUHYlKor"  # Your Alpaca secret key
+    base_url: "https://paper-api.alpaca.markets"  # Paper trading URL
+    # For live trading, use: "https://api.alpaca.markets"
+    timeout: 30  # API request timeout in seconds
+    max_retries: 3  # Number of retry attempts for failed requests
+    retry_delay: 1.0  # Initial retry delay in seconds
+    
+    # Communication method configuration
+    communication_method: "rest"  # Options: "rest" or "websocket"
+    # Use "websocket" for high-frequency trading with real-time updates
+    
+    # Websocket configuration (for high-frequency trading)
+    websocket:
+      enabled: false  # Enable websocket for real-time data and order updates
+      market_data_feed: "iex"  # Options: "iex" (free) or "sip" (premium)
+      auto_reconnect: true  # Automatically reconnect on connection loss
+      heartbeat_interval: 30  # Heartbeat interval in seconds
+      max_reconnect_attempts: 10  # Maximum reconnection attempts
+      reconnect_delay: 5  # Delay between reconnection attempts in seconds
+
+  webhook:
+    # Webhook server configuration
+    host: "0.0.0.0"  # Host to bind the webhook server
+    port: 8080  # Port for the webhook server
+    security_enabled: false  # Enable/disable webhook security (set to true for production)
+    secret: ""  # Webhook secret for signature verification (required when security_enabled is true)
+    # Generate a strong secret: openssl rand -hex 32
+
+# ngrok Configuration (for local development)
+ngrok:
+  enabled: false  # Auto-start ngrok tunnel for webhooks
+  auth_token: "2zPxzmUDN7XtdF7auVLuFIk6lMU_5BUoV3mD4dUyu1EAFQHx3"  # Your ngrok auth token (optional, can use env NGROK_AUTH_TOKEN)
+  # Get free token from: https://ngrok.com/
+
+# Trading Configuration
+trading:
+  # Basic order configuration
+  order_type: "limit"  # Default order type: "market" or "limit"
+  
+  # Aggressive Order Management (NEW - Enhanced Features)
+  aggressive_order_timeout_minutes: 5  # Cancel and retry orders after N minutes
+  max_price_adjustment_percent: 0.5    # Maximum price adjustment toward market (0.5%)
+  
+  # Order monitoring
+  order_monitoring:
+    check_interval: 10  # Check order fills every N seconds
+    max_pending_time: 600  # Cancel orders pending longer than 10 minutes (covers pre/post market)
+    log_pending_orders: true  # Log pending orders during monitoring
+  
+  # Position sizing
+  position_sizing:
+    method: "percentage"  # "fixed", "percentage", or "risk_based"
+    # Initial position sizing (conservative start)
+    initial_portfolio_percentage: 0.01  # Start with 1% of buying power for initial position
+    # Risk-based sizing
+    risk_per_trade: 0.02  # Risk 2% of portfolio per trade (when method is "risk_based")
+    # Martingale-style averaging configuration
+    averaging:
+      enabled: true  # Enable position averaging/martingale approach
+      multiplier: 2.0  # Position size multiplier for subsequent orders (2.0 = double each time)
+      max_attempts: 6  # Maximum averaging attempts (1%, 2%, 4% = 7% total exposure)
+      # Alternative multipliers:
+      # 1.5 = (1%, 1.5%, 2.25% = 4.75% total)
+      # 2.0 = (1%, 2%, 4% = 7% total) 
+      # 3.0 = (1%, 3%, 9% = 13% total) - very aggressive
+    # Limits (applied to all methods)
+    min_quantity: 1  # Minimum number of shares per trade
+    max_quantity: 10000  # Maximum number of shares per trade
+    max_total_position_percentage: 0.15  # Maximum 15% total exposure per symbol
+    
+  max_position_size: 1000  # Maximum position size per symbol
+  max_daily_trades: 50  # Maximum number of trades per day
+  
+  # Order Configuration - UNIFIED SETTINGS
+  order_type: "limit"  # "market" or "limit" - applies to ALL trading actions (entry, averaging, exits)
+  limit_order_offset: 0.001  # For limit orders: 0.1% offset from current price (only used if order_type is "limit")
+  market_order_slippage: 0.002  # Expected slippage for market orders (0.2%)
+  order_timeout_minutes: 5  # Cancel unfilled orders after X minutes
+  
+  # Trading direction filtering
+  allowed_directions:
+    enabled: true  # Enable/disable direction filtering
+    long_only: false  # Set to true to only allow long (buy) trades
+    short_only: false  # Set to true to only allow short (sell) trades
+  
+  # Position management behavior
+  position_management:
+    # Control how opposing signals are handled when a position already exists
+    ignore_opposing_signals: true  # TRUE: Ignore new signals if position exists (recommended)
+                                  # FALSE: Close existing position and open new opposing position
+  
+  # Risk management
+  max_portfolio_risk: 0.10  # Maximum 10% portfolio risk exposure
+  
+  # Stop-Loss and Risk Management Settings
+  risk_management:
+    # Stop-Loss Settings (CRITICAL - Controls when bot closes losing positions)
+    stop_loss:
+      enabled: false  # Enable/disable stop-loss protection
+      max_loss_percentage: 0.05  # 5% - Maximum loss before position is closed
+      # Examples: 0.03 = 3%, 0.05 = 5%, 0.08 = 8%
+      # WARNING: Higher values mean larger potential losses!
+      
+    # Profit-Taking Settings (Controls when bot closes winning positions)  
+    profit_taking:
+      # Basic profit target (immediate close at this profit level)
+      take_profit_percentage: 0.05  # 5% - Take profit at this level
+      
+      # Trailing profit settings (follow price up/down to maximize gains)
+      trailing_profit:
+        enabled: true
+        activation_threshold: 0.03  # 3% - Start trailing at this profit level
+        trailing_percentage: 0.015  # 1.5% - Trail this far behind peak price
+        min_profit_lock: 0.01  # 1% - Minimum profit to lock in
+        
+        # Advanced trailing features
+        acceleration_factor: 1.5  # Accelerate trailing when profit exceeds 1.5x activation threshold
+        # profit_steps: null  # Optional: Different trailing percentages at different profit levels
+        # Example profit_steps configuration:
+        # profit_steps:
+        #   - profit_threshold: 0.05  # 5% profit
+        #     trailing_percentage: 0.02  # Trail 2% behind
+        #   - profit_threshold: 0.10  # 10% profit  
+        #     trailing_percentage: 0.015  # Trail 1.5% behind
+        #   - profit_threshold: 0.15  # 15% profit
+        #     trailing_percentage: 0.01  # Trail 1% behind
+        
+      # Time-based exit (close positions after certain time regardless of profit/loss)
+      time_based_exit:
+        enabled: false  # Set to true to enable time-based exits
+        max_hold_hours: 24  # Close positions after this many hours
+        
+    # Advanced Risk Settings
+    advanced:
+      # Portfolio-level limits
+      max_positions: 10  # Maximum number of open positions
+      max_symbol_allocation: 0.20  # Maximum 20% of portfolio in any single symbol
+      
+      # Drawdown protection
+      daily_loss_limit: 0.03  # 3% - Stop trading if daily losses exceed this
+      portfolio_drawdown_limit: 0.15  # 15% - Emergency stop if portfolio drops this much
+  
+  # Account Configuration
+  account:
+    # Production safety: No fallback values - trading stops if API fails
+    use_api_for_balance: true  # REQUIRED: Must get real balance from Alpaca API
+    fail_safe_on_api_error: true  # Stop trading if API is unavailable (recommended for production)
+
+# Strategy Configuration
+strategies:
+  # Global DCA Protection Settings (applies to all strategies)
+  dca:
+    # Progressive Price Improvement Thresholds
+    base_threshold_percent: 1.5        # Base threshold for first DCA (1.5%)
+    progressive_multiplier: 1.8        # Multiplier for each subsequent DCA
+    max_threshold_percent: 6.0         # Maximum threshold cap (6.0%)
+    max_pending_orders_per_position: 1 # Maximum pending DCA orders per position
+    
+    # Progressive DCA Example:
+    # DCA 1: 1.5% minimum improvement required
+    # DCA 2: 2.7% minimum improvement required (1.5% * 1.8)
+    # DCA 3: 4.9% minimum improvement required (2.7% * 1.8)
+    # DCA 4+: 6.0% minimum improvement required (capped at max)
+    
+  # Long Position Strategy
+  long_strategy:
+    enabled: true
+    
+    # Initial Entry (uses global trading.order_type setting)
+    entry_limit_offset: 0.001  # For limit orders: buy 0.1% below current price (only used if order_type is "limit")
+    
+    # Profit Taking (Trailing Up from Average Price)
+    profit_target: 0.03  # 3% profit above average price to start trailing
+    trailing_profit:
+      enabled: true
+      trailing_percentage: 0.015  # Trail 1.5% behind peak price
+      activation_threshold: 0.03  # Start trailing at 3% profit above average price
+      min_profit_lock: 0.01  # Lock in minimum 1% profit above average price
+      acceleration_factor: 1.5  # Accelerate trailing when profit exceeds 1.5x activation threshold
+      # Exit orders use global trading.order_type setting
+    
+      # Enhanced Support-Based DCA (Pure Technical Analysis)
+      support_averaging:
+        enabled: true
+        max_attempts: 3  # Maximum averaging down attempts
+        position_multiplier: 1.5  # Each new position = previous * multiplier (1.5x is more conservative than 2.0x)
+        
+        # REMOVED: loss_threshold (no more arbitrary percentage triggers)
+        # DCA now triggers ONLY on technical support breaches
+        
+        # Enhanced Technical Analysis Configuration
+        use_original_timeframe: true  # Use timeframe from original signal (1h, 4h, etc.)
+        default_timeframe: "15m"  # Fallback for existing positions without stored timeframe
+        min_support_confidence: 0.70  # Minimum 70% confidence for support levels
+        support_buffer_percent: 0.005  # 0.5% buffer around support (ensures true breach)
+        
+        # Enhanced Position-Aware Filtering (CRITICAL FIX for MSFT issue)
+        position_aware_filtering:
+          enabled: true  # Enable position-aware support/resistance filtering
+          use_position_price: true  # Filter levels relative to position average price, not current market price
+          position_buffer_percent: 0.001  # 0.1% buffer around position price for filtering decisions
+          recovery_mode_enabled: true  # Enable automatic recovery when normal filtering fails
+          log_edge_cases: true  # Log edge case detection and recovery actions
+        
+        # Support Detection Methods
+        support_calculation:
+          methods:
+            - "pivot_points"     # Traditional pivot point analysis
+            - "moving_averages"  # MA support levels (20, 50, 200)
+            - "volume_profile"   # High volume support zones
+            - "fibonacci"        # Fibonacci retracement levels
+          confidence_weighting: true  # Weight by confidence scores
+          minimum_methods: 2  # Require agreement from at least 2 methods
+        
+        # Enhanced Order Placement
+        order_placement:
+          use_limit_orders: true  # Always use limit orders at technical levels
+          price_offset_percent: 0.002  # Place order 0.2% above support level
+          timeout_minutes: 5  # Cancel unfilled orders after 5 minutes
+          retry_on_fill_failure: true  # Retry if order doesn't fill quickly
+        
+        # Fallback Configuration (ONLY for technical analysis failures)
+        fallback:
+          enabled: false  # Disabled by default - prefer technical analysis
+          loss_threshold: 0.05  # 5% loss threshold (only if technical analysis fails)
+          use_fallback_warning: true  # Log warnings when using fallback
+        
+        # Trailing Down (when support doesn't hold)
+        support_trailing:
+          enabled: true
+          trailing_percentage: 0.01  # Trail 1% below current price
+          max_trail_distance: 0.05  # Max 5% trail from support level
+          # Averaging entries use global trading.order_type setting
+          
+        # Position Sizing for Averaging (uses martingale from position_sizing.averaging)
+        sizing_method: "martingale"  # "fixed", "multiplier", "risk_based", or "martingale"
+        # martingale: follows position_sizing.averaging configuration (1%, 2%, 4%, 8%...)
+        # multiplier: each position = previous * position_multiplier
+        # fixed: each position = same size as initial
+        # risk_based: size based on distance from support  # Short Position Strategy  
+  short_strategy:
+    enabled: true
+    
+    # Initial Entry (uses global trading.order_type setting)
+    entry_limit_offset: 0.001  # For limit orders: sell 0.1% above current price (only used if order_type is "limit")
+    
+    # Profit Taking (Trailing Down from Average Price)
+    profit_target: 0.03  # 3% profit below average price to start trailing
+    trailing_profit:
+      enabled: true
+      trailing_percentage: 0.015  # Trail 1.5% above lowest price
+      activation_threshold: 0.03  # Start trailing at 3% profit below average price
+      min_profit_lock: 0.01  # Lock in minimum 1% profit below average price
+      acceleration_factor: 1.5  # Accelerate trailing when profit exceeds 1.5x activation threshold
+      # Exit orders use global trading.order_type setting
+    
+      # Enhanced Resistance-Based DCA (Pure Technical Analysis)
+      resistance_averaging:
+        enabled: true
+        max_attempts: 3  # Maximum averaging up attempts
+        position_multiplier: 1.5  # Each new position = previous * multiplier
+        
+        # REMOVED: loss_threshold (no more arbitrary percentage triggers)
+        # DCA now triggers ONLY on technical resistance breaches
+        
+        # Enhanced Technical Analysis Configuration
+        use_original_timeframe: true  # Use timeframe from original signal
+        default_timeframe: "15m"  # Fallback for existing positions
+        min_resistance_confidence: 0.70  # Minimum 70% confidence for resistance levels
+        resistance_buffer_percent: 0.005  # 0.5% buffer around resistance
+        
+        # Enhanced Position-Aware Filtering (CRITICAL FIX for resistance below current price)
+        position_aware_filtering:
+          enabled: true  # Enable position-aware resistance filtering
+          use_position_price: true  # Filter levels relative to position average price, not current market price
+          position_buffer_percent: 0.001  # 0.1% buffer around position price for filtering decisions
+          recovery_mode_enabled: true  # Enable automatic recovery when normal filtering fails
+          log_edge_cases: true  # Log edge case detection and recovery actions
+        
+        # Resistance Detection Methods
+        resistance_calculation:
+          methods:
+            - "pivot_points"     # Traditional pivot point analysis
+            - "moving_averages"  # MA resistance levels
+            - "volume_profile"   # High volume resistance zones
+            - "fibonacci"        # Fibonacci retracement levels
+          confidence_weighting: true
+          minimum_methods: 2
+        
+        # Enhanced Order Placement
+        order_placement:
+          use_limit_orders: true
+          price_offset_percent: 0.002  # Place order 0.2% below resistance level
+          timeout_minutes: 5
+          retry_on_fill_failure: true
+        
+        # Fallback Configuration (ONLY for technical analysis failures)
+        fallback:
+          enabled: false  # Disabled by default
+          loss_threshold: 0.05  # 5% loss threshold (only if technical analysis fails)
+          use_fallback_warning: true  # Legacy trailing profit configuration (for backward compatibility)
+  trailing_profit:
+    enabled: true
+    activation_threshold: 0.03  # 3% - Start trailing at this profit level
+    trailing_percentage: 0.015  # 1.5% - Trail this far behind peak price
+    min_profit_lock: 0.01  # 1% - Minimum profit to lock in
+    take_profit_percentage: 0.05  # 5% - Take profit at this level
+    max_loss_percentage: null  # DISABLED - No stop-loss from trailing profit module
+    time_based_exit: false  # Time-based exit enabled/disabled
+    max_hold_hours: 24  # Maximum hours to hold a position
+    acceleration_factor: 1.5  # Accelerate trailing when profit exceeds 1.5x activation threshold
+    # profit_steps: null  # Optional stepped trailing configuration
+
+# Support and Resistance Level Calculation
+technical_analysis:
+  # Support Level Detection
+  support:
+    cache_duration_minutes: 15  # Cache support levels for 15 minutes (renamed for clarity)
+    max_cache_size: 100  # Maximum number of cached symbols to prevent memory leaks
+    lookback_periods: 50  # Number of periods to look back
+    min_confidence: 0.7  # Minimum confidence required
+    min_valid_price: 0.01  # Minimum valid price to avoid division by zero
+    
+    # Enhanced Edge Case Recovery Configuration
+    edge_case_recovery:
+      enabled: true  # Enable comprehensive edge case handling
+      recovery_proximity_threshold: 0.02  # 2% proximity threshold for recovery mode
+      recent_threshold_minutes: 30  # Consider data from last 30 minutes as "recent"
+      synthetic_level_count: 5  # Number of synthetic levels to create during recovery
+      max_price_gap_percent: 0.5  # 50% - Log warning for price gaps above this threshold
+      
+    # Position-Aware Filtering (for averaging strategies)
+    position_aware:
+      enabled: true  # Enable position-aware filtering for DCA strategies
+      position_buffer_percent: 0.001  # 0.1% buffer around position price
+      min_position_buffer: 0.0001  # 0.01% minimum buffer
+      max_position_buffer: 0.01  # 1% maximum buffer
+      
+    # Enhanced Cache Management
+    cache_management:
+      trading_hours_duration_minutes: 5  # Cache validity during trading hours
+      non_trading_hours_duration_minutes: 60  # Cache validity outside trading hours
+      auto_cleanup_enabled: true  # Automatic stale cache cleanup
+      lru_eviction_threshold: 0.75  # Trigger LRU eviction at 75% cache capacity
+      
+    calculation_methods:
+      pivot_points: true  # Use pivot point calculation
+      moving_averages: true  # Use moving average support
+      volume_profile: true  # Use volume profile analysis
+      fibonacci_retracements: true  # Use Fibonacci levels
+    
+    # Support validation
+    min_touches: 2  # Minimum times price touched support
+    max_age_hours: 24  # Max age of support level data
+    price_tolerance: 0.002  # 0.2% tolerance for support level hits
+  
+  # Resistance Level Detection  
+  resistance:
+    cache_duration: 15  # Cache resistance levels for 15 minutes
+    lookback_periods: 50  # Number of periods to look back
+    min_confidence: 0.7  # Minimum confidence required
+    
+    # Enhanced Edge Case Recovery Configuration
+    edge_case_recovery:
+      enabled: true  # Enable comprehensive edge case handling
+      recovery_proximity_threshold: 0.10  # 2% proximity threshold for recovery mode
+      recent_threshold_minutes: 7200  # Consider data from last 30 minutes as "recent"
+      synthetic_level_count: 5  # Number of synthetic levels to create during recovery
+      max_price_gap_percent: 0.5  # 50% - Log warning for price gaps above this threshold
+      
+    # Position-Aware Filtering (for averaging strategies)
+    position_aware:
+      enabled: true  # Enable position-aware filtering for DCA strategies
+      position_buffer_percent: 0.001  # 0.1% buffer around position price
+      min_position_buffer: 0.0001  # 0.01% minimum buffer
+      max_position_buffer: 0.01  # 1% maximum buffer
+      
+    # Enhanced Cache Management
+    cache_management:
+      trading_hours_duration_minutes: 5  # Cache validity during trading hours
+      non_trading_hours_duration_minutes: 60  # Cache validity outside trading hours
+      auto_cleanup_enabled: true  # Automatic stale cache cleanup
+      lru_eviction_threshold: 0.75  # Trigger LRU eviction at 75% cache capacity
+      
+    calculation_methods:
+      pivot_points: true  # Use pivot point calculation
+      moving_averages: true  # Use moving average resistance
+      volume_profile: true  # Use volume profile analysis
+      fibonacci_extensions: true  # Use Fibonacci levels
+    
+    # Resistance validation
+    min_touches: 2  # Minimum times price touched resistance
+    max_age_hours: 24  # Max age of resistance level data
+    price_tolerance: 0.002  # 0.2% tolerance for resistance level hits
+  
+  # Market data settings
+  timeframes: ["1m", "5m", "15m", "1h", "4h", "1d"]  # Timeframes for analysis
+  default_timeframe: "15m"  # Default timeframe for calculations
+
+# Logging Configuration
+logging:
+  level: "INFO"  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "json"  # Log format: "json" or "text"
+  file: "logs/trading_bot.log"  # Log file path
+  max_file_size: "10MB"  # Maximum log file size before rotation
+  backup_count: 5  # Number of backup log files to keep
+  console_logging: true  # Enable console logging
+  
+  # Enhanced logging precision settings for support/resistance levels
+  price_precision: 2  # Decimal places for price display in logs ($42.11)
+  percentage_precision: 1  # Decimal places for percentage display (2.1%)
+
+# Database Configuration
+database:
+  url: "sqlite:///trading_bot.db"  # Database connection string (simplified for development)
+  echo: false  # Echo SQL statements to logs
+  pool_size: 5  # Connection pool size
+  max_overflow: 10  # Maximum overflow connections
+
+# Monitoring and Alerts
+monitoring:
+  enabled: true  # Enable monitoring
+  metrics_port: 9090  # Prometheus metrics port
+  health_check_interval: 30  # Health check interval in seconds
+  
+  # Position and market data monitoring intervals
+  position_monitoring_interval: 10  # Position monitoring and trailing checks (seconds)
+  alpaca_sync_interval: 60  # Sync with Alpaca positions every N seconds (prevents zombie positions)
+  market_data_refresh_interval: 60  # Market data background refresh (seconds)
+  order_monitoring_interval: 5  # Order status monitoring (seconds)
+  
+  # Alert configuration
+  alerts:
+    email:
+      enabled: false  # Enable email alerts
+      smtp_server: ""  # SMTP server address
+      smtp_port: 587  # SMTP port
+      username: ""  # SMTP username
+      password: ""  # SMTP password
+      from_address: ""  # From email address
+      to_addresses: []  # List of recipient email addresses
+    
+    slack:
+      enabled: false  # Enable Slack alerts
+      webhook_url: ""  # Slack webhook URL
+      channel: "#trading-alerts"  # Slack channel
+
+# Symbol Configuration
+symbols:
+  # Symbol whitelist enforcement
+  whitelist_enabled: false  # Enable/disable symbol whitelist (set false to allow any symbol from signals)
+  # When whitelist_enabled=true, only these symbols are allowed
+  # When whitelist_enabled=false, signals can specify any symbol (for advanced users)
+  default_symbols:
+    - "AAPL"
+    - "GOOGL"
+    - "MSFT"
+    - "TSLA"
+    - "NVDA"
+  
+  # Symbol-specific settings
+  symbol_settings:
+    "AAPL":
+      max_position_size: 500
+      risk_per_trade: 0.015
+    "TSLA":
+      max_position_size: 200
+      risk_per_trade: 0.025  # Higher risk for more volatile stocks
+
+# Performance Settings
+performance:
+  max_concurrent_orders: 10  # Maximum concurrent orders
+  rate_limit_requests_per_second: 5  # API rate limiting
+  cache_enabled: true  # Enable caching for performance
+  async_processing: true  # Enable async processing
+
+# Market Data Configuration
+data:
+  # Enhanced Alpaca data settings for market and extended hours
+  alpaca:
+    use_snapshot: true              # Use snapshot API for latest prices
+    extended_hours: true            # Enable extended hours data (limited to IEX on free tier)
+    fallback_to_bars: true         # Fallback to latest bars if snapshot fails
+    cache_duration: 30              # Cache duration in seconds for performance
+    snapshot_timeout: 10            # Timeout for snapshot requests in seconds
+    quote_timeout: 10               # Timeout for quote requests in seconds
+    bars_timeout: 15                # Timeout for bars requests in seconds
+    max_retries: 3                  # Maximum retry attempts for failed data requests
+    
+    # Extended Hours Data Plan Information:
+    # - FREE TIER: Limited to IEX exchange only (incomplete extended hours coverage)
+    # - SIP PLAN: Full extended hours data from all exchanges (upgrade required)
+    # - For production trading bots, consider SIP upgrade for complete extended hours data
+
+# Development Settings
+development:
+  auto_shutdown_hours: 0  # Auto-shutdown after X hours (0 = disabled)
+  enable_admin_endpoints: true  # Enable admin shutdown endpoint
+
+# Extended Hours Trading Configuration
+extended_hours:
+  enabled: true  # Enable trading during pre-market and after-hours
+  pre_market:
+    enabled: true  # Allow trading 4:00 AM - 9:30 AM ET
+    reduce_position_size: false  # Reduce position sizes during pre-market (lower liquidity)
+    position_size_multiplier: 1.0  # Multiplier for position sizes (1.0 = same as regular hours)
+  after_hours:
+    enabled: true  # Allow trading 4:00 PM - 8:00 PM ET  
+    reduce_position_size: false  # Reduce position sizes during after-hours (lower liquidity)
+    position_size_multiplier: 1.0  # Multiplier for position sizes (1.0 = same as regular hours)
+  
+  # Extended hours specific settings
+  use_limit_orders_only: false  # Force limit orders during extended hours (recommended for low liquidity)
+  extended_hours_spread_buffer: 0.005  # Additional buffer for limit orders during extended hours (0.5%)
+  min_volume_threshold: 1000  # Minimum recent volume required to trade during extended hours
+
+# Trading direction filtering
