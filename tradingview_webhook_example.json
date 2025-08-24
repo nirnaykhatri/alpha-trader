@@ -1,0 +1,8 @@
+{
+  "ticker": "{{ticker}}",
+  "time": "{{time}}",
+  "interval": "{{interval}}",
+  "signal": "{{strategy.order.action}}",
+  "price": "{{close}}",
+  "message": "TradingView Alert for {{ticker}} on {{interval}} timeframe"
+}
