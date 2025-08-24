@@ -15,7 +15,7 @@ from .broker_interfaces import (
     UniversalOrder, OrderResponse, Position, AccountInfo, MarketQuote,
     Exchange
 )
-from .exchange_market_hours import ExchangeAwareMarketHoursManager, IMultiExchangeMarketHoursManager
+from .dynamic_market_hours import DynamicMarketHoursManager, IDynamicMarketHoursManager
 from ..interfaces import IConfigurationManager
 from ..exceptions import TradingException, ConfigurationException
 from ..core.logging_config import get_logger
@@ -181,7 +181,7 @@ class BrokerManager:
         self, 
         config: IConfigurationManager,
         broker_config: Optional[BrokerManagerConfig] = None,
-        market_hours_manager: Optional[IMultiExchangeMarketHoursManager] = None
+        market_hours_manager: Optional[IDynamicMarketHoursManager] = None
     ):
         """Initialize broker manager."""
         self._config = config
@@ -191,8 +191,8 @@ class BrokerManager:
         self._factory = BrokerFactory()
         self._router = BrokerRouter(self._broker_config.default_broker_type)
         
-        # Exchange-aware market hours manager
-        self._market_hours_manager = market_hours_manager or ExchangeAwareMarketHoursManager(config, self)
+        # Dynamic market hours manager
+        self._market_hours_manager = market_hours_manager or DynamicMarketHoursManager(config)
         
         # Broker management
         self._broker_providers: Dict[BrokerType, IBrokerProvider] = {}
@@ -226,6 +226,37 @@ class BrokerManager:
         self._is_initialized = True
         logger.info(f"✅ BrokerManager initialized with {len(self._broker_providers)} brokers")
     
+    async def _register_market_status_provider(self, broker_type: BrokerType, provider: IBrokerProvider) -> None:
+        """Register a market status provider for dynamic market hours."""
+        try:
+            # Import here to avoid circular imports
+            from ..brokers.alpaca_market_status import AlpacaDynamicMarketStatusProvider, MockDynamicMarketStatusProvider
+            
+            if broker_type == BrokerType.ALPACA:
+                # Register Alpaca's dynamic market status provider
+                if hasattr(provider, 'trading_client') and provider.trading_client:
+                    alpaca_status_provider = AlpacaDynamicMarketStatusProvider(
+                        provider.trading_client, 
+                        self._config
+                    )
+                    self._market_hours_manager.register_broker(broker_type.value, alpaca_status_provider)
+                    logger.info(f"📊 Registered Alpaca market status provider")
+                
+            elif broker_type == BrokerType.MOCK:
+                # Register mock market status provider
+                # Check if this mock should simulate 24/7 trading
+                supports_24_7 = "crypto" in broker_type.value.lower() or "forex" in broker_type.value.lower()
+                mock_status_provider = MockDynamicMarketStatusProvider(broker_type.value, supports_24_7)
+                self._market_hours_manager.register_broker(broker_type.value, mock_status_provider)
+                logger.info(f"🧪 Registered Mock market status provider (24/7={supports_24_7})")
+                
+            else:
+                logger.info(f"⚠️ No dynamic market status provider available for {broker_type.value}")
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to register market status provider for {broker_type.value}: {e}")
+            # Don't fail broker initialization if market status registration fails
+    
     async def _load_broker_configurations(self) -> None:
         """Load and initialize broker configurations from config."""
         # Get broker configurations
@@ -253,6 +284,9 @@ class BrokerManager:
                 # Store provider and initialize health tracking
                 self._broker_providers[broker_type] = provider
                 self._broker_health[broker_type] = BrokerHealth(broker_type=broker_type)
+                
+                # Register dynamic market status provider
+                await self._register_market_status_provider(broker_type, provider)
                 
                 logger.info(f"✅ Initialized {broker_type.value} broker")
                 
@@ -452,8 +486,8 @@ class BrokerManager:
     # ===== EXCHANGE-AWARE METHODS =====
     
     @property
-    def market_hours_manager(self) -> IMultiExchangeMarketHoursManager:
-        """Get the exchange-aware market hours manager."""
+    def market_hours_manager(self) -> IDynamicMarketHoursManager:
+        """Get the dynamic market hours manager."""
         return self._market_hours_manager
     
     async def get_exchange_for_symbol(self, symbol: str) -> Exchange:

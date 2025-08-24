@@ -8,12 +8,12 @@ import os
 import signal
 import sys
 from typing import Dict, Any, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 # Core imports
 from .core import ConfigurationManager, setup_logging, get_logger, MarketStatusInfo
-from .core.exchange_market_hours import IMultiExchangeMarketHoursManager
+from .core.dynamic_market_hours import IDynamicMarketHoursManager
 from .core.broker_manager import BrokerManager
 from .core.broker_interfaces import BrokerType, UniversalOrder, OrderSide, OrderType, TimeInForce
 from .signals import TradingViewSignalListener
@@ -76,7 +76,7 @@ class TradingBotOrchestrator:
         self.database: Optional[DatabaseManager] = None
         
         # NEW: Market hours manager with Alpaca API integration
-        self.market_hours_manager: Optional[IMultiExchangeMarketHoursManager] = None
+        self.market_hours_manager: Optional[IDynamicMarketHoursManager] = None
         self.extended_hours_manager = None  # Extended hours manager for advanced session trading
         self._last_market_status: Optional[MarketStatusInfo] = None
         self._market_status_monitoring_active = False
@@ -138,28 +138,29 @@ class TradingBotOrchestrator:
         try:
             logger.info("🕐 Starting exchange-aware market hours monitoring...")
             
-            # Check if bot should be active across all exchanges
+            # Check if bot should be active across all brokers
             should_be_active = await self.market_hours_manager.should_bot_be_active()
             
-            # Get active exchanges for logging
-            active_exchanges = await self.market_hours_manager.get_active_exchanges()
-            supported_exchanges = self.market_hours_manager.get_supported_exchanges()
+            # Get aggregated market status for logging
+            aggregated_status = await self.market_hours_manager.get_aggregated_market_status()
             
             logger.info(f"📊 INITIAL MARKET STATUS:")
             logger.info(f"   Bot Should Be Active: {should_be_active}")
-            logger.info(f"   Active Exchanges: {[ex.value for ex in active_exchanges]}")
-            logger.info(f"   Supported Exchanges: {[ex.value for ex in supported_exchanges]}")
+            logger.info(f"   Active Brokers: {aggregated_status.active_brokers}")
+            logger.info(f"   Available Sessions: {aggregated_status.available_sessions}")
+            logger.info(f"   24/7 Markets Available: {aggregated_status.has_24_7_markets}")
+            logger.info(f"   Reason: {aggregated_status.reason}")
             
             # Store simplified status for backward compatibility
             self._last_market_status = type('MarketStatus', (), {
                 'bot_should_be_active': should_be_active,
-                'active_exchanges': active_exchanges,
-                'is_open': len(active_exchanges) > 0
+                'active_brokers': aggregated_status.active_brokers,
+                'is_open': len(aggregated_status.active_brokers) > 0 or aggregated_status.has_24_7_markets
             })()
             
             # Start market status monitoring loop
             self._market_status_monitoring_active = True
-            market_monitoring_task = asyncio.create_task(self._exchange_status_monitoring_loop())
+            market_monitoring_task = asyncio.create_task(self._dynamic_status_monitoring_loop())
             self.background_tasks.append(market_monitoring_task)
             
             # If bot should be active now, start components immediately
@@ -167,12 +168,14 @@ class TradingBotOrchestrator:
                 logger.info("🚀 Starting bot components immediately (market conditions favorable)")
                 await self._start_components()
                 self.is_running = True
-                logger.info("✅ Trading Bot System started with exchange-aware monitoring!")
+                logger.info("✅ Trading Bot System started with dynamic market hours monitoring!")
             else:
                 logger.info("💤 Bot components will start when market conditions are favorable")
-                logger.info("   Waiting for any supported exchange to open...")
+                if aggregated_status.next_market_activity:
+                    time_to_next = (aggregated_status.next_market_activity - datetime.now(timezone.utc)).total_seconds() / 60
+                    logger.info(f"   Next market activity in {time_to_next:.1f} minutes")
                 self.is_running = True  # Mark as running (in monitoring mode)
-                logger.info("✅ Trading Bot monitoring started, waiting for market session!")
+                logger.info("✅ Trading Bot monitoring started, waiting for market activity!")
             
             # Main event loop
             await self._run_main_loop()
@@ -181,46 +184,50 @@ class TradingBotOrchestrator:
             logger.error(f"Failed to start Alpaca-aware monitoring: {str(e)}")
             raise
     
-    async def _exchange_status_monitoring_loop(self) -> None:
+    async def _dynamic_status_monitoring_loop(self) -> None:
         """
-        Main monitoring loop that uses exchange-aware market hours to manage lifecycle.
-        Polls market status across all exchanges and manages component start/stop automatically.
+        Main monitoring loop that uses dynamic broker market status APIs to manage lifecycle.
+        Polls market status across all brokers and manages component start/stop automatically.
         """
         try:
-            logger.info("🔄 Exchange-aware status monitoring loop started")
+            logger.info("🔄 Dynamic broker status monitoring loop started")
             polling_interval = 60  # Check every minute
             
             while self.is_running and not self.shutdown_event.is_set():
                 try:
-                    # Check if bot should be active across all exchanges
-                    current_should_be_active = await self.market_hours_manager.should_bot_be_active()
-                    current_active_exchanges = await self.market_hours_manager.get_active_exchanges()
+                    # Get aggregated market status from all brokers
+                    current_status = await self.market_hours_manager.get_aggregated_market_status()
+                    current_should_be_active = current_status.should_bot_be_active
                     
                     # Check if status has changed significantly
                     last_should_be_active = getattr(self._last_market_status, 'bot_should_be_active', False)
-                    last_active_exchanges = getattr(self._last_market_status, 'active_exchanges', [])
+                    last_active_brokers = getattr(self._last_market_status, 'active_brokers', [])
                     
                     status_changed = (current_should_be_active != last_should_be_active or
-                                    set(current_active_exchanges) != set(last_active_exchanges))
+                                    set(current_status.active_brokers) != set(last_active_brokers))
                     
                     if status_changed:
                         logger.info("📊 MARKET STATUS CHANGE DETECTED:")
-                        logger.info(f"   Previous: active={last_should_be_active}, exchanges={[ex.value for ex in last_active_exchanges]}")
-                        logger.info(f"   Current:  active={current_should_be_active}, exchanges={[ex.value for ex in current_active_exchanges]}")
+                        logger.info(f"   Previous: active={last_should_be_active}, brokers={last_active_brokers}")
+                        logger.info(f"   Current:  active={current_should_be_active}, brokers={current_status.active_brokers}")
+                        logger.info(f"   Reason: {current_status.reason}")
                         
                         # Create status object for compatibility
-                        current_status = type('MarketStatus', (), {
+                        market_status = type('MarketStatus', (), {
                             'bot_should_be_active': current_should_be_active,
-                            'active_exchanges': current_active_exchanges,
-                            'is_open': len(current_active_exchanges) > 0
+                            'active_brokers': current_status.active_brokers,
+                            'is_open': len(current_status.active_brokers) > 0 or current_status.has_24_7_markets
                         })()
                         
-                        await self._handle_market_session_change(current_status)
-                        self._last_market_status = current_status
+                        await self._handle_market_session_change(market_status)
+                        self._last_market_status = market_status
                     
                     # Periodic status logging (every 10 minutes during monitoring)
                     elif asyncio.get_event_loop().time() % 600 < polling_interval:  # Roughly every 10 minutes
-                        logger.info(f"📊 Exchange Status: {len(current_active_exchanges)} active exchanges, bot_active={current_should_be_active}")
+                        active_count = len(current_status.active_brokers)
+                        logger.info(f"📊 Broker Status: {active_count} active brokers, bot_active={current_should_be_active}")
+                        if current_status.has_24_7_markets:
+                            logger.info("   24/7 markets keeping bot active")
                     
                     # Wait for next check
                     try:
@@ -1720,29 +1727,30 @@ class TradingBotOrchestrator:
                     # If market hours manager is available, use intelligent data fetching
                     if self.market_hours_manager:
                         try:
-                            # Check if any exchange is active
-                            should_be_active = await self.market_hours_manager.should_bot_be_active()
-                            active_exchanges = await self.market_hours_manager.get_active_exchanges()
+                            # Get aggregated market status from all brokers
+                            aggregated_status = await self.market_hours_manager.get_aggregated_market_status()
+                            should_be_active = aggregated_status.should_bot_be_active
+                            active_brokers = aggregated_status.active_brokers
                             
                             # Adjust update behavior based on market status
-                            if not active_exchanges:
-                                # No exchanges active - reduce update frequency significantly
+                            if not active_brokers and not aggregated_status.has_24_7_markets:
+                                # No brokers active and no 24/7 markets - reduce update frequency significantly
                                 should_update_data = False
                                 update_interval = 3600  # Check once per hour
-                                logger.debug("📊 No exchanges active: Reducing market data updates to hourly")
+                                logger.debug("📊 No active brokers or 24/7 markets: Reducing market data updates to hourly")
                                 
                             elif not should_be_active:
                                 # Markets closed - reduce update frequency
                                 update_interval = 600  # 10 minutes
                                 logger.debug("📊 Markets closed: Reducing market data updates to 10 minutes")
                                 
-                            elif len(active_exchanges) == 1:
-                                # One exchange active - moderate update frequency
+                            elif len(active_brokers) == 1:
+                                # One broker active - moderate update frequency
                                 update_interval = 180  # 3 minutes
-                                logger.debug("📊 One exchange active: Market data updates every 3 minutes")
+                                logger.debug("📊 One broker active: Market data updates every 3 minutes")
                                 
                             else:
-                                # Multiple exchanges or active session - normal frequency
+                                # Multiple brokers or active session - normal frequency
                                 update_interval = self.config.get_config("monitoring.market_data_refresh_interval", 60)
                                 logger.debug("📊 Market open: Normal market data update frequency")
                                 

@@ -485,182 +485,32 @@ development:
   auto_shutdown_hours: 0  # Auto-shutdown after X hours (0 = disabled)
   enable_admin_endpoints: true  # Enable admin shutdown endpoint
 
-# Exchange and Market Hours Configuration (Multi-Broker Support)
+# Market Hours Configuration - Dynamic Broker-Based System
 market_hours:
-  # Default exchange configuration (can be overridden per broker)
-  default_exchange: "NYSE"
+  # Polling and caching configuration
+  polling_interval_seconds: 60        # How often to check market status via broker APIs
+  enable_caching: true                # Cache broker responses for performance
+  cache_duration_seconds: 60          # Cache broker status for 1 minute
   
-  # Exchange-specific configurations
-  exchanges:
-    # US Stock Market (NYSE/NASDAQ)
-    NYSE:
-      timezone: "America/New_York"
-      regular_session:
-        start_time: "09:30"  # 9:30 AM ET
-        end_time: "16:00"    # 4:00 PM ET
-      extended_hours:
-        premarket:
-          enabled: true
-          start_time: "04:00"  # 4:00 AM ET
-          end_time: "09:30"    # 9:30 AM ET
-        postmarket:
-          enabled: true
-          start_time: "16:00"  # 4:00 PM ET
-          end_time: "20:00"    # 8:00 PM ET
-      weekend_trading: false
-      holidays_closed: true
-      
-    NASDAQ:
-      timezone: "America/New_York" 
-      regular_session:
-        start_time: "09:30"  # 9:30 AM ET
-        end_time: "16:00"    # 4:00 PM ET
-      extended_hours:
-        premarket:
-          enabled: true
-          start_time: "04:00"  # 4:00 AM ET
-          end_time: "09:30"    # 9:30 AM ET
-        postmarket:
-          enabled: true
-          start_time: "16:00"  # 4:00 PM ET
-          end_time: "20:00"    # 8:00 PM ET
-      weekend_trading: false
-      holidays_closed: true
-      
-    # London Stock Exchange
-    LSE:
-      timezone: "Europe/London"
-      regular_session:
-        start_time: "08:00"  # 8:00 AM GMT
-        end_time: "16:30"    # 4:30 PM GMT
-      extended_hours:
-        premarket:
-          enabled: false
-        postmarket:
-          enabled: false
-      weekend_trading: false
-      holidays_closed: true
-      
-    # Tokyo Stock Exchange
-    TSE:
-      timezone: "Asia/Tokyo"
-      regular_session:
-        start_time: "09:00"  # 9:00 AM JST
-        end_time: "15:00"    # 3:00 PM JST (with lunch break 11:30-12:30)
-      lunch_break:
-        start_time: "11:30"
-        end_time: "12:30"
-      extended_hours:
-        premarket:
-          enabled: false
-        postmarket:
-          enabled: false
-      weekend_trading: false
-      holidays_closed: true
-      
-    # Cryptocurrency (24/7)
-    CRYPTO:
-      timezone: "UTC"
-      regular_session:
-        start_time: "00:00"  # 24/7 trading
-        end_time: "23:59"
-      extended_hours:
-        premarket:
-          enabled: false  # N/A for 24/7 markets
-        postmarket:
-          enabled: false  # N/A for 24/7 markets
-      weekend_trading: true
-      holidays_closed: false
-      
-    # Forex (24/5)
-    FOREX:
-      timezone: "UTC"
-      regular_session:
-        start_time: "21:00"  # Sunday 21:00 UTC
-        end_time: "21:00"    # Friday 21:00 UTC
-      extended_hours:
-        premarket:
-          enabled: false
-        postmarket:
-          enabled: false
-      weekend_trading: false
-      holidays_closed: false
-      
-  # Broker-specific exchange mappings
-  broker_exchanges:
-    alpaca:
-      default_exchange: "NYSE"
-      supported_exchanges: ["NYSE", "NASDAQ"]
-      market_data_source: "alpaca_api"
-      
-    interactive_brokers:
-      default_exchange: "NYSE"
-      supported_exchanges: ["NYSE", "NASDAQ", "LSE", "TSE", "FOREX"]
-      market_data_source: "ib_api"
-      
-    mock:
-      default_exchange: "NYSE"
-      supported_exchanges: ["NYSE", "NASDAQ", "CRYPTO", "FOREX"]
-      market_data_source: "simulated"
-      
-  # Symbol-to-exchange mappings (override default exchange)
-  symbol_exchanges:
-    # US Stocks (NYSE)
-    TSLA: "NYSE"
-    AAPL: "NASDAQ"
-    GOOGL: "NASDAQ"
-    MSFT: "NASDAQ"
-    
-    # UK Stocks (LSE) - when available
-    # BARC.L: "LSE"
-    # LLOY.L: "LSE"
-    
-    # Japanese Stocks (TSE) - when available  
-    # 7203.T: "TSE"  # Toyota
-    # 6758.T: "TSE"  # Sony
-    
-    # Cryptocurrency
-    BTCUSD: "CRYPTO"
-    ETHUSD: "CRYPTO"
-    
-    # Forex
-    EURUSD: "FOREX"
-    GBPUSD: "FOREX"
-    
-  # Market hours data sources (broker-specific)
-  data_sources:
-    alpaca_api:
-      use_clock_api: true
-      use_calendar_api: true
-      cache_duration_minutes: 5
-      calendar_cache_hours: 24
-      retry_attempts: 3
-      timeout_seconds: 10
-      
-    ib_api:
-      use_trading_hours_api: true
-      cache_duration_minutes: 10
-      retry_attempts: 3
-      timeout_seconds: 15
-      
-    simulated:
-      use_system_time: true
-      respect_holidays: false
-      
-  # Buffer times for bot activation (applied to all exchanges)
-  buffers:
-    start_before_session_minutes: 15    # Start before market opens
-    stop_after_session_minutes: 15      # Stop after market closes
-    api_polling_interval_seconds: 300   # Check status every 5 minutes
-    
   # Operational controls
-  auto_start_stop: true
-  emergency_override: false  # Manual override for always-on mode
+  auto_start_stop: true               # Automatically start/stop bot based on market status
+  emergency_override: false           # Manual override for always-on mode
   
   # Error handling
-  fallback_on_api_failure: true
-  max_consecutive_api_failures: 3
-  fallback_to_static_schedule: true
+  fallback_on_api_failure: true       # Continue with stale data if broker API fails
+  max_consecutive_api_failures: 3     # Mark broker unhealthy after N API failures
+  
+  # Buffer times for bot activation (applied to all brokers)
+  buffers:
+    start_before_session_minutes: 15    # Start before market opens (if broker provides this info)
+    stop_after_session_minutes: 15      # Stop after market closes (if broker provides this info)
+    
+  # Symbol routing override (optional - broker will determine if not specified)
+  symbol_routing:
+    # Examples of explicit symbol-to-broker routing
+    # TSLA: "alpaca"      # Force TSLA to trade via Alpaca
+    # BTCUSD: "crypto_broker"  # Force crypto to specific broker
+    # Leave empty to let broker capabilities determine routing automatically
 
 # Extended Hours Trading Configuration (Legacy - replaced by market_hours)
 extended_hours:
