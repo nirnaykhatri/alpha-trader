@@ -108,9 +108,12 @@ class ConfigurationManager(IConfigurationManager):
     def _load_from_env(self) -> None:
         """Load configuration from environment variables."""
         env_mappings = {
-            f"{self._env_prefix}ALPACA_API_KEY": "api.alpaca.api_key",
-            f"{self._env_prefix}ALPACA_SECRET_KEY": "api.alpaca.secret_key",
-            f"{self._env_prefix}ALPACA_BASE_URL": "api.alpaca.base_url",
+            # Modern broker configuration
+            f"{self._env_prefix}ALPACA_API_KEY": "brokers.alpaca.api_key",
+            f"{self._env_prefix}ALPACA_SECRET_KEY": "brokers.alpaca.secret_key",
+            f"{self._env_prefix}ALPACA_BASE_URL": "brokers.alpaca.base_url",
+            f"{self._env_prefix}ALPACA_ENVIRONMENT": "brokers.alpaca.environment",
+            # Other configuration
             f"{self._env_prefix}WEBHOOK_SECRET": "api.webhook.secret",
             f"{self._env_prefix}WEBHOOK_PORT": "api.webhook.port",
             f"{self._env_prefix}DATABASE_URL": "database.url",
@@ -231,24 +234,42 @@ class ConfigurationManager(IConfigurationManager):
         """Get all configuration as dictionary."""
         return self._config.copy()
     
+    def get_broker_credentials(self, broker_name: str = "alpaca") -> Dict[str, Any]:
+        """
+        Get broker credentials from the modern broker configuration.
+        
+        Args:
+            broker_name: Name of the broker (e.g., 'alpaca')
+            
+        Returns:
+            Dictionary containing api_key, secret_key, base_url, environment
+        """
+        broker_config = self.get_config(f"brokers.{broker_name}", {})
+        if not broker_config.get("api_key") or not broker_config.get("secret_key"):
+            raise ConfigurationException(f"No valid {broker_name} API credentials found in brokers.{broker_name} section")
+        
+        logger.info(f"Using broker configuration for {broker_name}")
+        return {
+            "api_key": broker_config.get("api_key"),
+            "secret_key": broker_config.get("secret_key"),
+            "base_url": broker_config.get("base_url"),
+            "environment": broker_config.get("environment", "paper"),
+            "additional_params": broker_config.get("additional_params", {})
+        }
+
     def validate_required_config(self) -> None:
         """Validate that all required configuration is present."""
-        required_keys = [
-            "api.alpaca.api_key",
-            "api.alpaca.secret_key"
-        ]
+        # Validate broker credentials
+        try:
+            credentials = self.get_broker_credentials("alpaca")
+            if not credentials.get("api_key") or not credentials.get("secret_key"):
+                raise ConfigurationException("Alpaca API credentials are missing")
+        except ConfigurationException as e:
+            raise e
         
         # Only require webhook secret if security is enabled
         security_enabled = self.get_config("api.webhook.security_enabled", False)
         if security_enabled:
-            required_keys.append("api.webhook.secret")
-        
-        missing_keys = []
-        for key in required_keys:
-            if not self.get_config(key):
-                missing_keys.append(key)
-        
-        if missing_keys:
-            raise ConfigurationException(
-                f"Missing required configuration: {', '.join(missing_keys)}"
-            )
+            webhook_secret = self.get_config("api.webhook.secret")
+            if not webhook_secret:
+                raise ConfigurationException("Webhook security is enabled but api.webhook.secret is not configured")

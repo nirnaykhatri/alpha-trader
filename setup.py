@@ -127,9 +127,10 @@ def validate_config():
         
         config = ConfigurationManager()
         
-        # Check for required fields
-        api_key = config.get_config("api.alpaca.api_key")
-        secret_key = config.get_config("api.alpaca.secret_key")
+        # Check for required fields using consolidated credentials
+        credentials = config.get_broker_credentials("alpaca")
+        api_key = credentials["api_key"]
+        secret_key = credentials["secret_key"]
         webhook_secret = config.get_config("api.webhook.secret")
         
         if not api_key:

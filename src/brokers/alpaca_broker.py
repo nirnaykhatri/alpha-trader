@@ -242,7 +242,7 @@ class AlpacaTradingClient(ITradingClient):
                 pattern_day_trader=alpaca_account.pattern_day_trader,
                 trade_suspended_by_user=alpaca_account.trade_suspended_by_user,
                 trading_blocked=alpaca_account.trading_blocked,
-                raw_account_data=alpaca_account._raw
+                raw_account_data=alpaca_account.__dict__ if hasattr(alpaca_account, '__dict__') else {}
             )
             
         except Exception as e:

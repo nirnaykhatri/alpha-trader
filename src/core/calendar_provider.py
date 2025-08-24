@@ -55,10 +55,11 @@ class AlpacaCalendarProvider:
         """
         self._config = config
         
-        # Get Alpaca API credentials
-        self._api_key = config.get_config("api.alpaca.api_key")
-        self._secret_key = config.get_config("api.alpaca.secret_key")
-        self._base_url = config.get_config("api.alpaca.base_url", "https://paper-api.alpaca.markets")
+        # Get Alpaca API credentials using consolidated method
+        credentials = config.get_broker_credentials("alpaca")
+        self._api_key = credentials["api_key"]
+        self._secret_key = credentials["secret_key"]
+        self._base_url = credentials.get("base_url", "https://paper-api.alpaca.markets")
         
         if not self._api_key or not self._secret_key:
             raise MarketDataException("Alpaca API credentials required for calendar provider")

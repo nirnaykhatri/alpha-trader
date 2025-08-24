@@ -29,10 +29,6 @@ from .database import DatabaseManager
 # Utility imports
 from .utils import NgrokManager
 
-# Legacy API clients (for backward compatibility during migration)
-from alpaca.trading.client import TradingClient
-from alpaca.data.historical import StockHistoricalDataClient
-
 # Data models
 from . import TradingSignal, Order, Position, OrderType, OrderSide, OrderStatus, SignalType
 from .exceptions import TradingBotException, ConfigurationException, OrderExecutionException
@@ -81,14 +77,10 @@ class TradingBotOrchestrator:
         self._last_market_status: Optional[MarketStatusInfo] = None
         self._market_status_monitoring_active = False
         
-        # Legacy API clients (for backward compatibility during migration)
-        self.trading_client: Optional[TradingClient] = None
-        self.data_client: Optional[StockHistoricalDataClient] = None
-        
         # Ngrok manager for local development
         self.ngrok_manager: Optional[NgrokManager] = None
         
-        # State tracking
+        # Initialize state tracking with empty defaults to prevent None iteration errors
         self.active_positions: Dict[str, Position] = {}
         self.processed_signals: Dict[str, TradingSignal] = {}
         
@@ -126,7 +118,9 @@ class TradingBotOrchestrator:
                 await self._run_main_loop()
             
         except Exception as e:
+            import traceback
             logger.error(f"Failed to start trading bot: {str(e)}")
+            logger.error(f"Full traceback: {traceback.format_exc()}")
             await self.stop()
             raise
     
@@ -144,18 +138,28 @@ class TradingBotOrchestrator:
             # Get aggregated market status for logging
             aggregated_status = await self.market_hours_manager.get_aggregated_market_status()
             
+            # Add null safety for aggregated_status
+            if aggregated_status is None:
+                logger.error("❌ Market hours manager returned None status - falling back to legacy mode")
+                await self._start_components_legacy()
+                self.is_running = True
+                logger.info("Trading Bot System started (legacy fallback mode)!")
+                await self._run_main_loop()
+                return
+            
             logger.info(f"📊 INITIAL MARKET STATUS:")
             logger.info(f"   Bot Should Be Active: {should_be_active}")
-            logger.info(f"   Active Brokers: {aggregated_status.active_brokers}")
-            logger.info(f"   Available Sessions: {aggregated_status.available_sessions}")
-            logger.info(f"   24/7 Markets Available: {aggregated_status.has_24_7_markets}")
-            logger.info(f"   Reason: {aggregated_status.reason}")
+            logger.info(f"   Active Brokers: {aggregated_status.active_brokers or []}")
+            logger.info(f"   Available Sessions: {aggregated_status.available_sessions or []}")
+            logger.info(f"   24/7 Markets Available: {getattr(aggregated_status, 'has_24_7_markets', False)}")
+            logger.info(f"   Reason: {getattr(aggregated_status, 'reason', 'No reason provided')}")
             
             # Store simplified status for backward compatibility
+            active_brokers_list = getattr(aggregated_status, 'active_brokers', None) or []
             self._last_market_status = type('MarketStatus', (), {
                 'bot_should_be_active': should_be_active,
-                'active_brokers': aggregated_status.active_brokers,
-                'is_open': len(aggregated_status.active_brokers) > 0 or aggregated_status.has_24_7_markets
+                'active_brokers': active_brokers_list,
+                'is_open': len(active_brokers_list) > 0 or getattr(aggregated_status, 'has_24_7_markets', False)
             })()
             
             # Start market status monitoring loop
@@ -197,26 +201,34 @@ class TradingBotOrchestrator:
                 try:
                     # Get aggregated market status from all brokers
                     current_status = await self.market_hours_manager.get_aggregated_market_status()
-                    current_should_be_active = current_status.should_bot_be_active
+                    
+                    # Handle None status gracefully
+                    if current_status is None:
+                        logger.warning("⚠️ Market hours manager returned None status, skipping update")
+                        await asyncio.sleep(polling_interval)
+                        continue
+                    
+                    current_should_be_active = getattr(current_status, 'should_bot_be_active', False)
                     
                     # Check if status has changed significantly
                     last_should_be_active = getattr(self._last_market_status, 'bot_should_be_active', False)
-                    last_active_brokers = getattr(self._last_market_status, 'active_brokers', [])
+                    last_active_brokers = getattr(self._last_market_status, 'active_brokers', []) or []
+                    current_active_brokers = getattr(current_status, 'active_brokers', None) or []
                     
                     status_changed = (current_should_be_active != last_should_be_active or
-                                    set(current_status.active_brokers) != set(last_active_brokers))
+                                    set(current_active_brokers) != set(last_active_brokers))
                     
                     if status_changed:
                         logger.info("📊 MARKET STATUS CHANGE DETECTED:")
                         logger.info(f"   Previous: active={last_should_be_active}, brokers={last_active_brokers}")
-                        logger.info(f"   Current:  active={current_should_be_active}, brokers={current_status.active_brokers}")
-                        logger.info(f"   Reason: {current_status.reason}")
+                        logger.info(f"   Current:  active={current_should_be_active}, brokers={current_active_brokers}")
+                        logger.info(f"   Reason: {getattr(current_status, 'reason', 'No reason provided')}")
                         
                         # Create status object for compatibility
                         market_status = type('MarketStatus', (), {
                             'bot_should_be_active': current_should_be_active,
-                            'active_brokers': current_status.active_brokers,
-                            'is_open': len(current_status.active_brokers) > 0 or current_status.has_24_7_markets
+                            'active_brokers': current_active_brokers,
+                            'is_open': len(current_active_brokers) > 0 or getattr(current_status, 'has_24_7_markets', False)
                         })()
                         
                         await self._handle_market_session_change(market_status)
@@ -443,12 +455,9 @@ class TradingBotOrchestrator:
         await self.broker_manager.initialize()
         
         # Log broker status
-        available_brokers = self.broker_manager.get_available_brokers()
-        logger.info(f"✅ BrokerManager initialized with {len(available_brokers)} brokers: {[b.value for b in available_brokers]}")
-        
-        # Initialize legacy API clients for backward compatibility
-        # TODO: Phase out once all components are updated to use BrokerManager
-        self._initialize_legacy_api_clients()
+        available_brokers = self.broker_manager.get_available_brokers() or []
+        broker_names = [b.value for b in available_brokers] if available_brokers else []
+        logger.info(f"✅ BrokerManager initialized with {len(available_brokers)} brokers: {broker_names}")
         
         # Initialize database
         self.database = DatabaseManager(self.config)
@@ -473,7 +482,7 @@ class TradingBotOrchestrator:
                 self.extended_hours_manager = ExtendedHoursManager(
                     self.config, 
                     self.market_hours_manager,
-                    self.trading_client  # Legacy client for now
+                    None  # No legacy client needed anymore
                 )
                 
                 # For backward compatibility, extended hours manager integration
@@ -488,17 +497,28 @@ class TradingBotOrchestrator:
             self.market_hours_manager = None
             self.extended_hours_manager = None
         
-        # Initialize position manager with trading client for Alpaca sync
-        self.position_manager = PositionManager(self.config, self.database, self.trading_client)
+        # Initialize position manager (no legacy client needed)
+        self.position_manager = PositionManager(self.config, self.database, None)
         
-        # Initialize account provider for real-time balance information
-        self.account_provider = AlpacaAccountProvider(self.trading_client)
+        # Initialize account provider using BrokerManager's Alpaca client
+        alpaca_broker = self.broker_manager.get_broker_provider("alpaca") if self.broker_manager else None
+        if alpaca_broker:
+            # Get the trading client from the Alpaca broker
+            alpaca_trading_client = getattr(alpaca_broker, '_trading_client', None)
+            self.account_provider = AlpacaAccountProvider(alpaca_trading_client) if alpaca_trading_client else None
+        else:
+            logger.warning("⚠️ No Alpaca broker available - account provider disabled")
+            self.account_provider = None
         
         # Initialize risk manager with account provider
         self.risk_manager = RiskManager(self.config, self.position_manager, self.account_provider)
         
-        # Initialize order manager (TODO: migrate to use BrokerManager)
-        self.order_manager = OrderManager(self.config, self.trading_client)
+        # Initialize order manager using BrokerManager's Alpaca client
+        if alpaca_broker and alpaca_trading_client:
+            self.order_manager = OrderManager(self.config, alpaca_trading_client)
+        else:
+            logger.warning("⚠️ No Alpaca trading client available - order manager disabled")
+            self.order_manager = None
         
         # Initialize strategy components
         self.support_calculator = TechnicalSupportCalculator(self.config, self.market_data)
@@ -536,34 +556,6 @@ class TradingBotOrchestrator:
         
         logger.info("All components initialized successfully with multi-broker support")
     
-    def _initialize_legacy_api_clients(self) -> None:
-        """Initialize legacy Alpaca API clients for backward compatibility."""
-        logger.info("🔄 Initializing legacy Alpaca clients for backward compatibility...")
-        
-        api_key = self.config.get_config("api.alpaca.api_key")
-        secret_key = self.config.get_config("api.alpaca.secret_key")
-        base_url = self.config.get_config("api.alpaca.base_url")
-        
-        if not api_key or not secret_key:
-            raise ConfigurationException("Alpaca API credentials are required for legacy compatibility")
-        
-        # Initialize trading client
-        self.trading_client = TradingClient(
-            api_key=api_key,
-            secret_key=secret_key,
-            paper=True if "paper" in base_url else False
-        )
-        
-        # Initialize data client
-        self.data_client = StockHistoricalDataClient(api_key, secret_key)
-        
-        logger.info("Legacy API clients initialized")
-    
-    # TODO: Remove this method once all components are migrated to BrokerManager
-    def _initialize_api_clients(self) -> None:
-        """Legacy method - use _initialize_legacy_api_clients instead."""
-        return self._initialize_legacy_api_clients()
-    
     async def _validate_configuration(self) -> None:
         """Validate configuration and check API connections."""
         logger.info("Validating configuration...")
@@ -594,13 +586,6 @@ class TradingBotOrchestrator:
                     logger.warning("⚠️ No brokers available in BrokerManager")
                 else:
                     logger.info(f"✅ BrokerManager connected with {len(available_brokers)} brokers")
-            
-            # Test legacy trading client for backward compatibility
-            if self.trading_client:
-                account = await asyncio.get_event_loop().run_in_executor(
-                    None, self.trading_client.get_account
-                )
-                logger.info(f"Legacy Trading API connected - Account: {account.account_number}")
             
             # Test market data
             if self.market_data:

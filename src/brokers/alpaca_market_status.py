@@ -5,13 +5,17 @@ Implements dynamic market status using Alpaca's Clock and Calendar APIs.
 
 import asyncio
 from datetime import datetime, timezone, time as dt_time
-from typing import Set, Optional, Any
+from typing import Set, Optional, Any, Dict
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import aiohttp
+import pytz
+import requests
 from alpaca.trading.client import TradingClient
 from alpaca.trading.models import Clock, Calendar
+from alpaca.trading.requests import GetCalendarRequest
+from alpaca.common.exceptions import APIError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from ..core.dynamic_market_hours import (
@@ -31,8 +35,21 @@ class AlpacaDynamicMarketStatusProvider(IBrokerMarketStatusProvider):
         self.trading_client = trading_client
         self.config = config
         
+        # Get API credentials for direct REST calls
+        self._api_key = getattr(trading_client, '_api_key', None)
+        self._api_secret = getattr(trading_client, '_secret_key', None)
+        self._base_url = getattr(trading_client, '_base_url', 'https://paper-api.alpaca.markets')
+        
         # Thread pool for blocking API calls
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="alpaca-api")
+        
+        # Cache for API responses
+        self._cache = {}
+        self._cache_ttl = 300  # 5 minutes cache
+        self._last_cache_time = None
+        
+        # Timezone setup
+        self.eastern_tz = pytz.timezone('America/New_York')
         
         # Alpaca supports US stock markets with extended hours
         self._supported_symbols = None  # Will be loaded dynamically
@@ -49,6 +66,81 @@ class AlpacaDynamicMarketStatusProvider(IBrokerMarketStatusProvider):
         self._postmarket_end = dt_time(20, 0)  # 8:00 PM ET
         
         logger.info("🕐 Alpaca Dynamic Market Status Provider initialized")
+
+    def _is_cache_valid(self) -> bool:
+        """Check if cached data is still valid"""
+        if not self._last_cache_time or not self._cache:
+            return False
+        
+        cache_age = (datetime.now() - self._last_cache_time).total_seconds()
+        return cache_age < self._cache_ttl
+
+    async def _call_calendar_api_directly(self, start_date: str, end_date: str) -> Optional[list]:
+        """Call Alpaca Calendar API directly via REST since SDK doesn't expose it."""
+        try:
+            # Get API credentials from config if not available from client
+            if not self._api_key or not self._api_secret:
+                # Try to get from config
+                try:
+                    broker_config = self.config.get_config("brokers.alpaca", {})
+                    self._api_key = broker_config.get("api_key")
+                    self._api_secret = broker_config.get("secret_key")
+                    self._base_url = broker_config.get("base_url", "https://paper-api.alpaca.markets")
+                    logger.debug(f"🔑 Got API credentials from config, base_url: {self._base_url}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not get credentials from config: {e}")
+            
+            if not self._api_key or not self._api_secret:
+                logger.warning("⚠️ API credentials not available for direct calendar call")
+                logger.debug(f"API key present: {bool(self._api_key)}, Secret present: {bool(self._api_secret)}")
+                return None
+            
+            # Check if using placeholder credentials
+            if self._api_key == "REPLACE_WITH_YOUR_ACTUAL_API_KEY":
+                logger.warning("⚠️ Using placeholder API credentials - calendar API will fail")
+                return None
+            
+            # Prepare headers for Alpaca API
+            headers = {
+                "APCA-API-KEY-ID": self._api_key,
+                "APCA-API-SECRET-KEY": self._api_secret,
+                "Content-Type": "application/json"
+            }
+            
+            # Make direct REST call to calendar endpoint
+            url = f"{self._base_url}/v2/calendar"
+            params = {
+                "start": start_date,
+                "end": end_date
+            }
+            
+            logger.debug(f"📞 Making calendar API call to {url} with params {params}")
+            
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self._executor,
+                lambda: requests.get(url, headers=headers, params=params, timeout=10)
+            )
+            
+            logger.debug(f"📞 Calendar API response: status={response.status_code}")
+            
+            if response.status_code == 200:
+                calendar_data = response.json()
+                logger.info(f"✅ Got calendar data from direct REST call: {len(calendar_data)} entries")
+                return calendar_data
+            elif response.status_code == 403:
+                logger.error("❌ Calendar API access forbidden - check API credentials")
+                logger.debug(f"Response: {response.text}")
+                return None
+            else:
+                logger.warning(f"⚠️ Calendar API returned status {response.status_code}: {response.text}")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Direct calendar API call failed: {e}")
+            import traceback
+            logger.debug(f"Full traceback: {traceback.format_exc()}")
+            return None
     
     async def _load_supported_symbols(self) -> Set[str]:
         """Load supported symbols from Alpaca Assets API or use default set."""
@@ -81,7 +173,9 @@ class AlpacaDynamicMarketStatusProvider(IBrokerMarketStatusProvider):
             
         except Exception as e:
             logger.error(f"❌ Error loading supported symbols: {e}")
-            return self._get_default_symbol_set()
+            default_set = self._get_default_symbol_set()
+            # Ensure we never return None - this is critical for system stability
+            return default_set if default_set is not None else set()
     
     def _get_default_symbol_set(self) -> Set[str]:
         """Get default set of symbols for fallback."""
@@ -110,41 +204,143 @@ class AlpacaDynamicMarketStatusProvider(IBrokerMarketStatusProvider):
     async def _fetch_alpaca_assets(self) -> Set[str]:
         """Fetch tradeable assets from Alpaca API."""
         try:
-            # Run blocking API call in thread pool
+            # Try SDK methods first
             loop = asyncio.get_event_loop()
-            assets = await loop.run_in_executor(
-                self._executor,
-                lambda: self.trading_client.get_all_assets(status="active", asset_class="us_equity")
-            )
+            assets = None
+            
+            # Try different method names for getting assets
+            if hasattr(self.trading_client, 'get_all_assets'):
+                try:
+                    assets = await loop.run_in_executor(
+                        self._executor,
+                        lambda: self.trading_client.get_all_assets(status="active", asset_class="us_equity")
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ get_all_assets failed: {e}")
+            elif hasattr(self.trading_client, 'get_assets'):
+                try:
+                    assets = await loop.run_in_executor(
+                        self._executor,
+                        lambda: self.trading_client.get_assets(status="active", asset_class="us_equity")
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ get_assets failed: {e}")
+            
+            # If SDK methods failed or don't exist, try direct REST API call
+            if not assets:
+                logger.info("📞 Trying direct REST API call for assets")
+                assets = await self._call_assets_api_directly()
             
             # Extract symbols
-            symbols = {asset.symbol for asset in assets if asset.tradable and asset.shortable}
-            return symbols
+            if assets:
+                if isinstance(assets, list):
+                    symbols = {asset.symbol for asset in assets if hasattr(asset, 'tradable') and asset.tradable and hasattr(asset, 'shortable') and asset.shortable}
+                else:
+                    # If it's a different format, try to handle it
+                    symbols = set()
+                
+                if symbols:
+                    logger.info(f"✅ Successfully fetched {len(symbols)} tradeable symbols")
+                    return symbols
+            
+            # If everything failed, fall back to empty set (will use defaults)
+            logger.warning("⚠️ No assets method available on trading client, using default symbols")
+            return set()
             
         except Exception as e:
             logger.warning(f"⚠️ Failed to fetch Alpaca assets: {e}")
             return set()
     
-    async def get_market_status(self) -> BrokerMarketStatus:
-        """Get current market status from Alpaca Clock API."""
+    async def _call_assets_api_directly(self) -> Optional[list]:
+        """Call Alpaca Assets API directly via REST."""
         try:
-            # Get current market clock from Alpaca
-            clock = await self._get_alpaca_clock()
+            # Get API credentials
+            if not self._api_key or not self._api_secret:
+                try:
+                    broker_config = self.config.get_config("brokers.alpaca", {})
+                    self._api_key = broker_config.get("api_key")
+                    self._api_secret = broker_config.get("secret_key")
+                    self._base_url = broker_config.get("base_url", "https://paper-api.alpaca.markets")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not get credentials for assets API: {e}")
+                    return None
+            
+            if not self._api_key or not self._api_secret or self._api_key == "REPLACE_WITH_YOUR_ACTUAL_API_KEY":
+                logger.debug("⚠️ API credentials not available for direct assets call")
+                return None
+            
+            # Prepare headers for Alpaca API
+            headers = {
+                "APCA-API-KEY-ID": self._api_key,
+                "APCA-API-SECRET-KEY": self._api_secret,
+                "Content-Type": "application/json"
+            }
+            
+            # Make direct REST call to assets endpoint
+            url = f"{self._base_url}/v2/assets"
+            params = {
+                "status": "active",
+                "asset_class": "us_equity"
+            }
+            
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self._executor,
+                lambda: requests.get(url, headers=headers, params=params, timeout=15)
+            )
+            
+            if response.status_code == 200:
+                assets_data = response.json()
+                logger.debug(f"✅ Got {len(assets_data)} assets from direct REST call")
+                
+                # Convert to mock objects with necessary attributes
+                mock_assets = []
+                for asset_data in assets_data:
+                    if asset_data.get('tradable') and asset_data.get('shortable'):
+                        mock_asset = type('Asset', (), {
+                            'symbol': asset_data.get('symbol'),
+                            'tradable': asset_data.get('tradable', False),
+                            'shortable': asset_data.get('shortable', False)
+                        })()
+                        mock_assets.append(mock_asset)
+                
+                return mock_assets
+            else:
+                logger.debug(f"⚠️ Assets API returned status {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.debug(f"⚠️ Direct assets API call failed: {e}")
+            return None
+    
+    async def get_market_status(self) -> BrokerMarketStatus:
+        """Get current market status from Alpaca Calendar API."""
+        try:
+            # Get current market clock data from Alpaca
+            clock_data = await self._get_alpaca_clock()
+            
+            if not clock_data:
+                # If we can't get clock data, fall back to default closed state
+                clock_data = self._get_fallback_clock()
             
             # Determine current session using improved logic
-            current_session = self._determine_session_from_clock(clock)
+            current_session = self._determine_session_from_clock(clock_data)
             
             # Get next market open/close times
-            next_open, next_close = await self._get_next_market_times(clock)
+            next_open, next_close = await self._get_next_market_times(clock_data)
             
             # Ensure we have supported symbols
             supported_symbols = await self._load_supported_symbols()
+            # Critical safety check - supported_symbols must never be None
+            if supported_symbols is None:
+                logger.error("❌ CRITICAL: supported_symbols was None, using empty set")
+                supported_symbols = set()
             
             return BrokerMarketStatus(
                 broker_type="alpaca",
-                is_market_open=clock.is_open,
+                is_market_open=clock_data.get('is_open', False),
                 current_session=current_session,
-                is_trading_day=not clock.is_open or current_session != TradingSession.CLOSED,
+                is_trading_day=not clock_data.get('is_open', False) or current_session != TradingSession.CLOSED,
                 supported_symbols=supported_symbols,
                 next_market_open=next_open,
                 next_market_close=next_close,
@@ -156,7 +352,20 @@ class AlpacaDynamicMarketStatusProvider(IBrokerMarketStatusProvider):
             
         except Exception as e:
             logger.error(f"❌ Failed to get Alpaca market status: {e}")
-            raise
+            # Return a safe fallback status instead of crashing the system
+            return BrokerMarketStatus(
+                broker_type="alpaca",
+                is_market_open=False,  # Conservative assumption
+                current_session=TradingSession.CLOSED,
+                is_trading_day=False,
+                supported_symbols=self._get_default_symbol_set(),  # Use default symbols
+                next_market_open=None,
+                next_market_close=None,
+                extended_hours_available=False,
+                weekend_trading_available=False,
+                market_timezone="America/New_York",
+                last_updated=datetime.now(timezone.utc)
+            )
     
     async def is_symbol_tradeable_now(self, symbol: str) -> bool:
         """Check if a specific symbol is tradeable right now via Alpaca."""
@@ -198,36 +407,189 @@ class AlpacaDynamicMarketStatusProvider(IBrokerMarketStatusProvider):
     def supports_weekend_trading(self) -> bool:
         """Check if broker supports weekend trading (crypto)."""
         return self._supports_weekend_trading
-    
+
+    def _get_fallback_clock(self) -> Dict[str, Any]:
+        """Fallback method when API calls fail"""
+        try:
+            now = datetime.now(timezone.utc)
+            eastern_now = now.astimezone(self.eastern_tz)
+            
+            # Simple market hours check (9:30 AM - 4:00 PM ET, Mon-Fri)
+            is_weekday = eastern_now.weekday() < 5  # 0-4 are Mon-Fri
+            is_market_hours = 9.5 <= eastern_now.hour + eastern_now.minute/60.0 <= 16.0
+            is_open = is_weekday and is_market_hours
+            
+            clock_data = {
+                'timestamp': now.isoformat(),
+                'is_open': is_open,
+                'next_open': None,
+                'next_close': None,
+                'timezone': 'America/New_York',
+                'fallback': True
+            }
+            
+            logger.warning("⚠️ Using fallback market status calculation")
+            logger.info("💡 To use real-time market data, add valid Alpaca API credentials to config.yaml")
+            return clock_data
+            
+        except Exception as e:
+            logger.error(f"❌ Even fallback clock failed: {e}")
+            # Ultimate fallback
+            return {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'is_open': False,
+                'next_open': None,
+                'next_close': None,
+                'timezone': 'America/New_York',
+                'fallback': True,
+                'error': True
+            }
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
         retry=retry_if_exception_type((ConnectionError, TimeoutError, Exception))
     )
-    async def _get_alpaca_clock(self) -> Clock:
-        """Get current market clock from Alpaca API with retry logic."""
+    async def _get_alpaca_clock(self) -> Optional[Dict[str, Any]]:
+        """Get current market clock using Alpaca Calendar API since get_clock is not available."""
         try:
-            # Run blocking API call in thread pool to avoid blocking event loop
-            loop = asyncio.get_event_loop()
-            clock = await loop.run_in_executor(
-                self._executor,
-                self.trading_client.get_clock
-            )
-            return clock
+            # Check cache first
+            if self._is_cache_valid():
+                return self._cache.get('clock')
+            
+            # Try to get market calendar which includes current market status
+            current_date = datetime.now(self.eastern_tz).date()
+            date_str = current_date.strftime('%Y-%m-%d')
+            
+            # First try the SDK method if available
+            calendar_data = None
+            if hasattr(self.trading_client, 'get_calendar'):
+                try:
+                    calendar_request = GetCalendarRequest(
+                        start=current_date,
+                        end=current_date
+                    )
+                    
+                    loop = asyncio.get_event_loop()
+                    calendar_data = await loop.run_in_executor(
+                        self._executor,
+                        self.trading_client.get_calendar,
+                        calendar_request
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️ SDK calendar method failed: {e}")
+                    calendar_data = None
+            
+            # If SDK method failed or doesn't exist, try direct REST API call
+            if not calendar_data:
+                logger.info("📞 Using direct REST API call to get calendar data")
+                rest_calendar_data = await self._call_calendar_api_directly(date_str, date_str)
+                
+                if rest_calendar_data:
+                    # Convert REST response to format similar to SDK
+                    calendar_data = []
+                    for day_data in rest_calendar_data:
+                        # Parse the time strings from REST API response
+                        open_time_str = day_data.get('open', '09:30')
+                        close_time_str = day_data.get('close', '16:00')
+                        
+                        # Convert to time objects
+                        from datetime import time as dt_time
+                        open_parts = open_time_str.split(':')
+                        close_parts = close_time_str.split(':')
+                        
+                        calendar_entry = type('CalendarEntry', (), {
+                            'open': dt_time(int(open_parts[0]), int(open_parts[1])),
+                            'close': dt_time(int(close_parts[0]), int(close_parts[1])),
+                            'date': day_data.get('date')
+                        })()
+                        
+                        calendar_data.append(calendar_entry)
+                else:
+                    logger.warning("⚠️ Both SDK and REST calendar methods failed, using fallback")
+                    return self._get_fallback_clock()
+            
+            if calendar_data and len(calendar_data) > 0:
+                today_calendar = calendar_data[0]
+                
+                # Create clock-like data structure
+                now = datetime.now(timezone.utc)
+                eastern_now = now.astimezone(self.eastern_tz)
+                
+                # Check if market is currently open
+                market_open = today_calendar.open
+                market_close = today_calendar.close
+                
+                # Convert to datetime objects if they're not already
+                if hasattr(market_open, 'replace'):
+                    market_open_dt = eastern_now.replace(
+                        hour=market_open.hour,
+                        minute=market_open.minute,
+                        second=0,
+                        microsecond=0
+                    )
+                else:
+                    market_open_dt = market_open
+                    
+                if hasattr(market_close, 'replace'):
+                    market_close_dt = eastern_now.replace(
+                        hour=market_close.hour,
+                        minute=market_close.minute,
+                        second=0,
+                        microsecond=0
+                    )
+                else:
+                    market_close_dt = market_close
+                
+                is_open = market_open_dt <= eastern_now <= market_close_dt
+                
+                clock_data = {
+                    'timestamp': now.isoformat(),
+                    'is_open': is_open,
+                    'next_open': market_open_dt.isoformat() if not is_open and eastern_now < market_open_dt else None,
+                    'next_close': market_close_dt.isoformat() if is_open else None,
+                    'timezone': 'America/New_York'
+                }
+                
+                # Update cache
+                self._cache['clock'] = clock_data
+                self._last_cache_time = datetime.now()
+                
+                logger.debug(f"📅 Retrieved market status: open={is_open}")
+                return clock_data
+            
+            else:
+                # Fallback: assume market is closed if no calendar data
+                now = datetime.now(timezone.utc)
+                clock_data = {
+                    'timestamp': now.isoformat(),
+                    'is_open': False,
+                    'next_open': None,
+                    'next_close': None,
+                    'timezone': 'America/New_York'
+                }
+                
+                self._cache['clock'] = clock_data
+                self._last_cache_time = datetime.now()
+                
+                logger.warning("⚠️ No calendar data available, assuming market closed")
+                return clock_data
+                
+        except APIError as e:
+            logger.error(f"❌ Alpaca API error getting market status: {e}")
+            return self._get_fallback_clock()
         except Exception as e:
-            logger.error(f"❌ Failed to get Alpaca clock: {e}")
-            raise
+            logger.error(f"❌ Failed to get Alpaca market status: {e}")
+            return self._get_fallback_clock()
     
-    def _determine_session_from_clock(self, clock: Clock) -> TradingSession:
-        """Determine current trading session from Alpaca clock using proper logic."""
-        if not clock.is_open:
+    def _determine_session_from_clock(self, clock_data: Dict[str, Any]) -> TradingSession:
+        """Determine current trading session from clock data using proper logic."""
+        if not clock_data.get('is_open', False):
             return TradingSession.CLOSED
         
         # Market is open - determine if regular or extended hours
         # Convert current time to Eastern (where US markets operate)
-        from zoneinfo import ZoneInfo
-        et_tz = ZoneInfo("America/New_York")
-        current_et = datetime.now(et_tz).time()
+        current_et = datetime.now(self.eastern_tz).time()
         
         # Determine session based on Eastern Time
         if self._regular_open <= current_et <= self._regular_close:
@@ -241,9 +603,32 @@ class AlpacaDynamicMarketStatusProvider(IBrokerMarketStatusProvider):
             logger.warning(f"⚠️ Market reported as open but time {current_et} doesn't match any session")
             return TradingSession.CLOSED
     
-    async def _get_next_market_times(self, clock: Clock) -> tuple[Optional[datetime], Optional[datetime]]:
-        """Get next market open and close times."""
+    async def _get_next_market_times(self, clock_data: Dict[str, Any]) -> tuple[Optional[datetime], Optional[datetime]]:
+        """Get next market open and close times from clock data."""
         try:
+            next_open_str = clock_data.get('next_open')
+            next_close_str = clock_data.get('next_close')
+            
+            next_open = None
+            next_close = None
+            
+            if next_open_str:
+                try:
+                    next_open = datetime.fromisoformat(next_open_str.replace('Z', '+00:00'))
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not parse next_open time: {e}")
+                    
+            if next_close_str:
+                try:
+                    next_close = datetime.fromisoformat(next_close_str.replace('Z', '+00:00'))
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not parse next_close time: {e}")
+            
+            return next_open, next_close
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting next market times: {e}")
+            return None, None
             # Convert Alpaca times to UTC
             next_open = clock.next_open.replace(tzinfo=timezone.utc) if clock.next_open else None
             next_close = clock.next_close.replace(tzinfo=timezone.utc) if clock.next_close else None

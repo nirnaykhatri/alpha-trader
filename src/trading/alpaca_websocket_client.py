@@ -39,10 +39,11 @@ class AlpacaWebSocketClient:
         self._is_connected = False
         self._subscribed_symbols = set()
         
-        # Configuration
-        self._api_key = config.get_config("api.alpaca.api_key")
-        self._secret_key = config.get_config("api.alpaca.secret_key")
-        self._base_url = config.get_config("api.alpaca.base_url")
+        # Configuration using consolidated credentials
+        credentials = config.get_broker_credentials("alpaca")
+        self._api_key = credentials["api_key"]
+        self._secret_key = credentials["secret_key"]
+        self._base_url = credentials.get("base_url", "https://paper-api.alpaca.markets")
         self._feed = config.get_config("api.alpaca.websocket.market_data_feed", "iex")
         self._auto_reconnect = config.get_config("api.alpaca.websocket.auto_reconnect", True)
         self._heartbeat_interval = config.get_config("api.alpaca.websocket.heartbeat_interval", 30)

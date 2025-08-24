@@ -120,6 +120,20 @@ class BrokerRouter(IBrokerRouter):
         self._broker_providers = broker_providers
         logger.info(f"✅ Broker router configured with {len(broker_providers)} providers")
     
+    def get_broker_provider(self, broker_type: str) -> Optional['IBrokerProvider']:
+        """Get a specific broker provider by type."""
+        from .broker_interfaces import BrokerType
+        
+        # Convert string to BrokerType enum if needed
+        if isinstance(broker_type, str):
+            try:
+                broker_type = BrokerType(broker_type.lower())
+            except ValueError:
+                logger.warning(f"Invalid broker type: {broker_type}")
+                return None
+        
+        return self._broker_providers.get(broker_type)
+    
     async def get_broker_for_symbol(self, symbol: str) -> BrokerType:
         """Get the appropriate broker for a symbol."""
         # Check if symbol has specific mapping
@@ -226,6 +240,20 @@ class BrokerManager:
         self._is_initialized = True
         logger.info(f"✅ BrokerManager initialized with {len(self._broker_providers)} brokers")
     
+    def get_broker_provider(self, broker_type: str) -> Optional['IBrokerProvider']:
+        """Get a specific broker provider by type."""
+        from .broker_interfaces import BrokerType
+        
+        # Convert string to BrokerType enum if needed
+        if isinstance(broker_type, str):
+            try:
+                broker_type = BrokerType(broker_type.lower())
+            except ValueError:
+                logger.warning(f"Invalid broker type: {broker_type}")
+                return None
+        
+        return self._broker_providers.get(broker_type)
+    
     async def _register_market_status_provider(self, broker_type: BrokerType, provider: IBrokerProvider) -> None:
         """Register a market status provider for dynamic market hours."""
         try:
@@ -299,6 +327,11 @@ class BrokerManager:
     async def _load_symbol_mappings(self) -> None:
         """Load symbol-to-broker mappings from configuration."""
         symbol_mappings = self._config.get_config("symbol_broker_mappings", [])
+        
+        # Ensure symbol_mappings is never None - critical for iteration
+        if symbol_mappings is None:
+            logger.warning("⚠️ symbol_mappings was None, using empty list")
+            symbol_mappings = []
         
         for mapping_config in symbol_mappings:
             try:

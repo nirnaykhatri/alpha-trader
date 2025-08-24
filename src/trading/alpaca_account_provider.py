@@ -29,6 +29,14 @@ class AlpacaAccountProvider(IAccountProvider):
         
         logger.info("AlpacaAccountProvider initialized")
     
+    async def get_account(self):
+        """Get account information - public method for external access."""
+        try:
+            return await self._get_account()
+        except Exception as e:
+            logger.error(f"❌ Failed to get account info: {e}")
+            raise
+    
     async def get_account_value(self) -> float:
         """Get current account equity value."""
         try:

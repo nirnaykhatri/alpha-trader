@@ -7,8 +7,8 @@ brokers:
   # Primary Alpaca broker configuration
   alpaca:
     enabled: true
-    api_key: "YOUR_API_KEY"  # Your Alpaca API key
-    secret_key: "YOUR_SECRET_KEY"  # Your Alpaca secret key
+    api_key: "REPLACE_WITH_YOUR_ACTUAL_API_KEY"  # Your Alpaca API key (starts with PK)
+    secret_key: "REPLACE_WITH_YOUR_ACTUAL_SECRET_KEY"  # Your Alpaca secret key (40 chars)
     base_url: "https://paper-api.alpaca.markets"  # Paper trading URL
     # For live trading, use: "https://api.alpaca.markets"
     environment: "paper"  # "paper" or "live"
@@ -63,15 +63,13 @@ broker_management:
   operation_timeout_seconds: 10
   max_concurrent_operations: 50
 
-# Legacy API Configuration (for backward compatibility)
-api:
-  alpaca:
-    # These settings are now managed by the brokers section above
-    # Kept for backward compatibility with existing components
-    api_key: "YOUR_API_KEY"  # Your Alpaca API key
-    secret_key: "YOUR_SECRET_KEY"  # Your Alpaca secret key
-    base_url: "https://paper-api.alpaca.markets"  # Paper trading URL
+# Legacy API Configuration - REMOVED FOR CONSOLIDATION
+# All broker configurations are now managed in the brokers section above
+# This eliminates duplication and provides a single source of truth for API credentials
 
+api:
+  # Legacy api.alpaca section removed - use brokers.alpaca instead
+  
   webhook:
     # Webhook server configuration
     host: "0.0.0.0"  # Host to bind the webhook server

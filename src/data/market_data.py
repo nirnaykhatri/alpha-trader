@@ -42,9 +42,10 @@ class AlpacaMarketDataProvider(IMarketDataProvider):
         self._config = config
         self._market_hours_manager = market_hours_manager
         
-        # Initialize Alpaca data client
-        api_key = config.get_config("api.alpaca.api_key")
-        secret_key = config.get_config("api.alpaca.secret_key")
+        # Initialize Alpaca data client using consolidated credentials
+        credentials = config.get_broker_credentials("alpaca")
+        api_key = credentials["api_key"]
+        secret_key = credentials["secret_key"]
         
         if not api_key or not secret_key:
             raise MarketDataException("Alpaca API credentials not configured")

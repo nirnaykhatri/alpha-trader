@@ -64,9 +64,10 @@ def validate_config():
         config = ConfigurationManager()
         config.validate_required_config()
         
-        # Additional checks with user-friendly messages
-        api_key = config.get_config("api.alpaca.api_key")
-        secret_key = config.get_config("api.alpaca.secret_key")
+        # Additional checks with user-friendly messages using consolidated credentials
+        credentials = config.get_broker_credentials("alpaca")
+        api_key = credentials["api_key"]
+        secret_key = credentials["secret_key"]
         webhook_secret = config.get_config("api.webhook.secret")
         security_enabled = config.get_config("api.webhook.security_enabled", False)
         
