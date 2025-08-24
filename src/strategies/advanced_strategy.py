@@ -5,7 +5,7 @@ and configurable order types for different scenarios.
 """
 
 import asyncio
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
 from enum import Enum
 from dataclasses import dataclass
@@ -13,6 +13,7 @@ from ..interfaces import IConfigurationManager, IOrderManager, IMarketDataProvid
 from ..core.logging_config import get_logger
 from .. import TradingSignal, SignalType, Order, OrderType, OrderSide, OrderStatus
 from .support_calculator import TechnicalSupportCalculator
+from .martingale_dca_manager import MartingaleDCAManager
 
 
 logger = get_logger(__name__)
@@ -35,7 +36,7 @@ class TradePhase(Enum):
 
 @dataclass
 class PositionState:
-    """Represents the current state of a position."""
+    """Represents the current state of a position with martingale DCA tracking."""
     symbol: str
     direction: PositionDirection
     phase: TradePhase
@@ -49,15 +50,25 @@ class PositionState:
     trail_price: Optional[float] = None
     profit_percentage: float = 0.0
     
-    # Support/Resistance data
+    # Support/Resistance data (legacy - kept for compatibility)
     support_level: Optional[float] = None
     resistance_level: Optional[float] = None
     averaging_attempts: int = 0
     
-    # DCA Price Tracking for Progressive Enforcement
+    # Legacy DCA Price Tracking (kept for compatibility)
     last_dca_price: Optional[float] = None  # Price of last DCA order for progressive validation
     dca_order_prices: List[float] = None     # History of all DCA order prices
     position_lifecycle_id: Optional[str] = None  # Unique ID for this position lifecycle to prevent order history pollution
+    
+    # NEW: Martingale DCA Fields
+    dca_count: int = 0                          # Current number of DCA orders executed
+    total_position_value: float = 0.0           # Total value invested in position (in dollars)
+    next_dca_step_percent: float = 0.0          # Next DCA trigger percentage
+    next_dca_order_size: float = 0.0            # Calculated next DCA order size (in dollars)
+    martingale_entry_price: Optional[float] = None  # Original entry price for martingale calculations
+    martingale_total_quantity: float = 0.0      # Total quantity including all DCA orders
+    martingale_order_history: List[Dict[str, Any]] = None  # Complete martingale order history
+    is_martingale_enabled: bool = False         # Whether martingale DCA is active for this position
     
     # Orders
     active_orders: List[str] = None
@@ -67,6 +78,8 @@ class PositionState:
             self.active_orders = []
         if self.dca_order_prices is None:
             self.dca_order_prices = []
+        if self.martingale_order_history is None:
+            self.martingale_order_history = []
 
 
 class AdvancedTradingStrategy:
@@ -85,6 +98,9 @@ class AdvancedTradingStrategy:
         self.support_calculator = support_calculator
         self.risk_manager = risk_manager
         self.position_manager = position_manager  # For database persistence
+        
+        # Initialize Martingale DCA Manager
+        self.martingale_dca = MartingaleDCAManager(config, market_data, risk_manager)
         
         # Active positions tracking
         self.positions: Dict[str, PositionState] = {}
@@ -704,6 +720,10 @@ class AdvancedTradingStrategy:
                         current_price=current_price,
                         entry_time=datetime.utcnow()  # Use current time as fallback
                     )
+                    
+                    # Initialize martingale for this position if enabled in config
+                    await self._initialize_martingale_for_position(symbol, db_position)
+                    
                     logger.info(f"📊 Added existing position to strategy tracker: {symbol} {direction.value} {db_position.quantity} @ ${db_position.avg_price:.2f}")
                 else:
                     return  # No position exists
@@ -725,54 +745,58 @@ class AdvancedTradingStrategy:
             max_attempts = config.get('max_averaging_attempts', 3)
             
             # Log position status for transparency
-            logger.debug(f"📊 {symbol}: {profit_pct:.2%} profit, {position.averaging_attempts}/{max_attempts} DCA attempts")
+            logger.debug(f"📊 {symbol}: {profit_pct:.2%} profit, DCA count: {position.dca_count}")
             
-            # ENHANCED: Pure technical analysis DCA (NO loss threshold)
-            if (position.averaging_attempts < max_attempts and
-                config.get('averaging_enabled', True)):
-                
-                # Get original signal timeframe for this position (defaulting to 15m for existing positions)
-                timeframe = self._get_position_timeframe(symbol)
-                
-                logger.info(f"🔍 DCA CHECK: {symbol} - attempt {position.averaging_attempts}/{max_attempts}")
-                logger.info(f"   Current: ${current_price:.2f}, Average: ${position.average_price:.2f}")
-                logger.info(f"   P&L: {profit_pct:.2%}, Timeframe: {timeframe}")
-                
-                if position.direction == PositionDirection.LONG:
-                    dca_decision = await self._check_support_breach_dca(position, timeframe)
-                else:
-                    dca_decision = await self._check_resistance_breach_dca(position, timeframe)
-                
-                logger.info(f"🎯 DCA DECISION: {symbol}")
-                logger.info(f"   Should DCA: {dca_decision['should_dca']}")
-                logger.info(f"   Reason: {dca_decision['reason']}")
-                logger.info(f"   Message: {dca_decision['message']}")
-                
-                if dca_decision['should_dca']:
-                    logger.info(f"🚀 EXECUTING DCA: {symbol}")
-                    logger.info(f"   Level: ${dca_decision.get('level', 'N/A'):.2f}")
-                    logger.info(f"   Timeframe: {timeframe}")
-                    logger.info(f"   Attempt: {position.averaging_attempts + 1}/{max_attempts} (will increment on fill)")
-                    
-                    await self._execute_technical_dca(position, dca_decision)
-                else:
-                    # Enhanced debugging for why DCA was not triggered
-                    logger.info(f"⏸️ DCA NOT TRIGGERED: {symbol}")
-                    if 'level' in dca_decision:
-                        logger.info(f"   Next level: ${dca_decision['level']:.2f}")
-                    if 'distance_percent' in dca_decision:
-                        logger.info(f"   Distance: {dca_decision['distance_percent']:.1f}%")
-            else:
-                # Log why DCA is not being checked
-                if position.averaging_attempts >= max_attempts:
-                    logger.info(f"🚫 DCA DISABLED: {symbol} - max attempts reached ({position.averaging_attempts}/{max_attempts})")
-                elif not config.get('averaging_enabled', True):
-                    logger.info(f"� DCA DISABLED: {symbol} - averaging disabled in config")
-                else:
-                    logger.debug(f"🔍 DCA conditions not met for {symbol}")
+            # NEW: Martingale DCA Logic (replaces technical analysis DCA)
+            await self._check_martingale_dca_trigger(symbol, current_price, position)
+            # else: # REMOVED - orphaned else from old DCA logic
+                # # Log why DCA is not being checked
+                # if position.averaging_attempts >= max_attempts:
+                #     logger.info(f"🚫 DCA DISABLED: {symbol} - max attempts reached ({position.averaging_attempts}/{max_attempts})")
+                # elif not config.get('averaging_enabled', True):
+                #     logger.info(f"DCA DISABLED: {symbol} - averaging disabled in config")
+                # else:
+                #     logger.debug(f"🔍 DCA conditions not met for {symbol}")
             
         except Exception as e:
             logger.error(f"Error updating position monitoring for {symbol}: {e}")
+
+    async def _initialize_martingale_for_position(self, symbol: str, db_position):
+        """
+        Initialize martingale DCA for a position loaded from database.
+        """
+        try:
+            # Check if martingale is enabled for this symbol
+            symbol_config = self.martingale_dca.get_symbol_config(symbol)
+            if not symbol_config.enabled:
+                logger.debug(f"Martingale DCA disabled for {symbol} in config")
+                return
+
+            # Enable martingale for the position
+            position = self.positions[symbol]
+            position.is_martingale_enabled = True
+            
+            # Calculate total position value
+            total_value = abs(db_position.quantity) * db_position.avg_price
+            
+            # Initialize martingale position state
+            martingale_state = self.martingale_dca.initialize_position(
+                symbol, 
+                db_position.avg_price, 
+                abs(db_position.quantity), 
+                total_value
+            )
+            
+            # Update position state with martingale data
+            position.martingale_entry_price = db_position.avg_price
+            position.martingale_total_quantity = abs(db_position.quantity)
+            position.total_position_value = total_value
+            position.next_dca_step_percent = martingale_state.next_dca_step_percent
+            
+            logger.info(f"✅ Initialized martingale DCA for {symbol}: {total_value:.2f} position value")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize martingale for {symbol}: {e}")
 
     def _get_position_timeframe(self, symbol: str) -> str:
         """
@@ -1945,3 +1969,156 @@ class AdvancedTradingStrategy:
                         logger.debug(f"     ${level.price:.2f} ({getattr(level, 'method', 'unknown')}, {getattr(level, 'confidence', 0):.2f})")
         except Exception as e:
             logger.warning(f"Error logging resistance analysis for {symbol}: {e}")
+
+    # NEW: Martingale DCA Methods (replaces technical analysis DCA)
+    async def _check_martingale_dca_trigger(self, symbol: str, current_price: float, position: PositionState):
+        """
+        Check if martingale DCA should be triggered based on price movement thresholds.
+        Replaces the old support/resistance breach DCA logic.
+        """
+        try:
+            if not position.is_martingale_enabled:
+                logger.debug(f"Martingale DCA disabled for {symbol}")
+                return
+
+            # Get martingale position state
+            martingale_state = self.martingale_dca.get_position_state(symbol)
+            if not martingale_state:
+                logger.warning(f"No martingale position state found for {symbol}")
+                return
+
+            # Check if DCA should be triggered
+            is_long = position.direction == PositionDirection.LONG
+            should_trigger, trigger_info = self.martingale_dca.should_trigger_dca(
+                symbol, current_price, is_long
+            )
+
+            if should_trigger:
+                logger.info(f"🚀 MARTINGALE DCA TRIGGERED: {symbol}")
+                logger.info(f"   Current Price: ${current_price:.2f}")
+                logger.info(f"   Average Price: ${position.average_price:.2f}")
+                logger.info(f"   Price Change: {trigger_info['price_change_percent']:.2f}%")
+                logger.info(f"   Required Step: {trigger_info['required_step_percent']:.2f}%")
+                logger.info(f"   DCA #{trigger_info['dca_count'] + 1}")
+
+                # Execute the martingale DCA order
+                await self._execute_martingale_dca(symbol, current_price, position)
+            else:
+                logger.debug(f"🔍 Martingale DCA conditions not met for {symbol}: {trigger_info['reason']}")
+
+        except Exception as e:
+            logger.error(f"Error checking martingale DCA trigger for {symbol}: {e}")
+
+    async def _execute_martingale_dca(self, symbol: str, current_price: float, position: PositionState):
+        """
+        Execute a martingale DCA order with proper safety checks.
+        """
+        try:
+            # Get DCA order details
+            dca_details = await self.martingale_dca.calculate_dca_order_details(symbol, current_price)
+            
+            if not dca_details['is_safe_to_execute']:
+                logger.warning(f"🚫 MARTINGALE DCA BLOCKED: {symbol}")
+                logger.warning(f"   Safety violations: {dca_details}")
+                return
+
+            # Validate safety limits
+            safety_check = await self.martingale_dca.validate_dca_safety_limits(
+                symbol, dca_details['order_value']
+            )
+            
+            if not safety_check['is_valid']:
+                logger.warning(f"🚫 MARTINGALE DCA SAFETY CHECK FAILED: {symbol}")
+                logger.warning(f"   Violations: {safety_check['violations']}")
+                logger.warning(f"   Reason: {safety_check['reason']}")
+                return
+
+            # Prepare order
+            order_side = OrderSide.BUY if position.direction == PositionDirection.LONG else OrderSide.SELL
+            order_quantity = dca_details['quantity']
+
+            logger.info(f"📝 PLACING MARTINGALE DCA ORDER: {symbol}")
+            logger.info(f"   Order #{dca_details['dca_number']}: {order_side.value} {order_quantity:.4f} @ ${current_price:.2f}")
+            logger.info(f"   Order Value: ${dca_details['order_value']:,.2f}")
+            logger.info(f"   New Average (after): ${dca_details['new_average_price']:.2f}")
+            logger.info(f"   Total Position Value: ${dca_details['new_total_value']:,.2f}")
+
+            # Calculate order type from configuration
+            order_type = self._get_order_type(self.config.get_config('trading.order_type', 'limit'))
+
+            # Execute the order through order manager
+            order = await self.order_manager.place_order(
+                symbol=symbol,
+                side=order_side,
+                quantity=order_quantity,
+                order_type=order_type,  # Use configured order type
+                time_in_force="GTC"
+            )
+
+            if order:
+                logger.info(f"✅ MARTINGALE DCA ORDER PLACED: {symbol} Order ID: {order.order_id}")
+                
+                # Add order to position tracking
+                position.active_orders.append(order.order_id)
+                
+                # Update next DCA parameters for this position
+                position.next_dca_step_percent = dca_details['next_step_percent']
+                position.next_dca_order_size = await self.martingale_dca.calculate_dca_order_size(
+                    symbol, dca_details['dca_number'] + 1, dca_details['order_value']
+                )
+            else:
+                logger.error(f"❌ Failed to place martingale DCA order for {symbol}")
+
+        except Exception as e:
+            logger.error(f"Error executing martingale DCA for {symbol}: {e}")
+
+    async def _update_position_after_martingale_fill(self, symbol: str, fill_price: float, 
+                                                   fill_quantity: float, fill_value: float):
+        """
+        Update position state after a martingale DCA order fills.
+        This should be called from the order fill handler.
+        """
+        try:
+            # Update martingale position state
+            martingale_state = self.martingale_dca.update_position_after_dca(
+                symbol, fill_price, fill_quantity, fill_value
+            )
+
+            # Update strategy position state to match
+            if symbol in self.positions:
+                position = self.positions[symbol]
+                position.quantity += fill_quantity
+                position.average_price = martingale_state.current_average_price
+                position.dca_count = martingale_state.dca_count
+                position.total_position_value = martingale_state.total_value_invested
+                position.next_dca_step_percent = martingale_state.next_dca_step_percent
+
+                logger.info(f"✅ Updated position after martingale fill: {symbol}")
+                logger.info(f"   New Average: ${position.average_price:.2f}")
+                logger.info(f"   New Quantity: {position.quantity:.4f}")
+                logger.info(f"   DCA Count: {position.dca_count}")
+                logger.info(f"   Total Value: ${position.total_position_value:,.2f}")
+
+        except Exception as e:
+            logger.error(f"Error updating position after martingale fill for {symbol}: {e}")
+
+    async def _validate_dca_safety_limits(self, symbol: str, proposed_dca_value: float) -> bool:
+        """
+        Validate that proposed DCA order meets all safety requirements.
+        """
+        try:
+            safety_check = await self.martingale_dca.validate_dca_safety_limits(symbol, proposed_dca_value)
+            
+            if not safety_check['is_valid']:
+                logger.warning(f"🚫 DCA Safety limit violation for {symbol}:")
+                for violation in safety_check['violations']:
+                    logger.warning(f"   - {violation}")
+                logger.warning(f"   Reason: {safety_check['reason']}")
+                return False
+            
+            logger.debug(f"✅ DCA safety checks passed for {symbol}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error validating DCA safety limits for {symbol}: {e}")
+            return False

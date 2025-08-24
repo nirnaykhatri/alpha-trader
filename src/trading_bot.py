@@ -16,7 +16,7 @@ from .core import ConfigurationManager, setup_logging, get_logger
 from .signals import TradingViewSignalListener
 from .trading import OrderManager
 from .trading.alpaca_account_provider import AlpacaAccountProvider
-from .strategies import TechnicalSupportCalculator, ConfigurableTrailingProfitManager
+from .strategies import TechnicalSupportCalculator, ConfigurableTrailingProfitManager, MartingaleDCAManager
 from .strategies.advanced_strategy import AdvancedTradingStrategy
 from .data import AlpacaMarketDataProvider
 from .risk import RiskManager
@@ -66,6 +66,7 @@ class TradingBotOrchestrator:
         self.risk_manager: Optional[RiskManager] = None
         self.support_calculator: Optional[TechnicalSupportCalculator] = None
         self.trailing_manager: Optional[ConfigurableTrailingProfitManager] = None
+        self.martingale_dca: Optional[MartingaleDCAManager] = None
         self.advanced_strategy: Optional[AdvancedTradingStrategy] = None
         self.market_data: Optional[AlpacaMarketDataProvider] = None
         self.database: Optional[DatabaseManager] = None
@@ -219,6 +220,7 @@ class TradingBotOrchestrator:
         # Initialize strategy components
         self.support_calculator = TechnicalSupportCalculator(self.config, self.market_data)
         self.trailing_manager = ConfigurableTrailingProfitManager(self.config)
+        self.martingale_dca = MartingaleDCAManager(self.config, self.market_data, self.risk_manager)
         
         # Initialize advanced strategy (main strategy handler)
         self.advanced_strategy = AdvancedTradingStrategy(
@@ -229,6 +231,9 @@ class TradingBotOrchestrator:
             self.risk_manager,
             self.position_manager  # Add position manager for database persistence
         )
+        
+        # Pass martingale DCA manager to advanced strategy
+        self.advanced_strategy.martingale_dca = self.martingale_dca
         
         # Initialize signal listener with market data provider for accurate pricing
         self.signal_listener = TradingViewSignalListener(

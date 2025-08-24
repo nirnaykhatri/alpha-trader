@@ -7,8 +7,8 @@ api:
   alpaca:
     # Alpaca API credentials (required)
     # Get these from your Alpaca account dashboard
-    api_key: "PKWLXOI64JFC86XJIUEY"  # Your Alpaca API key
-    secret_key: "qqlEiBXGcyhwbRsv46IbnV8exvZ6o5XfWUHYlKor"  # Your Alpaca secret key
+    api_key: "YOUR_API_KEY"  # Your Alpaca API key
+    secret_key: "YOUR_SECRET_KEY"  # Your Alpaca secret key
     base_url: "https://paper-api.alpaca.markets"  # Paper trading URL
     # For live trading, use: "https://api.alpaca.markets"
     timeout: 30  # API request timeout in seconds
@@ -158,157 +158,50 @@ trading:
 
 # Strategy Configuration
 strategies:
-  # Global DCA Protection Settings (applies to all strategies)
-  dca:
-    # Progressive Price Improvement Thresholds
-    base_threshold_percent: 1.5        # Base threshold for first DCA (1.5%)
-    progressive_multiplier: 1.8        # Multiplier for each subsequent DCA
-    max_threshold_percent: 6.0         # Maximum threshold cap (6.0%)
-    max_pending_orders_per_position: 1 # Maximum pending DCA orders per position
+  # Martingale DCA Strategy - Replaces technical analysis-based DCA
+  martingale_dca:
+    enabled: true  # Enable the new martingale DCA system
     
-    # Progressive DCA Example:
-    # DCA 1: 1.5% minimum improvement required
-    # DCA 2: 2.7% minimum improvement required (1.5% * 1.8)
-    # DCA 3: 4.9% minimum improvement required (2.7% * 1.8)
-    # DCA 4+: 6.0% minimum improvement required (capped at max)
+    # Default configuration for symbols without specific settings
+    # These apply when symbol_settings don't exist for a particular symbol
+    defaults:
+      base_order_size_type: "dollars"       # "dollars" or "portfolio_percent"
+      base_order_size: 1000                 # $1000 default base order
+      dca_order_size_type: "multiplier"     # "multiplier", "fixed_dollars", or "fixed_percent"
+      dca_amount_multiplier: 2.0            # Each DCA = base * (multiplier ^ dca_number)
+      dca_step_percent: 1.5                 # Initial step down percentage (1.5%)
+      step_multiplier: 1.2                  # Each step increases: 1.5%, 1.8%, 2.16%, etc.
+      max_dca_orders: 5                     # Maximum safety orders
+      take_profit_percent: 3.0              # Take profit at 3% gain
+      trailing_deviation_percent: 0.8       # Trailing stop deviation (0.8%)
+      max_position_value: 10000             # Maximum total position value ($10,000)
+      enabled: true                         # Enable for symbols by default
     
-  # Long Position Strategy
+    # Global safety limits that apply to ALL symbols regardless of individual settings
+    global_limits:
+      max_portfolio_exposure_percent: 50    # Maximum portfolio exposure to martingale positions
+      max_single_position_portfolio_percent: 20  # Maximum single position as % of portfolio
+      emergency_stop_drawdown_percent: 15   # Emergency stop if portfolio down 15%
+      max_concurrent_dca_positions: 10      # Maximum positions with active DCA at once
+      
+    # Risk validation settings
+    validation:
+      require_sufficient_balance: true      # Check account balance before each DCA
+      validate_position_limits: true        # Enforce position value limits
+      check_portfolio_exposure: true        # Monitor total portfolio exposure
+      log_safety_violations: true           # Log when safety limits prevent orders
+      
+  # Long Position Strategy (simplified - no more technical DCA)
   long_strategy:
     enabled: true
+    entry_limit_offset: 0.001  # For limit orders: buy 0.1% below current price
     
-    # Initial Entry (uses global trading.order_type setting)
-    entry_limit_offset: 0.001  # For limit orders: buy 0.1% below current price (only used if order_type is "limit")
-    
-    # Profit Taking (Trailing Up from Average Price)
-    profit_target: 0.03  # 3% profit above average price to start trailing
-    trailing_profit:
-      enabled: true
-      trailing_percentage: 0.015  # Trail 1.5% behind peak price
-      activation_threshold: 0.03  # Start trailing at 3% profit above average price
-      min_profit_lock: 0.01  # Lock in minimum 1% profit above average price
-      acceleration_factor: 1.5  # Accelerate trailing when profit exceeds 1.5x activation threshold
-      # Exit orders use global trading.order_type setting
-    
-      # Enhanced Support-Based DCA (Pure Technical Analysis)
-      support_averaging:
-        enabled: true
-        max_attempts: 3  # Maximum averaging down attempts
-        position_multiplier: 1.5  # Each new position = previous * multiplier (1.5x is more conservative than 2.0x)
-        
-        # REMOVED: loss_threshold (no more arbitrary percentage triggers)
-        # DCA now triggers ONLY on technical support breaches
-        
-        # Enhanced Technical Analysis Configuration
-        use_original_timeframe: true  # Use timeframe from original signal (1h, 4h, etc.)
-        default_timeframe: "15m"  # Fallback for existing positions without stored timeframe
-        min_support_confidence: 0.70  # Minimum 70% confidence for support levels
-        support_buffer_percent: 0.005  # 0.5% buffer around support (ensures true breach)
-        
-        # Enhanced Position-Aware Filtering (CRITICAL FIX for MSFT issue)
-        position_aware_filtering:
-          enabled: true  # Enable position-aware support/resistance filtering
-          use_position_price: true  # Filter levels relative to position average price, not current market price
-          position_buffer_percent: 0.001  # 0.1% buffer around position price for filtering decisions
-          recovery_mode_enabled: true  # Enable automatic recovery when normal filtering fails
-          log_edge_cases: true  # Log edge case detection and recovery actions
-        
-        # Support Detection Methods
-        support_calculation:
-          methods:
-            - "pivot_points"     # Traditional pivot point analysis
-            - "moving_averages"  # MA support levels (20, 50, 200)
-            - "volume_profile"   # High volume support zones
-            - "fibonacci"        # Fibonacci retracement levels
-          confidence_weighting: true  # Weight by confidence scores
-          minimum_methods: 2  # Require agreement from at least 2 methods
-        
-        # Enhanced Order Placement
-        order_placement:
-          use_limit_orders: true  # Always use limit orders at technical levels
-          price_offset_percent: 0.002  # Place order 0.2% above support level
-          timeout_minutes: 5  # Cancel unfilled orders after 5 minutes
-          retry_on_fill_failure: true  # Retry if order doesn't fill quickly
-        
-        # Fallback Configuration (ONLY for technical analysis failures)
-        fallback:
-          enabled: false  # Disabled by default - prefer technical analysis
-          loss_threshold: 0.05  # 5% loss threshold (only if technical analysis fails)
-          use_fallback_warning: true  # Log warnings when using fallback
-        
-        # Trailing Down (when support doesn't hold)
-        support_trailing:
-          enabled: true
-          trailing_percentage: 0.01  # Trail 1% below current price
-          max_trail_distance: 0.05  # Max 5% trail from support level
-          # Averaging entries use global trading.order_type setting
-          
-        # Position Sizing for Averaging (uses martingale from position_sizing.averaging)
-        sizing_method: "martingale"  # "fixed", "multiplier", "risk_based", or "martingale"
-        # martingale: follows position_sizing.averaging configuration (1%, 2%, 4%, 8%...)
-        # multiplier: each position = previous * position_multiplier
-        # fixed: each position = same size as initial
-        # risk_based: size based on distance from support  # Short Position Strategy  
+  # Short Position Strategy (simplified - no more technical DCA)  
   short_strategy:
     enabled: true
+    entry_limit_offset: 0.001  # For limit orders: sell 0.1% above current price
     
-    # Initial Entry (uses global trading.order_type setting)
-    entry_limit_offset: 0.001  # For limit orders: sell 0.1% above current price (only used if order_type is "limit")
-    
-    # Profit Taking (Trailing Down from Average Price)
-    profit_target: 0.03  # 3% profit below average price to start trailing
-    trailing_profit:
-      enabled: true
-      trailing_percentage: 0.015  # Trail 1.5% above lowest price
-      activation_threshold: 0.03  # Start trailing at 3% profit below average price
-      min_profit_lock: 0.01  # Lock in minimum 1% profit below average price
-      acceleration_factor: 1.5  # Accelerate trailing when profit exceeds 1.5x activation threshold
-      # Exit orders use global trading.order_type setting
-    
-      # Enhanced Resistance-Based DCA (Pure Technical Analysis)
-      resistance_averaging:
-        enabled: true
-        max_attempts: 3  # Maximum averaging up attempts
-        position_multiplier: 1.5  # Each new position = previous * multiplier
-        
-        # REMOVED: loss_threshold (no more arbitrary percentage triggers)
-        # DCA now triggers ONLY on technical resistance breaches
-        
-        # Enhanced Technical Analysis Configuration
-        use_original_timeframe: true  # Use timeframe from original signal
-        default_timeframe: "15m"  # Fallback for existing positions
-        min_resistance_confidence: 0.70  # Minimum 70% confidence for resistance levels
-        resistance_buffer_percent: 0.005  # 0.5% buffer around resistance
-        
-        # Enhanced Position-Aware Filtering (CRITICAL FIX for resistance below current price)
-        position_aware_filtering:
-          enabled: true  # Enable position-aware resistance filtering
-          use_position_price: true  # Filter levels relative to position average price, not current market price
-          position_buffer_percent: 0.001  # 0.1% buffer around position price for filtering decisions
-          recovery_mode_enabled: true  # Enable automatic recovery when normal filtering fails
-          log_edge_cases: true  # Log edge case detection and recovery actions
-        
-        # Resistance Detection Methods
-        resistance_calculation:
-          methods:
-            - "pivot_points"     # Traditional pivot point analysis
-            - "moving_averages"  # MA resistance levels
-            - "volume_profile"   # High volume resistance zones
-            - "fibonacci"        # Fibonacci retracement levels
-          confidence_weighting: true
-          minimum_methods: 2
-        
-        # Enhanced Order Placement
-        order_placement:
-          use_limit_orders: true
-          price_offset_percent: 0.002  # Place order 0.2% below resistance level
-          timeout_minutes: 5
-          retry_on_fill_failure: true
-        
-        # Fallback Configuration (ONLY for technical analysis failures)
-        fallback:
-          enabled: false  # Disabled by default
-          loss_threshold: 0.05  # 5% loss threshold (only if technical analysis fails)
-          use_fallback_warning: true  # Legacy trailing profit configuration (for backward compatibility)
+  # Trailing Profit Management (unchanged)
   trailing_profit:
     enabled: true
     activation_threshold: 0.03  # 3% - Start trailing at this profit level
@@ -319,7 +212,6 @@ strategies:
     time_based_exit: false  # Time-based exit enabled/disabled
     max_hold_hours: 24  # Maximum hours to hold a position
     acceleration_factor: 1.5  # Accelerate trailing when profit exceeds 1.5x activation threshold
-    # profit_steps: null  # Optional stepped trailing configuration
 
 # Support and Resistance Level Calculation
 technical_analysis:
@@ -468,14 +360,56 @@ symbols:
     - "TSLA"
     - "NVDA"
   
-  # Symbol-specific settings
+  # Symbol-specific Martingale DCA settings
   symbol_settings:
+    # Example configuration for AAPL - Conservative settings
     "AAPL":
-      max_position_size: 500
-      risk_per_trade: 0.015
+      # Base order configuration
+      base_order_size_type: "dollars"      # "dollars" or "portfolio_percent"
+      base_order_size: 1000                # $1000 base order
+      
+      # DCA progression configuration
+      dca_order_size_type: "multiplier"    # "multiplier", "fixed_dollars", or "fixed_percent"
+      dca_amount_multiplier: 2.0           # Each DCA = base * (multiplier ^ dca_number)
+      dca_step_percent: 1.5                # Initial step down percentage (1.5%)
+      step_multiplier: 1.2                 # Each step increases: 1.5%, 1.8%, 2.16%, etc.
+      max_dca_orders: 5                    # Maximum safety orders
+      
+      # Profit taking configuration
+      take_profit_percent: 3.0             # Take profit at 3% gain
+      trailing_deviation_percent: 0.8      # Trailing stop deviation (0.8%)
+      
+      # Safety limits
+      max_position_value: 10000            # Maximum total position value ($10,000)
+      enabled: true                        # Enable martingale DCA for this symbol
+      
+    # Example configuration for TSLA - More aggressive settings
     "TSLA":
-      max_position_size: 200
-      risk_per_trade: 0.025  # Higher risk for more volatile stocks
+      base_order_size_type: "portfolio_percent"
+      base_order_size: 2.0                 # 2% of portfolio
+      dca_order_size_type: "multiplier"
+      dca_amount_multiplier: 1.8           # More conservative multiplier for volatile stock
+      dca_step_percent: 2.0                # Larger initial step for volatility
+      step_multiplier: 1.3                 # Faster step progression
+      max_dca_orders: 4                    # Fewer DCA orders due to volatility
+      take_profit_percent: 4.0             # Higher profit target
+      trailing_deviation_percent: 1.2      # Wider trailing stop
+      max_position_value: 15000            # Higher position limit
+      enabled: true
+      
+    # Example configuration for NVDA - Balanced settings
+    "NVDA":
+      base_order_size_type: "dollars"
+      base_order_size: 800
+      dca_order_size_type: "multiplier"
+      dca_amount_multiplier: 2.2
+      dca_step_percent: 1.8
+      step_multiplier: 1.25
+      max_dca_orders: 6
+      take_profit_percent: 3.5
+      trailing_deviation_percent: 1.0
+      max_position_value: 12000
+      enabled: true
 
 # Performance Settings
 performance:
