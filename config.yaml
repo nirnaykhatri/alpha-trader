@@ -2,31 +2,75 @@
 # This file contains all configurable parameters for the trading bot
 # Modify these values according to your trading preferences and API credentials
 
-# API Configuration
-api:
+# Multi-Broker Configuration - NEW ABSTRACTION LAYER
+brokers:
+  # Primary Alpaca broker configuration
   alpaca:
-    # Alpaca API credentials (required)
-    # Get these from your Alpaca account dashboard
+    enabled: true
     api_key: "YOUR_API_KEY"  # Your Alpaca API key
     secret_key: "YOUR_SECRET_KEY"  # Your Alpaca secret key
     base_url: "https://paper-api.alpaca.markets"  # Paper trading URL
     # For live trading, use: "https://api.alpaca.markets"
-    timeout: 30  # API request timeout in seconds
-    max_retries: 3  # Number of retry attempts for failed requests
-    retry_delay: 1.0  # Initial retry delay in seconds
+    environment: "paper"  # "paper" or "live"
     
-    # Communication method configuration
-    communication_method: "rest"  # Options: "rest" or "websocket"
-    # Use "websocket" for high-frequency trading with real-time updates
-    
-    # Websocket configuration (for high-frequency trading)
-    websocket:
-      enabled: false  # Enable websocket for real-time data and order updates
-      market_data_feed: "iex"  # Options: "iex" (free) or "sip" (premium)
-      auto_reconnect: true  # Automatically reconnect on connection loss
-      heartbeat_interval: 30  # Heartbeat interval in seconds
-      max_reconnect_attempts: 10  # Maximum reconnection attempts
-      reconnect_delay: 5  # Delay between reconnection attempts in seconds
+    # Alpaca-specific settings
+    additional_params:
+      timeout: 30  # API request timeout in seconds
+      max_retries: 3  # Number of retry attempts for failed requests
+      retry_delay: 1.0  # Initial retry delay in seconds
+      communication_method: "rest"  # Options: "rest" or "websocket"
+      
+  # Mock broker for testing (optional)
+  mock:
+    enabled: false
+    environment: "paper"
+    additional_params:
+      simulate_latency: false
+      default_account_balance: 100000.0
+
+  # Example configuration for future brokers
+  # interactive_brokers:
+  #   enabled: false
+  #   api_key: "IB_API_KEY"
+  #   secret_key: "IB_SECRET_KEY"
+  #   base_url: "https://api.interactivebrokers.com"
+  #   environment: "paper"
+  #   additional_params:
+  #     client_id: "your_client_id"
+
+# Symbol-to-Broker Routing Configuration
+symbol_broker_mappings:
+  # Example: Route TSLA to Alpaca, AAPL to another broker (when available)
+  # - symbol: "TSLA"
+  #   broker_type: "alpaca"
+  #   priority: 1
+  #   is_primary: true
+  #   extended_hours_enabled: true
+  #   max_position_size: 10000.0
+  #   broker_specific_settings:
+  #     use_limit_orders_only: false
+
+# Broker Management Settings
+broker_management:
+  default_broker: "alpaca"  # Default broker when no specific mapping exists
+  health_check_interval_seconds: 60  # How often to check broker health
+  max_consecutive_failures: 3  # Mark broker unhealthy after N failures
+  enable_failover: true  # Enable automatic broker failover
+  symbol_routing_strategy: "priority"  # "priority", "round_robin", "load_balance"
+  
+  # Performance settings
+  connection_timeout_seconds: 30
+  operation_timeout_seconds: 10
+  max_concurrent_operations: 50
+
+# Legacy API Configuration (for backward compatibility)
+api:
+  alpaca:
+    # These settings are now managed by the brokers section above
+    # Kept for backward compatibility with existing components
+    api_key: "YOUR_API_KEY"  # Your Alpaca API key
+    secret_key: "YOUR_SECRET_KEY"  # Your Alpaca secret key
+    base_url: "https://paper-api.alpaca.markets"  # Paper trading URL
 
   webhook:
     # Webhook server configuration
@@ -441,7 +485,184 @@ development:
   auto_shutdown_hours: 0  # Auto-shutdown after X hours (0 = disabled)
   enable_admin_endpoints: true  # Enable admin shutdown endpoint
 
-# Extended Hours Trading Configuration
+# Exchange and Market Hours Configuration (Multi-Broker Support)
+market_hours:
+  # Default exchange configuration (can be overridden per broker)
+  default_exchange: "NYSE"
+  
+  # Exchange-specific configurations
+  exchanges:
+    # US Stock Market (NYSE/NASDAQ)
+    NYSE:
+      timezone: "America/New_York"
+      regular_session:
+        start_time: "09:30"  # 9:30 AM ET
+        end_time: "16:00"    # 4:00 PM ET
+      extended_hours:
+        premarket:
+          enabled: true
+          start_time: "04:00"  # 4:00 AM ET
+          end_time: "09:30"    # 9:30 AM ET
+        postmarket:
+          enabled: true
+          start_time: "16:00"  # 4:00 PM ET
+          end_time: "20:00"    # 8:00 PM ET
+      weekend_trading: false
+      holidays_closed: true
+      
+    NASDAQ:
+      timezone: "America/New_York" 
+      regular_session:
+        start_time: "09:30"  # 9:30 AM ET
+        end_time: "16:00"    # 4:00 PM ET
+      extended_hours:
+        premarket:
+          enabled: true
+          start_time: "04:00"  # 4:00 AM ET
+          end_time: "09:30"    # 9:30 AM ET
+        postmarket:
+          enabled: true
+          start_time: "16:00"  # 4:00 PM ET
+          end_time: "20:00"    # 8:00 PM ET
+      weekend_trading: false
+      holidays_closed: true
+      
+    # London Stock Exchange
+    LSE:
+      timezone: "Europe/London"
+      regular_session:
+        start_time: "08:00"  # 8:00 AM GMT
+        end_time: "16:30"    # 4:30 PM GMT
+      extended_hours:
+        premarket:
+          enabled: false
+        postmarket:
+          enabled: false
+      weekend_trading: false
+      holidays_closed: true
+      
+    # Tokyo Stock Exchange
+    TSE:
+      timezone: "Asia/Tokyo"
+      regular_session:
+        start_time: "09:00"  # 9:00 AM JST
+        end_time: "15:00"    # 3:00 PM JST (with lunch break 11:30-12:30)
+      lunch_break:
+        start_time: "11:30"
+        end_time: "12:30"
+      extended_hours:
+        premarket:
+          enabled: false
+        postmarket:
+          enabled: false
+      weekend_trading: false
+      holidays_closed: true
+      
+    # Cryptocurrency (24/7)
+    CRYPTO:
+      timezone: "UTC"
+      regular_session:
+        start_time: "00:00"  # 24/7 trading
+        end_time: "23:59"
+      extended_hours:
+        premarket:
+          enabled: false  # N/A for 24/7 markets
+        postmarket:
+          enabled: false  # N/A for 24/7 markets
+      weekend_trading: true
+      holidays_closed: false
+      
+    # Forex (24/5)
+    FOREX:
+      timezone: "UTC"
+      regular_session:
+        start_time: "21:00"  # Sunday 21:00 UTC
+        end_time: "21:00"    # Friday 21:00 UTC
+      extended_hours:
+        premarket:
+          enabled: false
+        postmarket:
+          enabled: false
+      weekend_trading: false
+      holidays_closed: false
+      
+  # Broker-specific exchange mappings
+  broker_exchanges:
+    alpaca:
+      default_exchange: "NYSE"
+      supported_exchanges: ["NYSE", "NASDAQ"]
+      market_data_source: "alpaca_api"
+      
+    interactive_brokers:
+      default_exchange: "NYSE"
+      supported_exchanges: ["NYSE", "NASDAQ", "LSE", "TSE", "FOREX"]
+      market_data_source: "ib_api"
+      
+    mock:
+      default_exchange: "NYSE"
+      supported_exchanges: ["NYSE", "NASDAQ", "CRYPTO", "FOREX"]
+      market_data_source: "simulated"
+      
+  # Symbol-to-exchange mappings (override default exchange)
+  symbol_exchanges:
+    # US Stocks (NYSE)
+    TSLA: "NYSE"
+    AAPL: "NASDAQ"
+    GOOGL: "NASDAQ"
+    MSFT: "NASDAQ"
+    
+    # UK Stocks (LSE) - when available
+    # BARC.L: "LSE"
+    # LLOY.L: "LSE"
+    
+    # Japanese Stocks (TSE) - when available  
+    # 7203.T: "TSE"  # Toyota
+    # 6758.T: "TSE"  # Sony
+    
+    # Cryptocurrency
+    BTCUSD: "CRYPTO"
+    ETHUSD: "CRYPTO"
+    
+    # Forex
+    EURUSD: "FOREX"
+    GBPUSD: "FOREX"
+    
+  # Market hours data sources (broker-specific)
+  data_sources:
+    alpaca_api:
+      use_clock_api: true
+      use_calendar_api: true
+      cache_duration_minutes: 5
+      calendar_cache_hours: 24
+      retry_attempts: 3
+      timeout_seconds: 10
+      
+    ib_api:
+      use_trading_hours_api: true
+      cache_duration_minutes: 10
+      retry_attempts: 3
+      timeout_seconds: 15
+      
+    simulated:
+      use_system_time: true
+      respect_holidays: false
+      
+  # Buffer times for bot activation (applied to all exchanges)
+  buffers:
+    start_before_session_minutes: 15    # Start before market opens
+    stop_after_session_minutes: 15      # Stop after market closes
+    api_polling_interval_seconds: 300   # Check status every 5 minutes
+    
+  # Operational controls
+  auto_start_stop: true
+  emergency_override: false  # Manual override for always-on mode
+  
+  # Error handling
+  fallback_on_api_failure: true
+  max_consecutive_api_failures: 3
+  fallback_to_static_schedule: true
+
+# Extended Hours Trading Configuration (Legacy - replaced by market_hours)
 extended_hours:
   enabled: true  # Enable trading during pre-market and after-hours
   pre_market:

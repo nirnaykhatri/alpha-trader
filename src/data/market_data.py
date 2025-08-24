@@ -28,16 +28,19 @@ class AlpacaMarketDataProvider(IMarketDataProvider):
     """
     Enhanced Market Data Provider using Alpaca API.
     Provides both regular and extended hours market data with multiple fallback methods.
+    Now integrates with market hours manager for intelligent session-aware data fetching.
     """
     
-    def __init__(self, config: IConfigurationManager):
+    def __init__(self, config: IConfigurationManager, market_hours_manager=None):
         """
-        Initialize enhanced market data provider.
+        Initialize enhanced market data provider with optional market hours manager.
         
         Args:
             config: Configuration manager instance
+            market_hours_manager: Optional AlpacaIntegratedMarketHoursManager for session awareness
         """
         self._config = config
+        self._market_hours_manager = market_hours_manager
         
         # Initialize Alpaca data client
         api_key = config.get_config("api.alpaca.api_key")
@@ -66,11 +69,18 @@ class AlpacaMarketDataProvider(IMarketDataProvider):
         self._market_tz = pytz.timezone('America/New_York')
         
         logger.info(f"Enhanced AlpacaMarketDataProvider initialized - Snapshot: {self._use_snapshot}, Extended Hours: {self._extended_hours}")
+        if market_hours_manager:
+            logger.info("✅ Market hours manager integration enabled for session-aware data fetching")
         
         # Warn about extended hours limitations on free tier
         if self._extended_hours:
             logger.warning("📊 Extended Hours Data: Free tier limited to IEX exchange only - coverage may be incomplete")
             logger.warning("📊 For full extended hours data from all exchanges, upgrade to SIP data plan")
+    
+    def set_market_hours_manager(self, market_hours_manager):
+        """Set market hours manager for session-aware data fetching."""
+        self._market_hours_manager = market_hours_manager
+        logger.info("✅ Market hours manager integration enabled")
 
     async def get_current_price(self, symbol: str) -> float:
         """
@@ -91,11 +101,11 @@ class AlpacaMarketDataProvider(IMarketDataProvider):
             logger.debug(f"🔍 Fetching current price for {symbol} (freshness-prioritized)")
             
             # Get market status for intelligent data handling
-            market_status = self._get_market_status()
+            market_status = await self._get_market_status_intelligent()
             
-            # Check cache first
+            # Check cache first (with market-aware cache duration)
             cache_key = f"price_{symbol}"
-            cached_price = self._get_cached_price(cache_key)
+            cached_price = self._get_cached_price(cache_key, market_status)
             if cached_price:
                 logger.debug(f"📋 Using cached price for {symbol}: ${cached_price:.4f}")
                 return cached_price
@@ -802,3 +812,64 @@ class AlpacaMarketDataProvider(IMarketDataProvider):
         """Clean up resources."""
         self._price_cache.clear()
         logger.info("AlpacaMarketDataProvider closed")
+    
+    # NEW: Market hours manager integration methods
+    
+    async def _get_market_status_intelligent(self) -> Dict[str, Any]:
+        """Get market status using manager if available, otherwise fallback to local logic."""
+        try:
+            if self._market_hours_manager:
+                # Use market hours manager for authoritative status
+                status_info = await self._market_hours_manager.get_current_market_status()
+                return {
+                    'status': status_info.current_session.value.upper(),
+                    'is_regular_hours': status_info.current_session.value == 'regular',
+                    'is_extended_hours': status_info.current_session.value in ['premarket', 'postmarket'],
+                    'is_closed': status_info.current_session.value in ['closed', 'weekend', 'holiday'],
+                    'is_trading_day': status_info.is_trading_day,
+                    'is_weekend': status_info.is_weekend,
+                    'source': 'market_hours_manager'
+                }
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to get status from market hours manager: {e}")
+        
+        # Fallback to local market status detection
+        return self._get_market_status()
+    
+    def _should_use_snapshot_api(self, market_status: Dict[str, Any]) -> bool:
+        """Determine if snapshot API should be used based on market status."""
+        # Snapshot API works best during regular hours
+        if market_status.get('is_regular_hours', False):
+            return True
+        # Also useful during extended hours if trading day
+        if market_status.get('is_extended_hours', False) and market_status.get('is_trading_day', True):
+            return True
+        # Skip snapshot API during closed hours to reduce unnecessary calls
+        return False
+    
+    def _should_use_bars_api(self, market_status: Dict[str, Any]) -> bool:
+        """Determine if bars API should be used based on market status."""
+        # Always use bars API as fallback, but prioritize during extended hours
+        return True
+    
+    def _get_cached_price(self, cache_key: str, market_status: Dict[str, Any]) -> Optional[float]:
+        """Get cached price with market-aware cache duration."""
+        if cache_key in self._price_cache:
+            cache_entry = self._price_cache[cache_key]
+            cache_time = cache_entry['timestamp']
+            
+            # Market-aware cache duration
+            cache_duration = self._get_cache_duration_for_market(market_status)
+            
+            if datetime.now(timezone.utc) - cache_time < cache_duration:
+                return cache_entry['price']
+        return None
+    
+    def _get_cache_duration_for_market(self, market_status: Dict[str, Any]) -> timedelta:
+        """Get cache duration based on market status."""
+        if market_status.get('is_regular_hours', False):
+            return timedelta(seconds=15)  # Very short cache during market hours
+        elif market_status.get('is_extended_hours', False):
+            return timedelta(seconds=45)  # Moderate cache during extended hours
+        else:
+            return timedelta(seconds=300)  # Longer cache when market is closed

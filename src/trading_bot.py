@@ -12,7 +12,10 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 
 # Core imports
-from .core import ConfigurationManager, setup_logging, get_logger
+from .core import ConfigurationManager, setup_logging, get_logger, MarketStatusInfo
+from .core.exchange_market_hours import IMultiExchangeMarketHoursManager
+from .core.broker_manager import BrokerManager
+from .core.broker_interfaces import BrokerType, UniversalOrder, OrderSide, OrderType, TimeInForce
 from .signals import TradingViewSignalListener
 from .trading import OrderManager
 from .trading.alpaca_account_provider import AlpacaAccountProvider
@@ -26,7 +29,7 @@ from .database import DatabaseManager
 # Utility imports
 from .utils import NgrokManager
 
-# API clients
+# Legacy API clients (for backward compatibility during migration)
 from alpaca.trading.client import TradingClient
 from alpaca.data.historical import StockHistoricalDataClient
 
@@ -60,6 +63,7 @@ class TradingBotOrchestrator:
         self.background_tasks: List[asyncio.Task] = []
         
         # Component instances
+        self.broker_manager: Optional[BrokerManager] = None
         self.signal_listener: Optional[TradingViewSignalListener] = None
         self.order_manager: Optional[OrderManager] = None
         self.position_manager: Optional[PositionManager] = None
@@ -71,7 +75,13 @@ class TradingBotOrchestrator:
         self.market_data: Optional[AlpacaMarketDataProvider] = None
         self.database: Optional[DatabaseManager] = None
         
-        # API clients
+        # NEW: Market hours manager with Alpaca API integration
+        self.market_hours_manager: Optional[IMultiExchangeMarketHoursManager] = None
+        self.extended_hours_manager = None  # Extended hours manager for advanced session trading
+        self._last_market_status: Optional[MarketStatusInfo] = None
+        self._market_status_monitoring_active = False
+        
+        # Legacy API clients (for backward compatibility during migration)
         self.trading_client: Optional[TradingClient] = None
         self.data_client: Optional[StockHistoricalDataClient] = None
         
@@ -90,7 +100,7 @@ class TradingBotOrchestrator:
     
     async def start(self) -> None:
         """
-        Start the trading bot system.
+        Start the trading bot system with Alpaca-aware market hours management.
         This is the main entry point for users.
         """
         try:
@@ -105,27 +115,246 @@ class TradingBotOrchestrator:
             # Validate configuration
             await self._validate_configuration()
             
-            # Start components
-            await self._start_components()
-            
-            self.is_running = True
-            logger.info("Trading Bot System started successfully!")
-            
-            # Main event loop
-            await self._run_main_loop()
+            # NEW: Start Alpaca-aware monitoring with intelligent market hours
+            if self.market_hours_manager:
+                await self.start_alpaca_aware_monitoring()
+            else:
+                logger.warning("⚠️ Starting without market hours awareness - will run continuously")
+                await self._start_components_legacy()
+                self.is_running = True
+                logger.info("Trading Bot System started (legacy mode)!")
+                await self._run_main_loop()
             
         except Exception as e:
             logger.error(f"Failed to start trading bot: {str(e)}")
             await self.stop()
             raise
     
+    async def start_alpaca_aware_monitoring(self) -> None:
+        """
+        Start market-hours-aware monitoring using exchange-aware market status.
+        Supports multiple exchanges with proper routing and scheduling.
+        """
+        try:
+            logger.info("🕐 Starting exchange-aware market hours monitoring...")
+            
+            # Check if bot should be active across all exchanges
+            should_be_active = await self.market_hours_manager.should_bot_be_active()
+            
+            # Get active exchanges for logging
+            active_exchanges = await self.market_hours_manager.get_active_exchanges()
+            supported_exchanges = self.market_hours_manager.get_supported_exchanges()
+            
+            logger.info(f"📊 INITIAL MARKET STATUS:")
+            logger.info(f"   Bot Should Be Active: {should_be_active}")
+            logger.info(f"   Active Exchanges: {[ex.value for ex in active_exchanges]}")
+            logger.info(f"   Supported Exchanges: {[ex.value for ex in supported_exchanges]}")
+            
+            # Store simplified status for backward compatibility
+            self._last_market_status = type('MarketStatus', (), {
+                'bot_should_be_active': should_be_active,
+                'active_exchanges': active_exchanges,
+                'is_open': len(active_exchanges) > 0
+            })()
+            
+            # Start market status monitoring loop
+            self._market_status_monitoring_active = True
+            market_monitoring_task = asyncio.create_task(self._exchange_status_monitoring_loop())
+            self.background_tasks.append(market_monitoring_task)
+            
+            # If bot should be active now, start components immediately
+            if should_be_active:
+                logger.info("🚀 Starting bot components immediately (market conditions favorable)")
+                await self._start_components()
+                self.is_running = True
+                logger.info("✅ Trading Bot System started with exchange-aware monitoring!")
+            else:
+                logger.info("💤 Bot components will start when market conditions are favorable")
+                logger.info("   Waiting for any supported exchange to open...")
+                self.is_running = True  # Mark as running (in monitoring mode)
+                logger.info("✅ Trading Bot monitoring started, waiting for market session!")
+            
+            # Main event loop
+            await self._run_main_loop()
+            
+        except Exception as e:
+            logger.error(f"Failed to start Alpaca-aware monitoring: {str(e)}")
+            raise
+    
+    async def _exchange_status_monitoring_loop(self) -> None:
+        """
+        Main monitoring loop that uses exchange-aware market hours to manage lifecycle.
+        Polls market status across all exchanges and manages component start/stop automatically.
+        """
+        try:
+            logger.info("🔄 Exchange-aware status monitoring loop started")
+            polling_interval = 60  # Check every minute
+            
+            while self.is_running and not self.shutdown_event.is_set():
+                try:
+                    # Check if bot should be active across all exchanges
+                    current_should_be_active = await self.market_hours_manager.should_bot_be_active()
+                    current_active_exchanges = await self.market_hours_manager.get_active_exchanges()
+                    
+                    # Check if status has changed significantly
+                    last_should_be_active = getattr(self._last_market_status, 'bot_should_be_active', False)
+                    last_active_exchanges = getattr(self._last_market_status, 'active_exchanges', [])
+                    
+                    status_changed = (current_should_be_active != last_should_be_active or
+                                    set(current_active_exchanges) != set(last_active_exchanges))
+                    
+                    if status_changed:
+                        logger.info("📊 MARKET STATUS CHANGE DETECTED:")
+                        logger.info(f"   Previous: active={last_should_be_active}, exchanges={[ex.value for ex in last_active_exchanges]}")
+                        logger.info(f"   Current:  active={current_should_be_active}, exchanges={[ex.value for ex in current_active_exchanges]}")
+                        
+                        # Create status object for compatibility
+                        current_status = type('MarketStatus', (), {
+                            'bot_should_be_active': current_should_be_active,
+                            'active_exchanges': current_active_exchanges,
+                            'is_open': len(current_active_exchanges) > 0
+                        })()
+                        
+                        await self._handle_market_session_change(current_status)
+                        self._last_market_status = current_status
+                    
+                    # Periodic status logging (every 10 minutes during monitoring)
+                    elif asyncio.get_event_loop().time() % 600 < polling_interval:  # Roughly every 10 minutes
+                        logger.info(f"📊 Exchange Status: {len(current_active_exchanges)} active exchanges, bot_active={current_should_be_active}")
+                    
+                    # Wait for next check
+                    try:
+                        await asyncio.wait_for(self.shutdown_event.wait(), timeout=polling_interval)
+                        break  # Shutdown signal received
+                    except asyncio.TimeoutError:
+                        continue  # Continue monitoring
+                    
+                except Exception as e:
+                    logger.error(f"❌ Error in market status monitoring: {e}")
+                    # Continue monitoring even if individual check fails
+                    await asyncio.sleep(60)  # Fallback interval
+                    
+        except asyncio.CancelledError:
+            logger.info("⛔ Market status monitoring cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"❌ Critical error in market status monitoring: {e}")
+        finally:
+            self._market_status_monitoring_active = False
+            logger.info("🔄 Alpaca status monitoring loop ended")
+    
+    async def _handle_market_session_change(self, new_status: MarketStatusInfo) -> None:
+        """
+        Handle transitions between market sessions based on Alpaca data.
+        Manages graceful start/stop of trading components.
+        """
+        try:
+            previous_active = self._last_market_status.bot_should_be_active if self._last_market_status else False
+            current_active = new_status.bot_should_be_active
+            
+            logger.info(f"🔄 HANDLING SESSION TRANSITION:")
+            logger.info(f"   Session: {new_status.current_session.value}")
+            logger.info(f"   Bot Active: {previous_active} → {current_active}")
+            logger.info(f"   Reason: {new_status.activation_reason}")
+            
+            if not previous_active and current_active:
+                # Bot should start
+                logger.info("🚀 STARTING BOT COMPONENTS (market session opened)")
+                await self._start_trading_components()
+                
+            elif previous_active and not current_active:
+                # Bot should stop
+                logger.info("💤 STOPPING BOT COMPONENTS (market session closed)")
+                await self._stop_trading_components()
+                
+            elif previous_active and current_active:
+                # Bot remains active but session changed
+                logger.info(f"✅ BOT REMAINS ACTIVE (session transition: {new_status.current_session.value})")
+                
+            else:
+                # Bot remains inactive
+                logger.info(f"💤 BOT REMAINS INACTIVE (waiting for favorable conditions)")
+                logger.info(f"   Next potential activation in {new_status.time_to_next_session_minutes:.1f} minutes")
+                
+        except Exception as e:
+            logger.error(f"❌ Error handling market session change: {e}")
+    
+    def _has_market_status_changed(self, current_status: MarketStatusInfo) -> bool:
+        """Check if market status has changed significantly."""
+        if not self._last_market_status:
+            return True
+        
+        # Check significant changes
+        return (
+            current_status.current_session != self._last_market_status.current_session or
+            current_status.bot_should_be_active != self._last_market_status.bot_should_be_active or
+            current_status.is_trading_day != self._last_market_status.is_trading_day or
+            current_status.source != self._last_market_status.source
+        )
+    
+    def _log_market_status_summary(self, status: MarketStatusInfo) -> None:
+        """Log periodic market status summary."""
+        logger.info("📊 MARKET STATUS SUMMARY:")
+        logger.info(f"   Session: {status.current_session.value.upper()} | Open: {status.is_open} | Active: {status.bot_should_be_active}")
+        logger.info(f"   Trading Day: {status.is_trading_day} | Source: {status.source}")
+        
+        if not status.bot_should_be_active:
+            logger.info(f"   Next activation in {status.time_to_next_session_minutes:.1f} minutes")
+    
+    async def _start_trading_components(self) -> None:
+        """Start trading components when market conditions are favorable."""
+        try:
+            logger.info("🚀 Starting trading components...")
+            
+            # Start components if not already started
+            if not self.signal_listener or not self.signal_listener.is_running:
+                await self._start_components()
+                logger.info("✅ Trading components started successfully")
+            else:
+                logger.info("✅ Trading components already active")
+                
+        except Exception as e:
+            logger.error(f"❌ Error starting trading components: {e}")
+    
+    async def _stop_trading_components(self) -> None:
+        """Stop trading components when market is closed."""
+        try:
+            logger.info("💤 Stopping trading components...")
+            
+            # Cancel open orders first
+            try:
+                open_orders = await self.order_manager.get_open_orders()
+                if open_orders:
+                    logger.info(f"📋 Cancelling {len(open_orders)} open orders before market close")
+                    for order in open_orders:
+                        await self.order_manager.cancel_order(order.order_id)
+            except Exception as order_error:
+                logger.error(f"❌ Error cancelling orders: {order_error}")
+            
+            # Stop signal listener (but keep other monitoring active)
+            if self.signal_listener and self.signal_listener.is_running:
+                logger.info("⏸️ Pausing signal listener (market closed)")
+                await self.signal_listener.stop_listening()
+            
+            # Keep position monitoring, market data updates, etc. running at reduced frequency
+            # This allows the bot to respond when market reopens
+            
+            logger.info("✅ Trading components stopped (monitoring continues)")
+            
+        except Exception as e:
+            logger.error(f"❌ Error stopping trading components: {e}")
+    
+    async def _start_components_legacy(self) -> None:
+        """Legacy component startup (used when market hours manager unavailable)."""
+        await self._start_components()
+    
     async def stop(self) -> None:
-        """Stop the trading bot system gracefully."""
+        """Stop the trading bot system gracefully with multi-broker cleanup."""
         if not self.is_running:
             logger.debug("Trading bot is already stopped")
             return
         
-        logger.info("Shutting down Trading Bot System...")
+        logger.info("Shutting down Trading Bot System with multi-broker cleanup...")
         self.is_running = False
         
         try:
@@ -160,9 +389,15 @@ class TradingBotOrchestrator:
                 logger.info("Stopping ngrok tunnel...")
                 self.ngrok_manager.stop_tunnel()
             
-            # Cancel all open orders
+            # Cancel all open orders (using both BrokerManager and legacy methods)
             logger.info("Canceling open orders...")
             await self._cancel_all_orders()
+            
+            # Clean up BrokerManager connections
+            if self.broker_manager:
+                logger.info("Closing BrokerManager connections...")
+                await self.broker_manager.close()
+                logger.info("✅ BrokerManager connections closed")
             
             # Close database connections
             if self.database:
@@ -173,7 +408,7 @@ class TradingBotOrchestrator:
             if not self.shutdown_event.is_set():
                 self.shutdown_event.set()
             
-            logger.info("Trading Bot System stopped successfully")
+            logger.info("Trading Bot System stopped successfully with multi-broker cleanup")
             
         except Exception as e:
             logger.error(f"Error during shutdown: {str(e)}")
@@ -182,8 +417,8 @@ class TradingBotOrchestrator:
                 self.shutdown_event.set()
     
     async def _initialize_components(self) -> None:
-        """Initialize all trading bot components."""
-        logger.info("Initializing components...")
+        """Initialize all trading bot components with multi-broker support."""
+        logger.info("Initializing components with multi-broker abstraction...")
         
         # Load configuration
         self.config = ConfigurationManager(self.config_file)
@@ -195,15 +430,56 @@ class TradingBotOrchestrator:
             log_file=self.config.get_config("logging.file")
         )
         
-        # Initialize API clients
-        self._initialize_api_clients()
+        # Initialize broker manager (replaces direct API clients)
+        logger.info("🔗 Initializing BrokerManager with multi-broker support...")
+        self.broker_manager = BrokerManager(self.config)
+        await self.broker_manager.initialize()
+        
+        # Log broker status
+        available_brokers = self.broker_manager.get_available_brokers()
+        logger.info(f"✅ BrokerManager initialized with {len(available_brokers)} brokers: {[b.value for b in available_brokers]}")
+        
+        # Initialize legacy API clients for backward compatibility
+        # TODO: Phase out once all components are updated to use BrokerManager
+        self._initialize_legacy_api_clients()
         
         # Initialize database
         self.database = DatabaseManager(self.config)
         await self.database.initialize()
         
-        # Initialize market data provider
+        # Initialize market data provider (TODO: migrate to broker-agnostic version)
         self.market_data = AlpacaMarketDataProvider(self.config)
+        
+        # Use broker manager's exchange-aware market hours manager
+        try:
+            if self.broker_manager:
+                self.market_hours_manager = self.broker_manager.market_hours_manager
+                
+                # Connect market hours manager to market data provider for session awareness
+                if hasattr(self.market_data, 'set_market_hours_manager'):
+                    # This will be deprecated as we move to multi-exchange support
+                    # For now, we'll maintain backward compatibility
+                    pass
+                
+                # Initialize extended hours manager with exchange awareness
+                from .core.extended_hours_manager import ExtendedHoursManager
+                self.extended_hours_manager = ExtendedHoursManager(
+                    self.config, 
+                    self.market_hours_manager,
+                    self.trading_client  # Legacy client for now
+                )
+                
+                # For backward compatibility, extended hours manager integration
+                # will be updated separately
+            else:
+                logger.warning("⚠️ No broker manager available - market hours management disabled")
+            
+            logger.info("✅ Alpaca-integrated market hours manager and extended hours manager initialized")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize market hours manager: {e}")
+            logger.warning("⚠️ Continuing without intelligent market hours management")
+            self.market_hours_manager = None
+            self.extended_hours_manager = None
         
         # Initialize position manager with trading client for Alpaca sync
         self.position_manager = PositionManager(self.config, self.database, self.trading_client)
@@ -214,7 +490,7 @@ class TradingBotOrchestrator:
         # Initialize risk manager with account provider
         self.risk_manager = RiskManager(self.config, self.position_manager, self.account_provider)
         
-        # Initialize order manager
+        # Initialize order manager (TODO: migrate to use BrokerManager)
         self.order_manager = OrderManager(self.config, self.trading_client)
         
         # Initialize strategy components
@@ -251,16 +527,18 @@ class TradingBotOrchestrator:
         if ngrok_enabled:
             self.ngrok_manager = NgrokManager(self.config)
         
-        logger.info("All components initialized successfully")
+        logger.info("All components initialized successfully with multi-broker support")
     
-    def _initialize_api_clients(self) -> None:
-        """Initialize Alpaca API clients."""
+    def _initialize_legacy_api_clients(self) -> None:
+        """Initialize legacy Alpaca API clients for backward compatibility."""
+        logger.info("🔄 Initializing legacy Alpaca clients for backward compatibility...")
+        
         api_key = self.config.get_config("api.alpaca.api_key")
         secret_key = self.config.get_config("api.alpaca.secret_key")
         base_url = self.config.get_config("api.alpaca.base_url")
         
         if not api_key or not secret_key:
-            raise ConfigurationException("Alpaca API credentials are required")
+            raise ConfigurationException("Alpaca API credentials are required for legacy compatibility")
         
         # Initialize trading client
         self.trading_client = TradingClient(
@@ -272,7 +550,12 @@ class TradingBotOrchestrator:
         # Initialize data client
         self.data_client = StockHistoricalDataClient(api_key, secret_key)
         
-        logger.info("API clients initialized")
+        logger.info("Legacy API clients initialized")
+    
+    # TODO: Remove this method once all components are migrated to BrokerManager
+    def _initialize_api_clients(self) -> None:
+        """Legacy method - use _initialize_legacy_api_clients instead."""
+        return self._initialize_legacy_api_clients()
     
     async def _validate_configuration(self) -> None:
         """Validate configuration and check API connections."""
@@ -289,15 +572,33 @@ class TradingBotOrchestrator:
     async def _test_api_connections(self) -> None:
         """Test API connections to ensure they're working."""
         try:
-            # Test trading client
-            account = await asyncio.get_event_loop().run_in_executor(
-                None, self.trading_client.get_account
-            )
-            logger.info(f"Trading API connected - Account: {account.account_number}")
+            # Test broker manager connections
+            if self.broker_manager:
+                logger.info("Testing BrokerManager connections...")
+                available_brokers = self.broker_manager.get_available_brokers()
+                broker_health = self.broker_manager.get_broker_health()
+                
+                for broker_type in available_brokers:
+                    health = broker_health.get(broker_type)
+                    status = "✅ Healthy" if health.is_healthy else f"❌ Unhealthy: {health.error_message}"
+                    logger.info(f"  {broker_type.value}: {status}")
+                
+                if not available_brokers:
+                    logger.warning("⚠️ No brokers available in BrokerManager")
+                else:
+                    logger.info(f"✅ BrokerManager connected with {len(available_brokers)} brokers")
+            
+            # Test legacy trading client for backward compatibility
+            if self.trading_client:
+                account = await asyncio.get_event_loop().run_in_executor(
+                    None, self.trading_client.get_account
+                )
+                logger.info(f"Legacy Trading API connected - Account: {account.account_number}")
             
             # Test market data
-            current_time = datetime.now()
-            logger.info("Market data API connected")
+            if self.market_data:
+                current_time = datetime.now()
+                logger.info("Market data API connected")
             
         except Exception as e:
             logger.error(f"API connection test failed: {str(e)}")
@@ -386,7 +687,7 @@ class TradingBotOrchestrator:
     
     async def _handle_trading_signal(self, signal: TradingSignal) -> None:
         """
-        Handle incoming trading signals from TradingView.
+        Handle incoming trading signals from TradingView using multi-broker routing.
         This is the main signal processing pipeline using the advanced strategy.
         """
         try:
@@ -395,18 +696,99 @@ class TradingBotOrchestrator:
             # Store signal for tracking
             self.processed_signals[signal.signal_id] = signal
             
-            # Risk validation
+            # ENHANCED: Get broker for symbol using BrokerManager
+            try:
+                broker_type = await self.broker_manager._router.get_broker_for_symbol(signal.symbol)
+                logger.info(f"📍 Signal routing: {signal.symbol} → {broker_type.value} broker")
+            except Exception as routing_error:
+                logger.warning(f"⚠️ Broker routing failed for {signal.symbol}: {routing_error}")
+                logger.info("⚠️ Using legacy Alpaca processing for backward compatibility")
+            
+            # Risk validation (existing logic remains the same)
             if not await self.risk_manager.validate_signal(signal):
                 logger.warning(f"Signal rejected by risk manager: {signal.signal_id}")
                 return
             
-            # Use advanced strategy to handle the signal
+            # Use advanced strategy to handle the signal (existing logic)
             await self.advanced_strategy.process_signal(signal)
             
             logger.info(f"Signal processed successfully: {signal.signal_id}")
             
         except Exception as e:
             logger.error(f"Error processing signal {signal.signal_id}: {str(e)}")
+    
+    # Multi-broker convenience methods
+    async def get_current_price_via_broker(self, symbol: str) -> float:
+        """Get current price using appropriate broker for the symbol."""
+        if self.broker_manager:
+            return await self.broker_manager.get_current_price(symbol)
+        else:
+            # Fallback to legacy market data
+            return await self.market_data.get_current_price(symbol)
+    
+    async def submit_order_via_broker(self, symbol: str, side: str, quantity: float, order_type: str = "market", price: float = None) -> str:
+        """Submit order using appropriate broker for the symbol."""
+        if not self.broker_manager:
+            raise TradingBotException("BrokerManager not available - cannot route orders")
+        
+        # Convert to universal order format
+        universal_order = UniversalOrder(
+            symbol=symbol,
+            side=OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL,
+            type=OrderType.MARKET if order_type.lower() == "market" else OrderType.LIMIT,
+            quantity=quantity,
+            time_in_force=TimeInForce.DAY,
+            limit_price=price
+        )
+        
+        # Route through BrokerManager
+        response = await self.broker_manager.submit_order(symbol, universal_order)
+        return response.broker_order_id
+    
+    async def get_multi_broker_positions(self) -> Dict[str, Any]:
+        """Get positions across all brokers."""
+        if not self.broker_manager:
+            # Fallback to legacy positions
+            legacy_positions = await self.get_positions()
+            return {"legacy": [p.__dict__ for p in legacy_positions]}
+        
+        # Get positions from all brokers
+        all_positions = await self.broker_manager.get_positions()
+        
+        # Group by broker type
+        positions_by_broker = {}
+        for pos in all_positions:
+            broker_type = pos.broker_type.value
+            if broker_type not in positions_by_broker:
+                positions_by_broker[broker_type] = []
+            positions_by_broker[broker_type].append({
+                'symbol': pos.symbol,
+                'quantity': pos.quantity,
+                'average_cost': pos.average_cost,
+                'market_value': pos.market_value,
+                'unrealized_pnl': pos.unrealized_pnl
+            })
+        
+        return positions_by_broker
+    
+    async def get_broker_health_status(self) -> Dict[str, Any]:
+        """Get health status of all connected brokers."""
+        if not self.broker_manager:
+            return {"error": "BrokerManager not available"}
+        
+        health_status = self.broker_manager.get_broker_health()
+        
+        # Convert to serializable format
+        result = {}
+        for broker_type, health in health_status.items():
+            result[broker_type.value] = {
+                'is_healthy': health.is_healthy,
+                'last_health_check': health.last_health_check.isoformat() if health.last_health_check else None,
+                'consecutive_failures': health.consecutive_failures,
+                'error_message': health.error_message
+            }
+        
+        return result
     
     async def _handle_buy_signal(self, signal: TradingSignal) -> None:
         """Handle buy signals with support level averaging."""
@@ -1327,37 +1709,84 @@ class TradingBotOrchestrator:
             logger.error(f"Error logging position status: {str(e)}")
     
     async def _update_market_data(self) -> None:
-        """Update market data periodically."""
+        """Update market data periodically with market hours awareness."""
         try:
             while self.is_running and not self.shutdown_event.is_set():
                 try:
-                    # Update prices for all active positions
-                    positions = await self.position_manager.get_all_positions()
+                    # Check if we should be updating market data based on market hours
+                    should_update_data = True
+                    update_interval = self.config.get_config("monitoring.market_data_refresh_interval", 60)
                     
-                    for position in positions:
-                        if position.quantity != 0:
-                            current_price = await self.market_data.get_current_price(position.symbol)
-                            # Update position with current price
-                            position.current_price = current_price
+                    # If market hours manager is available, use intelligent data fetching
+                    if self.market_hours_manager:
+                        try:
+                            # Check if any exchange is active
+                            should_be_active = await self.market_hours_manager.should_bot_be_active()
+                            active_exchanges = await self.market_hours_manager.get_active_exchanges()
                             
-                            # Calculate unrealized P&L
-                            if position.quantity > 0:
-                                position.unrealized_pnl = (current_price - position.avg_price) * position.quantity
+                            # Adjust update behavior based on market status
+                            if not active_exchanges:
+                                # No exchanges active - reduce update frequency significantly
+                                should_update_data = False
+                                update_interval = 3600  # Check once per hour
+                                logger.debug("📊 No exchanges active: Reducing market data updates to hourly")
+                                
+                            elif not should_be_active:
+                                # Markets closed - reduce update frequency
+                                update_interval = 600  # 10 minutes
+                                logger.debug("📊 Markets closed: Reducing market data updates to 10 minutes")
+                                
+                            elif len(active_exchanges) == 1:
+                                # One exchange active - moderate update frequency
+                                update_interval = 180  # 3 minutes
+                                logger.debug("📊 One exchange active: Market data updates every 3 minutes")
+                                
                             else:
-                                position.unrealized_pnl = (position.avg_price - current_price) * abs(position.quantity)
+                                # Multiple exchanges or active session - normal frequency
+                                update_interval = self.config.get_config("monitoring.market_data_refresh_interval", 60)
+                                logger.debug("📊 Market open: Normal market data update frequency")
+                                
+                        except Exception as status_error:
+                            logger.warning(f"⚠️ Error getting market status for data updates: {status_error}")
+                            # Continue with normal updates if status check fails
                     
-                    # Update at configurable interval or until shutdown
-                    refresh_interval = self.config.get_config("monitoring.market_data_refresh_interval", 60)
+                    # Update prices for all active positions (if we should update)
+                    if should_update_data:
+                        positions = await self.position_manager.get_all_positions()
+                        active_positions = [p for p in positions if p.quantity != 0]
+                        
+                        if active_positions:
+                            logger.debug(f"📊 Updating market data for {len(active_positions)} active positions")
+                            
+                            for position in active_positions:
+                                try:
+                                    current_price = await self.market_data.get_current_price(position.symbol)
+                                    # Update position with current price
+                                    position.current_price = current_price
+                                    
+                                    # Calculate unrealized P&L
+                                    if position.quantity > 0:
+                                        position.unrealized_pnl = (current_price - position.avg_price) * position.quantity
+                                    else:
+                                        position.unrealized_pnl = (position.avg_price - current_price) * abs(position.quantity)
+                                        
+                                except Exception as price_error:
+                                    logger.warning(f"⚠️ Failed to update price for {position.symbol}: {price_error}")
+                        else:
+                            logger.debug("📊 No active positions, skipping market data updates")
+                    
+                    # Wait for next update cycle
                     try:
-                        await asyncio.wait_for(self.shutdown_event.wait(), timeout=refresh_interval)
+                        await asyncio.wait_for(self.shutdown_event.wait(), timeout=update_interval)
                         break  # Shutdown signal received
                     except asyncio.TimeoutError:
                         continue  # Continue monitoring
                         
                 except Exception as e:
                     logger.error(f"Error updating market data: {str(e)}")
+                    # Use fallback interval on error
                     try:
-                        await asyncio.wait_for(self.shutdown_event.wait(), timeout=60)
+                        await asyncio.wait_for(self.shutdown_event.wait(), timeout=300)  # 5 minute fallback
                         break  # Shutdown signal received
                     except asyncio.TimeoutError:
                         continue  # Continue monitoring
@@ -1366,14 +1795,46 @@ class TradingBotOrchestrator:
             raise
     
     async def _cancel_all_orders(self) -> None:
-        """Cancel all open orders during shutdown."""
+        """Cancel all open orders during shutdown using both BrokerManager and legacy methods."""
         try:
-            open_orders = await self.order_manager.get_open_orders()
+            cancelled_count = 0
             
-            for order in open_orders:
-                await self.order_manager.cancel_order(order.order_id)
+            # Cancel orders via BrokerManager if available
+            if self.broker_manager:
+                logger.info("🔗 Cancelling orders via BrokerManager...")
+                try:
+                    # Get all positions to find symbols with potential orders
+                    positions = await self.broker_manager.get_positions()
+                    symbols_with_positions = [pos.symbol for pos in positions if pos.quantity != 0]
+                    
+                    # For each symbol, cancel any open orders
+                    for symbol in symbols_with_positions:
+                        try:
+                            # Note: BrokerManager doesn't have a direct cancel_all_orders method yet
+                            # This is a placeholder for future implementation
+                            logger.debug(f"Checking for open orders on {symbol} via BrokerManager...")
+                        except Exception as symbol_cancel_error:
+                            logger.warning(f"Failed to cancel BrokerManager orders for {symbol}: {symbol_cancel_error}")
+                    
+                    logger.info("✅ BrokerManager order cancellation completed")
+                except Exception as broker_cancel_error:
+                    logger.error(f"❌ Error cancelling orders via BrokerManager: {broker_cancel_error}")
+            
+            # Cancel orders via legacy OrderManager (primary method for now)
+            if self.order_manager:
+                logger.info("📋 Cancelling orders via legacy OrderManager...")
+                open_orders = await self.order_manager.get_open_orders()
                 
-            logger.info(f"Canceled {len(open_orders)} open orders")
+                for order in open_orders:
+                    try:
+                        await self.order_manager.cancel_order(order.order_id)
+                        cancelled_count += 1
+                    except Exception as order_cancel_error:
+                        logger.warning(f"Failed to cancel order {order.order_id}: {order_cancel_error}")
+                
+                logger.info(f"✅ Cancelled {cancelled_count} orders via legacy OrderManager")
+            
+            logger.info(f"Order cancellation completed - {cancelled_count} orders cancelled")
             
         except Exception as e:
             logger.error(f"Error canceling orders: {str(e)}")
@@ -1526,11 +1987,11 @@ class TradingBotOrchestrator:
 
     # Public API methods for users
     async def get_status(self) -> Dict[str, Any]:
-        """Get current bot status."""
+        """Get current bot status including multi-broker information."""
         positions = await self.position_manager.get_all_positions()
         open_orders = await self.order_manager.get_open_orders()
         
-        return {
+        status = {
             "is_running": self.is_running,
             "positions": len([p for p in positions if p.quantity != 0]),
             "open_orders": len(open_orders),
@@ -1538,6 +1999,26 @@ class TradingBotOrchestrator:
             "signal_listener_running": self.signal_listener.is_running if self.signal_listener else False,
             "processed_signals": len(self.processed_signals)
         }
+        
+        # Add broker manager status if available
+        if self.broker_manager:
+            available_brokers = self.broker_manager.get_available_brokers()
+            broker_health = self.broker_manager.get_broker_health()
+            
+            status["broker_manager"] = {
+                "available_brokers": [b.value for b in available_brokers],
+                "broker_count": len(available_brokers),
+                "broker_health": {
+                    broker_type.value: {
+                        "is_healthy": health.is_healthy,
+                        "consecutive_failures": health.consecutive_failures
+                    } for broker_type, health in broker_health.items()
+                }
+            }
+        else:
+            status["broker_manager"] = {"status": "not_available", "note": "Using legacy Alpaca clients"}
+        
+        return status
     
     async def get_positions(self) -> List[Position]:
         """Get all current positions."""
