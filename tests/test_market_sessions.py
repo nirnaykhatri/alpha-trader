@@ -27,7 +27,7 @@ async def test_market_session_coverage():
     print("=" * 70)
     
     # Initialize
-    config = ConfigurationManager("config.yaml")
+    config = ConfigurationManager()  # Uses config/ TOML files
     provider = AlpacaMarketDataProvider(config)
     
     symbol = "RGTI"

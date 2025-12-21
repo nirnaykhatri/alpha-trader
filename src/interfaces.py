@@ -76,6 +76,10 @@ class Order:
     filled_at: Optional[datetime] = None
     filled_price: Optional[float] = None
     filled_quantity: Optional[float] = None
+    broker: Optional[str] = None
+    broker_order_id: Optional[str] = None
+    is_dca_order: bool = False  # Indicates if this is a DCA (Dollar Cost Averaging) order
+    is_closing: bool = False  # Indicates if this order is closing a position
     
     def __post_init__(self):
         if self.created_at is None:
@@ -94,6 +98,7 @@ class Position:
     unrealized_pnl: float
     realized_pnl: float
     created_at: datetime = None
+    broker: Optional[str] = None
     
     def __post_init__(self):
         if self.created_at is None:
@@ -139,7 +144,6 @@ class SupportLevelData:
             # Find lowest resistance above current price
             resistance_levels = [level for level in self.levels if level.price > current_price]
             return min(resistance_levels, key=lambda x: x.price) if resistance_levels else None
-        pass
 
 
 class ISignalListener(ABC):
@@ -303,4 +307,23 @@ class IAccountProvider(ABC):
     @abstractmethod
     async def get_portfolio_value(self) -> float:
         """Get total portfolio value including positions."""
+        pass
+    
+    @abstractmethod
+    async def get_cash(self) -> float:
+        """Get available cash (not including margin)."""
+        pass
+
+
+class IAsyncContextManager(ABC):
+    """Interface for components requiring async lifecycle management."""
+    
+    @abstractmethod
+    async def start(self) -> None:
+        """Start the component."""
+        pass
+        
+    @abstractmethod
+    async def stop(self) -> None:
+        """Stop the component and cleanup resources."""
         pass

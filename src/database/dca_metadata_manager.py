@@ -4,14 +4,12 @@ This extends the existing database to store DCA tracking information per positio
 """
 
 from sqlalchemy import Column, String, Float, Integer, DateTime, Text, JSON
-from sqlalchemy.orm import declarative_base
 from datetime import datetime
 import json
 import uuid
 from typing import List, Optional, Dict, Any
 
-# Extend the existing database schema
-Base = declarative_base()
+from src.database.base import Base
 
 class DCAMetadataRecord(Base):
     """

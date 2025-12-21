@@ -16,15 +16,16 @@ from alpaca.data.requests import (
     StockLatestBarRequest
 )
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
-from ..interfaces import IMarketDataProvider, IConfigurationManager
-from ..exceptions import MarketDataException
-from ..core.logging_config import get_logger
+from src.interfaces import IMarketDataProvider, IConfigurationManager, IAsyncContextManager
+from src.exceptions import MarketDataException
+from src.core.logging_config import get_logger
+from src.utils import run_blocking
 import time
 
 logger = get_logger(__name__)
 
 
-class AlpacaMarketDataProvider(IMarketDataProvider):
+class AlpacaMarketDataProvider(IMarketDataProvider, IAsyncContextManager):
     """
     Enhanced Market Data Provider using Alpaca API.
     Provides both regular and extended hours market data with multiple fallback methods.
@@ -72,6 +73,14 @@ class AlpacaMarketDataProvider(IMarketDataProvider):
             logger.warning("📊 Extended Hours Data: Free tier limited to IEX exchange only - coverage may be incomplete")
             logger.warning("📊 For full extended hours data from all exchanges, upgrade to SIP data plan")
 
+    async def start(self) -> None:
+        """Start the market data provider (IAsyncContextManager implementation)."""
+        logger.info("AlpacaMarketDataProvider started")
+
+    async def stop(self) -> None:
+        """Stop the market data provider (IAsyncContextManager implementation)."""
+        await self.close()
+
     async def get_current_price(self, symbol: str) -> float:
         """
         Get the most recent available price for a symbol using enhanced Alpaca APIs.
@@ -90,228 +99,292 @@ class AlpacaMarketDataProvider(IMarketDataProvider):
         try:
             logger.debug(f"🔍 Fetching current price for {symbol} (freshness-prioritized)")
             
+            # Check cache first
+            cached_price = self._check_price_cache(symbol)
+            if cached_price:
+                return cached_price
+            
             # Get market status for intelligent data handling
             market_status = self._get_market_status()
             
-            # Check cache first
-            cache_key = f"price_{symbol}"
-            cached_price = self._get_cached_price(cache_key)
-            if cached_price:
-                logger.debug(f"📋 Using cached price for {symbol}: ${cached_price:.4f}")
-                return cached_price
-            
-            # COLLECT DATA FROM ALL AVAILABLE SOURCES IN PARALLEL
-            logger.debug(f"📊 Collecting data from all sources for freshness comparison...")
-            
-            price_candidates = []
-            
-            # Collect from Snapshot API (PRIORITY 1 - Best for market hours)
-            if self._use_snapshot:
-                try:
-                    logger.debug(f"📸 Collecting SNAPSHOT data for {symbol}")
-                    price, age = await self._get_snapshot_price(symbol)
-                    if price and age is not None:
-                        price_candidates.append({
-                            'price': price,
-                            'age': age,
-                            'source': 'snapshot_api',
-                            'priority': 1  # Highest priority - guaranteed to work during market hours
-                        })
-                        logger.debug(f"📸 Snapshot: ${price:.4f} (age: {age:.0f}s)")
-                except Exception as e:
-                    logger.debug(f"❌ SNAPSHOT collection failed: {e}")
-            
-            # Collect from Latest Trade API (PRIORITY 2 - Most recent execution)
-            try:
-                logger.debug(f"🔄 Collecting TRADE data for {symbol}")
-                price, age = await self._get_latest_trade_price(symbol)
-                if price and age is not None:
-                    price_candidates.append({
-                        'price': price,
-                        'age': age,
-                        'source': 'latest_trade',
-                        'priority': 2  # Second priority - actual trade execution
-                    })
-                    logger.debug(f"🔄 Trade: ${price:.4f} (age: {age:.0f}s)")
-            except Exception as e:
-                logger.debug(f"❌ TRADE collection failed: {e}")
-            
-            # Collect from Latest Quote API (PRIORITY 3 - Bid/Ask data)
-            try:
-                logger.debug(f"📡 Collecting QUOTE data for {symbol}")
-                price, age = await self._get_latest_quote_price(symbol)
-                if price and age is not None:
-                    price_candidates.append({
-                        'price': price,
-                        'age': age,
-                        'source': 'latest_quote',
-                        'priority': 3  # Third priority - bid/ask spread data
-                    })
-                    logger.debug(f"📡 Quote: ${price:.4f} (age: {age:.0f}s)")
-            except Exception as e:
-                logger.debug(f"❌ QUOTE collection failed: {e}")
-                
-            # Collect from Latest Bar API (PRIORITY 4 - 1-minute candle data)
-            if self._fallback_to_bars:
-                try:
-                    logger.debug(f"� Collecting LATEST BAR data for {symbol}")
-                    price, age = await self._get_latest_bar_price(symbol)
-                    if price and age is not None:
-                        # During extended hours, bars are more valuable - reduce effective age
-                        effective_age = age * 0.8 if market_status['is_extended_hours'] else age
-                        price_candidates.append({
-                            'price': price,
-                            'age': effective_age,
-                            'source': 'latest_bar',
-                            'priority': 4,  # Fourth priority - comprehensive candle data
-                            'actual_age': age  # Store original age for logging
-                        })
-                        age_note = f" (effective: {effective_age:.0f}s)" if market_status['is_extended_hours'] else ""
-                        logger.debug(f"📊 Latest Bar: ${price:.4f} (age: {age:.0f}s{age_note})")
-                    else:
-                        # Fallback to Recent Bars API (PRIORITY 5 - Historical fallback)
-                        logger.debug(f"📊 Latest bar failed, trying RECENT BARS for {symbol}")
-                        price, age = await self._get_recent_bars_price(symbol)
-                        if price and age is not None:
-                            # During extended hours, bars are more valuable - reduce effective age
-                            effective_age = age * 0.8 if market_status['is_extended_hours'] else age
-                            price_candidates.append({
-                                'price': price,
-                                'age': effective_age,
-                                'source': 'recent_bars',
-                                'priority': 5,  # Lowest priority - historical data fallback
-                                'actual_age': age  # Store original age for logging
-                            })
-                            age_note = f" (effective: {effective_age:.0f}s)" if market_status['is_extended_hours'] else ""
-                            logger.debug(f"� Recent Bars: ${price:.4f} (age: {age:.0f}s{age_note})")
-                except Exception as e:
-                    logger.debug(f"❌ BARS collection failed: {e}")
+            # Collect price data from all sources
+            price_candidates = await self._collect_price_candidates(symbol, market_status)
             
             if not price_candidates:
                 raise MarketDataException(f"Unable to fetch current price for {symbol} from any Alpaca source")
             
-            # SELECT BASED ON PRIORITY ORDER + FRESHNESS COMPARISON
-            logger.debug(f"🎯 Selecting from {len(price_candidates)} candidates using priority + freshness...")
+            # Select best candidate based on priority and freshness
+            best_candidate = self._select_best_candidate(price_candidates)
             
-            if not price_candidates:
-                raise MarketDataException(f"Unable to fetch current price for {symbol} from any Alpaca source")
-            
-            # Step 1: Group candidates by priority level
-            priority_groups = {}
-            for candidate in price_candidates:
-                priority = candidate['priority']
-                if priority not in priority_groups:
-                    priority_groups[priority] = []
-                priority_groups[priority].append(candidate)
-            
-            # Step 2: Find the best priority level that has candidates
-            best_priority = min(priority_groups.keys())
-            best_priority_candidates = priority_groups[best_priority]
-            
-            # Step 3: Among candidates at the best priority level, select the freshest
-            if len(best_priority_candidates) == 1:
-                best_candidate = best_priority_candidates[0]
-            else:
-                # Multiple candidates at same priority - use freshness as tiebreaker
-                best_candidate = min(best_priority_candidates, key=lambda x: x['age'])
-            
-            # Step 4: Final freshness comparison across ALL sources (user's emphasis)
-            # If another source is significantly fresher, consider it
-            freshest_overall = min(price_candidates, key=lambda x: x['age'])
-            
-            # AGGRESSIVE FRESHNESS PRIORITIZATION:
-            # If the best priority candidate is very stale (>1hr), strongly prefer fresher data
-            age_difference = best_candidate['age'] - freshest_overall['age']
-            
-            # More aggressive freshness override logic
-            should_override = False
-            if freshest_overall != best_candidate and freshest_overall['priority'] <= 4:
-                # Handle negative ages (likely timezone issues) - treat as 0
-                freshest_age = max(0, freshest_overall['age'])
-                best_age = max(0, best_candidate['age'])
-                corrected_age_diff = best_age - freshest_age
-                
-                if best_age > 3600:  # If best candidate is >1 hour old
-                    should_override = corrected_age_diff > 10  # Switch if other source is even 10s fresher
-                    override_reason = f"stale data override (best is {best_age/3600:.1f}hr old)"
-                elif best_age > 300:  # If best candidate is >5 minutes old  
-                    should_override = corrected_age_diff > 30  # Switch if other source is 30s fresher
-                    override_reason = f"moderately stale override ({best_age/60:.1f}min old)"
-                elif freshest_age < 0:  # Negative age = very fresh/future timestamp
-                    should_override = True  # Always prefer negative age data (fresher timestamps)
-                    override_reason = "negative age override (very fresh data)"
-                elif corrected_age_diff > 15:  # For relatively fresh data, 15s difference is significant
-                    should_override = True
-                    override_reason = "fresh data override (>15s fresher)"
-                else:
-                    should_override = corrected_age_diff > 60  # Original threshold for very fresh data
-                    override_reason = "standard freshness override"
-            
-            if should_override:
-                logger.info(f"🚀 FRESHNESS OVERRIDE ({override_reason}): {freshest_overall['source']} is {age_difference:.0f}s fresher, switching from {best_candidate['source']}")
-                best_candidate = freshest_overall
-            
-            current_price = best_candidate['price']
-            price_age_seconds = best_candidate.get('actual_age', best_candidate['age'])  # Use original age for reporting
-            data_source = best_candidate['source']
-            
-            # Log the selection with priority and freshness context
-            priority_names = {1: "Snapshot", 2: "Trade", 3: "Quote", 4: "Latest Bar", 5: "Recent Bars"}
-            priority_name = priority_names.get(best_candidate['priority'], f"P{best_candidate['priority']}")
-            
-            # Add warning for very stale data selection
-            if best_candidate['age'] > 3600:  # > 1 hour
-                logger.warning(f"⚠️ SELECTING VERY STALE DATA: {data_source.upper()} is {best_candidate['age']/3600:.1f} hours old!")
-                logger.warning(f"⚠️ Consider if this impacts trading decisions - market may have moved significantly")
-            elif best_candidate['age'] > 600:  # > 10 minutes
-                logger.warning(f"🟡 Selected data is somewhat stale: {best_candidate['age']/60:.1f} minutes old")
-            
-            logger.info(f"🏆 SELECTED: {data_source.upper()} (Priority {best_candidate['priority']}: {priority_name}) - ${current_price:.4f} (age: {price_age_seconds:.0f}s)")
-            
-            # Show all candidates with their priority levels for transparency
-            if len(price_candidates) > 1:
-                candidate_info = []
-                for c in sorted(price_candidates, key=lambda x: x['priority']):
-                    actual_age = c.get('actual_age', c['age'])
-                    selected_marker = "👑" if c == best_candidate else "  "
-                    age_formatted = f"{actual_age/3600:.1f}hr" if actual_age > 3600 else f"{actual_age:.0f}s"
-                    candidate_info.append(f"{selected_marker}P{c['priority']}:{c['source']}({age_formatted})")
-                logger.info(f"📊 All candidates: {' | '.join(candidate_info)}")
-                
-                # Show freshness comparison details
-                if best_candidate != freshest_overall:
-                    age_diff = best_candidate['age'] - freshest_overall['age']
-                    logger.info(f"🔍 FRESHNESS ANALYSIS: Selected {best_candidate['source']} ({best_candidate['age']:.0f}s), Freshest available: {freshest_overall['source']} ({freshest_overall['age']:.0f}s) - {age_diff:.0f}s difference")
-                
-                # Extended hours specific logging
-                if market_status['is_extended_hours']:
-                    extended_bars = [c for c in price_candidates if c['source'] in ['latest_bar', 'recent_bars']]
-                    if extended_bars:
-                        if best_candidate in extended_bars:
-                            logger.info(f"🌅 Extended hours advantage: Using bars data for potential extended hours pricing")
-                        else:
-                            bars_ages = [f"{c['source']}({c.get('actual_age', c['age']):.0f}s)" for c in extended_bars]
-                            logger.info(f"📊 Extended hours note: Bars available but priority/freshness favored {data_source}: {', '.join(bars_ages)}")
-            
-            # Cache the result
-            self._cache_price(cache_key, current_price)
-            
-            # Enhanced logging with market context
-            age_info = f" (age: {price_age_seconds:.0f}s)"
-            market_info = f" [{market_status['status']}]"
-            stale_warning = self._get_staleness_warning(price_age_seconds, market_status)
-            
-            logger.info(f"💰 FRESHEST PRICE: {symbol} = ${current_price:.4f} (source: {data_source}){age_info}{market_info}{stale_warning}")
-            
-            return current_price
-            
-            return current_price
+            # Cache and return the selected price
+            return self._cache_and_return_price(symbol, best_candidate)
             
         except MarketDataException:
             raise
         except Exception as e:
             logger.error(f"Unexpected error fetching price for {symbol}: {str(e)}")
             raise MarketDataException(f"Failed to fetch price for {symbol}: {str(e)}")
+    
+    def _check_price_cache(self, symbol: str) -> Optional[float]:
+        """
+        Check if a cached price exists for the symbol.
+        
+        Args:
+            symbol: Trading symbol
+            
+        Returns:
+            Cached price if available and fresh, None otherwise
+        """
+        cache_key = f"price_{symbol}"
+        cached_price = self._get_cached_price(cache_key)
+        if cached_price:
+            logger.debug(f"📋 Using cached price for {symbol}: ${cached_price:.4f}")
+            return cached_price
+        return None
+    
+    async def _collect_price_candidates(self, symbol: str, market_status: Dict) -> List[Dict]:
+        """
+        Collect price data from all available sources.
+        
+        Args:
+            symbol: Trading symbol
+            market_status: Current market status information
+            
+        Returns:
+            List of price candidates with metadata
+        """
+        logger.debug(f"📊 Collecting data from all sources for freshness comparison...")
+        price_candidates = []
+        
+        # Collect from Snapshot API (PRIORITY 1 - Best for market hours)
+        if self._use_snapshot:
+            candidate = await self._collect_snapshot_data(symbol)
+            if candidate:
+                price_candidates.append(candidate)
+        
+        # Collect from Latest Trade API (PRIORITY 2 - Most recent execution)
+        candidate = await self._collect_trade_data(symbol)
+        if candidate:
+            price_candidates.append(candidate)
+        
+        # Collect from Latest Quote API (PRIORITY 3 - Bid/Ask data)
+        candidate = await self._collect_quote_data(symbol)
+        if candidate:
+            price_candidates.append(candidate)
+        
+        # Collect from Bar APIs (PRIORITY 4 & 5 - Bar data)
+        if self._fallback_to_bars:
+            bar_candidates = await self._collect_bar_data(symbol, market_status)
+            price_candidates.extend(bar_candidates)
+        
+        return price_candidates
+    
+    async def _collect_snapshot_data(self, symbol: str) -> Optional[Dict]:
+        """Collect data from Snapshot API."""
+        try:
+            logger.debug(f"📸 Collecting SNAPSHOT data for {symbol}")
+            price, age = await self._get_snapshot_price(symbol)
+            if price and age is not None:
+                logger.debug(f"📸 Snapshot: ${price:.4f} (age: {age:.0f}s)")
+                return {
+                    'price': price,
+                    'age': age,
+                    'source': 'snapshot_api',
+                    'priority': 1
+                }
+        except Exception as e:
+            logger.debug(f"❌ SNAPSHOT collection failed: {e}")
+        return None
+    
+    async def _collect_trade_data(self, symbol: str) -> Optional[Dict]:
+        """Collect data from Latest Trade API."""
+        try:
+            logger.debug(f"🔄 Collecting TRADE data for {symbol}")
+            price, age = await self._get_latest_trade_price(symbol)
+            if price and age is not None:
+                logger.debug(f"🔄 Trade: ${price:.4f} (age: {age:.0f}s)")
+                return {
+                    'price': price,
+                    'age': age,
+                    'source': 'latest_trade',
+                    'priority': 2
+                }
+        except Exception as e:
+            logger.debug(f"❌ TRADE collection failed: {e}")
+        return None
+    
+    async def _collect_quote_data(self, symbol: str) -> Optional[Dict]:
+        """Collect data from Latest Quote API."""
+        try:
+            logger.debug(f"📡 Collecting QUOTE data for {symbol}")
+            price, age = await self._get_latest_quote_price(symbol)
+            if price and age is not None:
+                logger.debug(f"📡 Quote: ${price:.4f} (age: {age:.0f}s)")
+                return {
+                    'price': price,
+                    'age': age,
+                    'source': 'latest_quote',
+                    'priority': 3
+                }
+        except Exception as e:
+            logger.debug(f"❌ QUOTE collection failed: {e}")
+        return None
+    
+    async def _collect_bar_data(self, symbol: str, market_status: Dict) -> List[Dict]:
+        """Collect data from Bar APIs."""
+        bar_candidates = []
+        try:
+            logger.debug(f"📊 Collecting LATEST BAR data for {symbol}")
+            price, age = await self._get_latest_bar_price(symbol)
+            if price and age is not None:
+                # During extended hours, bars are more valuable - reduce effective age
+                effective_age = age * 0.8 if market_status['is_extended_hours'] else age
+                age_note = f" (effective: {effective_age:.0f}s)" if market_status['is_extended_hours'] else ""
+                logger.debug(f"📊 Latest Bar: ${price:.4f} (age: {age:.0f}s{age_note})")
+                bar_candidates.append({
+                    'price': price,
+                    'age': effective_age,
+                    'source': 'latest_bar',
+                    'priority': 4,
+                    'actual_age': age
+                })
+            else:
+                # Fallback to Recent Bars API
+                logger.debug(f"📊 Latest bar failed, trying RECENT BARS for {symbol}")
+                price, age = await self._get_recent_bars_price(symbol)
+                if price and age is not None:
+                    effective_age = age * 0.8 if market_status['is_extended_hours'] else age
+                    age_note = f" (effective: {effective_age:.0f}s)" if market_status['is_extended_hours'] else ""
+                    logger.debug(f"📊 Recent Bars: ${price:.4f} (age: {age:.0f}s{age_note})")
+                    bar_candidates.append({
+                        'price': price,
+                        'age': effective_age,
+                        'source': 'recent_bars',
+                        'priority': 5,
+                        'actual_age': age
+                    })
+        except Exception as e:
+            logger.debug(f"❌ BARS collection failed: {e}")
+        return bar_candidates
+    
+    def _select_best_candidate(self, price_candidates: List[Dict]) -> Dict:
+        """
+        Select the best price candidate based on priority and freshness.
+        
+        Args:
+            price_candidates: List of price candidates with metadata
+            
+        Returns:
+            Best candidate dictionary
+        """
+        logger.debug(f"🎯 Selecting from {len(price_candidates)} candidates using priority + freshness...")
+        
+        # Group candidates by priority level
+        priority_groups = {}
+        for candidate in price_candidates:
+            priority = candidate['priority']
+            if priority not in priority_groups:
+                priority_groups[priority] = []
+            priority_groups[priority].append(candidate)
+        
+        # Find the best priority level
+        best_priority = min(priority_groups.keys())
+        best_priority_candidates = priority_groups[best_priority]
+        
+        # Among candidates at the best priority level, select the freshest
+        if len(best_priority_candidates) == 1:
+            best_candidate = best_priority_candidates[0]
+        else:
+            best_candidate = min(best_priority_candidates, key=lambda x: x['age'])
+        
+        # Apply freshness override logic if needed
+        freshest_overall = min(price_candidates, key=lambda x: x['age'])
+        best_candidate = self._apply_freshness_override(best_candidate, freshest_overall, price_candidates)
+        
+        return best_candidate
+    
+    def _apply_freshness_override(self, best_candidate: Dict, freshest_overall: Dict, all_candidates: List[Dict]) -> Dict:
+        """
+        Apply aggressive freshness override logic if fresher data is available.
+        
+        Args:
+            best_candidate: Current best candidate based on priority
+            freshest_overall: Freshest candidate across all sources
+            all_candidates: All available candidates
+            
+        Returns:
+            Final selected candidate (may override best_candidate)
+        """
+        if freshest_overall == best_candidate or freshest_overall['priority'] > 4:
+            return best_candidate
+        
+        # Calculate age difference (handle negative ages)
+        freshest_age = max(0, freshest_overall['age'])
+        best_age = max(0, best_candidate['age'])
+        age_difference = best_age - freshest_age
+        
+        # Determine if we should override based on staleness
+        should_override, override_reason = self._should_override_for_freshness(
+            best_age, freshest_age, age_difference
+        )
+        
+        if should_override:
+            logger.info(
+                f"⚡ FRESHNESS OVERRIDE: {override_reason} - "
+                f"Switching from {best_candidate['source']} ({best_age:.0f}s) "
+                f"to {freshest_overall['source']} ({freshest_age:.0f}s)"
+            )
+            return freshest_overall
+        
+        return best_candidate
+    
+    def _should_override_for_freshness(self, best_age: float, freshest_age: float, age_diff: float) -> Tuple[bool, str]:
+        """
+        Determine if we should override priority for freshness.
+        
+        Returns:
+            Tuple of (should_override, reason)
+        """
+        if best_age > 3600:  # >1 hour old
+            return (age_diff > 10, f"stale data override (best is {best_age/3600:.1f}hr old)")
+        elif best_age > 300:  # >5 minutes old
+            return (age_diff > 30, f"moderately stale override ({best_age/60:.1f}min old)")
+        elif freshest_age < 0:  # Negative age = very fresh
+            return (True, "negative age override (very fresh data)")
+        elif age_diff > 15:  # For relatively fresh data
+            return (True, "fresh data override (>15s fresher)")
+        else:
+            return (age_diff > 60, "standard freshness override")
+    
+    def _cache_and_return_price(self, symbol: str, candidate: Dict) -> float:
+        """
+        Cache the selected price and return it with appropriate logging.
+        
+        Args:
+            symbol: Trading symbol
+            candidate: Selected price candidate
+            
+        Returns:
+            Price value
+        """
+        price = candidate['price']
+        age = candidate.get('actual_age', candidate['age'])
+        source = candidate['source']
+        
+        # Cache the result
+        cache_key = f"price_{symbol}"
+        self._cache_price(cache_key, price)
+        
+        # Get market status for logging
+        market_status = self._get_market_status()
+        stale_warning = self._get_staleness_warning(age, market_status)
+        
+        logger.info(
+            f"💰 FRESHEST PRICE: {symbol} = ${price:.4f} "
+            f"(source: {source}) (age: {age:.0f}s) [{market_status['status']}]{stale_warning}"
+        )
+        
+        return price
 
     async def _get_snapshot_price(self, symbol: str) -> Tuple[Optional[float], Optional[float]]:
         """Get current price using Alpaca Snapshot API (includes extended hours)."""
@@ -321,7 +394,7 @@ class AlpacaMarketDataProvider(IMarketDataProvider):
             
             # Use timeout for reliability
             response = await asyncio.wait_for(
-                loop.run_in_executor(None, self._client.get_stock_snapshot, request),
+                run_blocking(self._client.get_stock_snapshot, request),
                 timeout=self._snapshot_timeout
             )
             
@@ -380,7 +453,7 @@ class AlpacaMarketDataProvider(IMarketDataProvider):
             loop = asyncio.get_event_loop()
             
             response = await asyncio.wait_for(
-                loop.run_in_executor(None, self._client.get_stock_latest_quote, request),
+                run_blocking(self._client.get_stock_latest_quote, request),
                 timeout=self._quote_timeout
             )
             
@@ -413,7 +486,7 @@ class AlpacaMarketDataProvider(IMarketDataProvider):
             loop = asyncio.get_event_loop()
             
             response = await asyncio.wait_for(
-                loop.run_in_executor(None, self._client.get_stock_latest_trade, request),
+                run_blocking(self._client.get_stock_latest_trade, request),
                 timeout=self._quote_timeout
             )
             
@@ -445,7 +518,7 @@ class AlpacaMarketDataProvider(IMarketDataProvider):
             
             loop = asyncio.get_event_loop()
             response = await asyncio.wait_for(
-                loop.run_in_executor(None, self._client.get_stock_latest_bar, request),
+                run_blocking(self._client.get_stock_latest_bar, request),
                 timeout=self._bars_timeout
             )
             
@@ -513,7 +586,7 @@ class AlpacaMarketDataProvider(IMarketDataProvider):
             
             loop = asyncio.get_event_loop()
             response = await asyncio.wait_for(
-                loop.run_in_executor(None, self._client.get_stock_bars, request),
+                run_blocking(self._client.get_stock_bars, request),
                 timeout=self._bars_timeout
             )
             
@@ -757,8 +830,7 @@ class AlpacaMarketDataProvider(IMarketDataProvider):
             )
             
             # Use synchronous call in executor like the working test
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, self._client.get_stock_bars, request)
+            response = await run_blocking(self._client.get_stock_bars, request)
             
             # Fix: BarSet doesn't support 'in' operator, use direct access or response.data
             if response and symbol in response.data:

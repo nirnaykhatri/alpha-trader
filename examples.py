@@ -21,7 +21,7 @@ async def example_basic_usage():
     """Example: Basic bot usage with context manager."""
     print("🚀 Example: Basic Trading Bot Usage")
     
-    async with trading_bot_context("config.yaml") as bot:
+    async with trading_bot_context() as bot:
         # Start the bot (this would normally run forever)
         print("Bot started! Press Ctrl+C to stop.")
         
@@ -33,7 +33,7 @@ async def example_manual_signal():
     """Example: Manually send a trading signal."""
     print("📊 Example: Manual Trading Signal")
     
-    bot = TradingBotOrchestrator("config.yaml")
+    bot = TradingBotOrchestrator()
     
     try:
         # Initialize components
@@ -65,7 +65,7 @@ async def example_position_monitoring():
     """Example: Monitor positions and get status."""
     print("📈 Example: Position Monitoring")
     
-    bot = TradingBotOrchestrator("config.yaml")
+    bot = TradingBotOrchestrator()
     
     try:
         await bot._initialize_components()
@@ -97,7 +97,7 @@ async def example_manual_close():
     """Example: Manually close a position."""
     print("🛑 Example: Manual Position Close")
     
-    bot = TradingBotOrchestrator("config.yaml")
+    bot = TradingBotOrchestrator()
     
     try:
         await bot._initialize_components()
@@ -131,7 +131,7 @@ async def example_config_validation():
     print("🔧 Example: Configuration Validation")
     
     try:
-        config = ConfigurationManager("config.yaml")
+        config = ConfigurationManager()  # Loads from config/ directory
         
         # Check if all required config is present
         config.validate_required_config()
@@ -170,7 +170,7 @@ async def example_simulate_webhook():
     
     print(f"Simulating webhook data: {json.dumps(webhook_data, indent=2)}")
     
-    bot = TradingBotOrchestrator("config.yaml")
+    bot = TradingBotOrchestrator()
     
     try:
         await bot._initialize_components()
@@ -192,7 +192,7 @@ async def example_risk_check():
     """Example: Test risk management."""
     print("🛡️ Example: Risk Management Check")
     
-    bot = TradingBotOrchestrator("config.yaml")
+    bot = TradingBotOrchestrator()
     
     try:
         await bot._initialize_components()
@@ -253,20 +253,18 @@ async def example_tradingview_webhook_format():
     print("="*60)
     
     print("\n🔓 DEVELOPMENT MODE (Security Disabled):")
-    print("In config.yaml:")
-    print("  api:")
-    print("    webhook:")
-    print("      security_enabled: false")
-    print("      secret: \"\"")
+    print("In config/settings.toml:")
+    print("  [default.api.webhook]")
+    print("  security_enabled = false")
     print("\nWebhook URL: http://your-ngrok-url.ngrok.io/webhook")
     print("✅ No authentication required - easy for testing!")
     
     print("\n🔒 PRODUCTION MODE (Security Enabled):")
-    print("In config.yaml:")
-    print("  api:")
-    print("    webhook:")
-    print("      security_enabled: true")
-    print("      secret: \"your-secret-here\"")
+    print("In config/settings.toml and config/.secrets.toml:")
+    print("  [default.api.webhook]")
+    print("  security_enabled = true")
+    print("  # secret in .secrets.toml:")
+    print("  # secret = \"your-secret-here\"")
     print("\nWebhook URL: http://your-ngrok-url.ngrok.io/webhook/your-secret-here")
     print("🛡️  Authentication required - secure for live trading!")
     

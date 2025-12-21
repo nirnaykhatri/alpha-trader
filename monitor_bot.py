@@ -20,7 +20,7 @@ class BotController:
         try:
             response = requests.get(f"{self.bot_url}/health", timeout=2)
             return response.status_code == 200
-        except:
+        except Exception:
             return False
     
     def shutdown_bot(self):
@@ -28,7 +28,7 @@ class BotController:
         try:
             response = requests.post(f"{self.bot_url}/admin/shutdown", timeout=5)
             return response.status_code == 200
-        except:
+        except Exception:
             return False
     
     def force_kill_bot(self):
@@ -37,7 +37,7 @@ class BotController:
             # Run the stop_bot.bat script
             subprocess.run(["stop_bot.bat"], shell=True, check=True)
             return True
-        except:
+        except Exception:
             return False
     
     def monitor_bot(self):

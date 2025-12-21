@@ -17,7 +17,7 @@ from src.core.configuration import ConfigurationManager
 logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
 
 async def test_quotes_vs_trades():
-    config = ConfigurationManager("config.yaml")
+    config = ConfigurationManager()  # Uses config/ TOML files
     market_data = AlpacaMarketDataProvider(config)
     
     print("🔍 Testing MSFT quotes vs trades...")

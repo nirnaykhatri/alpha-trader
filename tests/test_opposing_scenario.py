@@ -27,7 +27,7 @@ async def test_opposing_signals_scenario():
     print("Expected: Bot should ignore LONG signal, keep SHORT position open\n")
     
     # Setup mock dependencies
-    config = ConfigurationManager("../config.yaml")
+    config = ConfigurationManager()  # Uses config/ TOML files
     mock_order_manager = AsyncMock()
     mock_market_data = AsyncMock()
     mock_risk_manager = AsyncMock()

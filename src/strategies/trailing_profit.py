@@ -5,9 +5,9 @@ Manages trailing stops and profit-taking strategies with configurable parameters
 
 from typing import Dict, Optional, Tuple
 from datetime import datetime, timedelta
-from ..interfaces import ITrailingProfitManager, IConfigurationManager
-from ..core.logging_config import get_logger
-from .. import Position
+from src.interfaces import ITrailingProfitManager, IConfigurationManager
+from src.core.logging_config import get_logger
+from src import Position
 
 
 logger = get_logger(__name__)

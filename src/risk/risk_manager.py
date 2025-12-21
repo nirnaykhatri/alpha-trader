@@ -5,10 +5,10 @@ Handles position sizing, risk limits, and trade validation.
 
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
-from ..interfaces import IRiskManager, IConfigurationManager, IPositionManager, IAccountProvider
-from ..exceptions import RiskManagementException
-from ..core.logging_config import get_logger
-from .. import TradingSignal, Order, Position
+from src.interfaces import IRiskManager, IConfigurationManager, IPositionManager, IAccountProvider
+from src.exceptions import RiskManagementException
+from src.core.logging_config import get_logger
+from src import TradingSignal, Order, Position
 
 
 logger = get_logger(__name__)
@@ -204,6 +204,9 @@ class RiskManager(IRiskManager):
         """
         Calculate position size based on portfolio percentage using martingale approach.
         
+        CRITICAL SAFETY: This method implements account balance validation to prevent
+        martingale from exceeding safe exposure limits.
+        
         Args:
             symbol: Trading symbol
             current_price: Current stock price
@@ -212,44 +215,66 @@ class RiskManager(IRiskManager):
         try:
             # Get configuration - use different percentage for initial vs averaging
             if averaging_attempt == 0:
-                # Initial position - use conservative percentage
+                # Initial position - use conservative percentage of ACCOUNT VALUE
                 portfolio_percentage = self._config.get_config("trading.position_sizing.initial_portfolio_percentage", 0.01)
-                logger.debug(f"Initial position sizing for {symbol}: {portfolio_percentage*100:.1f}% of buying power")
+                logger.debug(f"Initial position sizing for {symbol}: {portfolio_percentage*100:.1f}% of account value")
             else:
                 # Averaging position - use martingale approach
                 initial_percentage = self._config.get_config("trading.position_sizing.initial_portfolio_percentage", 0.01)
                 multiplier = self._config.get_config("trading.position_sizing.averaging.multiplier", 2.0)
+                max_multiplier = self._config.get_config("trading.position_sizing.averaging.max_multiplier", 4.0)
                 
                 # Calculate martingale size: initial * (multiplier ^ averaging_attempt)
-                portfolio_percentage = initial_percentage * (multiplier ** averaging_attempt)
+                raw_multiplier = multiplier ** averaging_attempt
+                # Cap the multiplier to prevent exponential blowup
+                capped_multiplier = min(raw_multiplier, max_multiplier)
+                portfolio_percentage = initial_percentage * capped_multiplier
+                
+                if raw_multiplier > max_multiplier:
+                    logger.warning(f"🛡️ SAFETY CAP: Martingale multiplier capped at {max_multiplier}x "
+                                 f"(would have been {raw_multiplier:.1f}x for attempt #{averaging_attempt})")
                 
                 logger.debug(f"Averaging position #{averaging_attempt} for {symbol}: "
-                           f"{portfolio_percentage*100:.1f}% of buying power "
-                           f"(initial {initial_percentage*100:.1f}% × {multiplier}^{averaging_attempt})")
+                           f"{portfolio_percentage*100:.1f}% of account value "
+                           f"(initial {initial_percentage*100:.1f}% × {capped_multiplier:.1f}x)")
             
             max_qty = self._config.get_config("trading.position_sizing.max_quantity", 10000)
             min_qty = self._config.get_config("trading.position_sizing.min_quantity", 1)
             
-            # Check maximum total position exposure
-            max_total_percentage = self._config.get_config("trading.position_sizing.max_total_position_percentage", 0.15)
+            # CRITICAL SAFETY: Maximum account exposure for single position
+            max_single_position_percent = self._config.get_config("trading.position_sizing.max_single_position_percent", 0.50)
             
-            # Get available buying power
+            # Get account info from provider
+            # CHANGED: Now using account_value instead of buying_power for sizing
+            # This makes initial_portfolio_percentage = 0.01 truly mean 1% of account
             if self._account_provider:
-                buying_power = await self._account_provider.get_buying_power()
                 account_value = await self._account_provider.get_account_value()
-                logger.debug(f"Using buying power: ${buying_power:,.2f} (account value: ${account_value:,.2f})")
-                # Use percentage of buying power for sizing
-                available_funds = buying_power * portfolio_percentage
+                cash_available = await self._account_provider.get_cash()
+                logger.debug(f"Using account value: ${account_value:,.2f} (cash: ${cash_available:,.2f})")
             else:
                 # Fallback: use percentage of fallback account value
                 account_value = await self._get_account_value()
-                available_funds = account_value * portfolio_percentage * 2.0  # Assume 2:1 buying power
-                logger.debug(f"No account provider - using {portfolio_percentage*100:.1f}% of estimated buying power: ${available_funds:,.2f}")
+                cash_available = account_value * 0.5  # Assume 50% in cash
+                logger.debug(f"No account provider - using estimated account value: ${account_value:,.2f}")
             
             # Calculate quantity based on current price
             if current_price <= 0:
                 logger.warning(f"Invalid price {current_price} for {symbol}, cannot calculate position size")
                 return 0.0
+            
+            # Calculate desired position size from percentage of ACCOUNT VALUE (not buying power)
+            desired_funds = account_value * portfolio_percentage
+            
+            # CRITICAL SAFETY CHECK 1: Never exceed 50% of available cash
+            max_affordable_funds = cash_available * max_single_position_percent
+            if desired_funds > max_affordable_funds:
+                logger.warning(f"🛡️ ACCOUNT BALANCE PROTECTION: Martingale wanted ${desired_funds:,.2f} "
+                             f"but limiting to ${max_affordable_funds:,.2f} ({max_single_position_percent*100:.0f}% of ${cash_available:,.2f} cash)")
+                available_funds = max_affordable_funds
+                safety_capped = True
+            else:
+                available_funds = desired_funds
+                safety_capped = False
             
             # Calculate raw quantity
             raw_quantity = available_funds / current_price
@@ -257,30 +282,45 @@ class RiskManager(IRiskManager):
             # Round down to whole shares (no fractional shares)
             quantity = int(raw_quantity)
             
+            # CRITICAL SAFETY CHECK 2: If we can't afford to double, revert to base size
+            if averaging_attempt > 0 and safety_capped:
+                # Calculate what base (non-martingale) size would be
+                base_percentage = self._config.get_config("trading.position_sizing.initial_portfolio_percentage", 0.01)
+                base_funds = account_value * base_percentage
+                base_quantity = int(base_funds / current_price)
+                
+                if quantity < base_quantity * 1.5:  # Can't even do 1.5x
+                    logger.warning(f"🛡️ MARTINGALE SAFETY FALLBACK: Cannot safely double position for {symbol}. "
+                                 f"Reverting to base size of {base_quantity} shares instead of {quantity}")
+                    quantity = base_quantity
+            
             # Check if we can afford at least 1 share
             if quantity < min_qty:
                 min_cost = min_qty * current_price
-                logger.warning(f"Insufficient buying power for {symbol} (attempt #{averaging_attempt}): "
+                logger.warning(f"❌ Insufficient funds for {symbol} (attempt #{averaging_attempt}): "
                              f"need ${min_cost:.2f} for {min_qty} share(s), "
                              f"but only have ${available_funds:.2f} available "
-                             f"({portfolio_percentage*100:.1f}% of buying power)")
+                             f"({portfolio_percentage*100:.1f}% of account)")
                 return 0.0  # Cannot place trade
             
-            # Apply maximum limits
+            # Apply maximum quantity limits
             quantity = min(quantity, max_qty)
             
-            # Log the calculation details
+            # Log the calculation details with safety information
             actual_cost = quantity * current_price
+            cost_pct_of_account = (actual_cost / account_value) * 100
+            cost_pct_of_cash = (actual_cost / cash_available) * 100
+            
             if self._account_provider:
-                logger.info(f"{'Martingale' if averaging_attempt > 0 else 'Initial'} position sizing for {symbol} "
+                logger.info(f"{'🎲 Martingale' if averaging_attempt > 0 else '📊 Initial'} position sizing for {symbol} "
                            f"(attempt #{averaging_attempt}): {quantity} shares @ ${current_price:.2f} = ${actual_cost:.2f} "
-                           f"(using ${actual_cost:.2f} of ${available_funds:.2f} available, "
-                           f"{portfolio_percentage*100:.1f}% of buying power)")
+                           f"({cost_pct_of_account:.1f}% of account, {cost_pct_of_cash:.1f}% of cash)")
+                if safety_capped:
+                    logger.warning(f"   🛡️ SAFETY: Position size was capped to protect account balance")
             else:
-                account_value = await self._get_account_value()
-                logger.info(f"{'Martingale' if averaging_attempt > 0 else 'Initial'} position sizing for {symbol} "
+                logger.info(f"{'🎲 Martingale' if averaging_attempt > 0 else '📊 Initial'} position sizing for {symbol} "
                            f"(attempt #{averaging_attempt}): {quantity} shares @ ${current_price:.2f} = ${actual_cost:.2f} "
-                           f"({actual_cost/account_value*100:.2f}% of portfolio)")
+                           f"({cost_pct_of_account:.1f}% of portfolio)")
             
             return float(quantity)
             

@@ -78,6 +78,11 @@ class RiskException(TradingBotException):
     pass
 
 
+class RiskLimitException(TradingBotException):
+    """Exception raised when risk limits are exceeded."""
+    pass
+
+
 class SignalException(TradingBotException):
     """Exception raised for signal processing errors."""
     pass
@@ -85,4 +90,29 @@ class SignalException(TradingBotException):
 
 class ConnectionException(TradingBotException):
     """Exception raised for connection errors."""
+    pass
+
+
+class BrokerException(TradingBotException):
+    """Base exception for all broker-related errors."""
+    pass
+
+
+class BrokerConnectionException(BrokerException):
+    """Exception raised when connection to broker fails."""
+    pass
+
+
+class BrokerOrderException(BrokerException, OrderExecutionException):
+    """Exception raised when a broker rejects an order or fails to process it."""
+    pass
+
+
+class BrokerPermissionException(BrokerException):
+    """Exception raised when broker denies permission (e.g. insufficient funds, short selling restricted)."""
+    pass
+
+
+class BrokerAPIException(BrokerException, APIException):
+    """Exception raised when broker API returns an error (e.g. rate limit, server error)."""
     pass

@@ -23,7 +23,7 @@ async def analyze_data_collection_robustness():
     print("=" * 60)
     
     # Initialize
-    config = ConfigurationManager("config.yaml")
+    config = ConfigurationManager()  # Uses config/ TOML files
     provider = AlpacaMarketDataProvider(config)
     
     symbols = ["RGTI", "AAPL", "TSLA"]  # Test multiple symbols

@@ -44,7 +44,7 @@ async def test_position_sizing():
     print("ℹ️  In production, buying power and account values are fetched from Alpaca API\n")
     
     # Setup components
-    config = ConfigurationManager("config.yaml")
+    config = ConfigurationManager()  # Uses config/ TOML files
     position_manager = MockPositionManager()
     
     # Test scenarios with different account sizes

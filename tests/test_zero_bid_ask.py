@@ -23,7 +23,7 @@ async def test_zero_bid_ask():
         print("🔍 TESTING FOR ZERO BID/ASK SCENARIOS")
         print("=" * 50)
         
-        config = ConfigurationManager("config.yaml")
+        config = ConfigurationManager()  # Uses config/ TOML files
         provider = AlpacaMarketDataProvider(config)
         
         # Test with TSLA specifically to investigate wide spread issue

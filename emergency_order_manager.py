@@ -21,7 +21,7 @@ async def cancel_all_orders():
     
     try:
         # Create bot instance
-        bot = TradingBotOrchestrator("config.yaml")
+        bot = TradingBotOrchestrator()
         
         # Initialize all components
         await bot._initialize_components()

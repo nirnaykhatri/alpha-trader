@@ -10,6 +10,8 @@ import time
 import requests
 from pathlib import Path
 
+from src.constants import TunnelConstants
+
 class AlternativeTunnelManager:
     """Manager for alternative tunneling services."""
     
@@ -104,7 +106,7 @@ class AlternativeTunnelManager:
             )
             
             # Wait for tunnel to start and get URL
-            for _ in range(30):  # Wait up to 30 seconds
+            for _ in range(TunnelConstants.CLOUDFLARE_MAX_WAIT_SECONDS):  # Wait up to 30 seconds
                 if self.process.poll() is not None:
                     stdout, stderr = self.process.communicate()
                     print(f"❌ cloudflared failed to start:")
@@ -115,10 +117,10 @@ class AlternativeTunnelManager:
                 # Try to get tunnel info
                 try:
                     # cloudflared outputs the URL to stderr
-                    time.sleep(1)
+                    time.sleep(TunnelConstants.POLL_INTERVAL)
                     # For cloudflared, we need to parse the output differently
                     # Let's implement a simpler approach
-                    time.sleep(3)  # Give it time to start
+                    time.sleep(TunnelConstants.CLOUDFLARE_STARTUP_DELAY)  # Give it time to start
                     
                     # Check if process is still running
                     if self.process.poll() is None:
@@ -130,7 +132,7 @@ class AlternativeTunnelManager:
                 except Exception as e:
                     print(f"Error checking tunnel status: {e}")
                 
-                time.sleep(1)
+                time.sleep(TunnelConstants.POLL_INTERVAL)
             
             print("⏰ Timeout waiting for Cloudflare tunnel to start")
             return None
@@ -190,17 +192,17 @@ class AlternativeTunnelManager:
             )
             
             # Wait for tunnel URL
-            for _ in range(20):
+            for _ in range(TunnelConstants.LOCALTUNNEL_MAX_WAIT_SECONDS):
                 if self.process.poll() is not None:
                     stdout, stderr = self.process.communicate()
                     print(f"❌ localtunnel failed: {stderr}")
                     return None
                 
                 # Try to read output
-                time.sleep(1)
+                time.sleep(TunnelConstants.POLL_INTERVAL)
                 
             # localtunnel usually prints URL immediately
-            time.sleep(2)
+            time.sleep(TunnelConstants.LOCALTUNNEL_STARTUP_DELAY)
             if self.process.poll() is None:
                 print("✅ localtunnel started!")
                 print("📋 Check terminal output for your tunnel URL")

@@ -14,8 +14,9 @@ project_root = os.path.dirname(__file__)
 sys.path.insert(0, project_root)
 
 from src.data.market_data import AlpacaMarketDataProvider
-from src.core.config import Config
+from src.core.configuration import ConfigurationManager
 import logging
+import pytest
 
 # Configure logging
 logging.basicConfig(
@@ -23,12 +24,13 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
+@pytest.mark.asyncio
 async def test_quote_freshness():
     """Test quote freshness detection and fallback behavior."""
     print("🧪 Testing Quote Freshness Detection & Fallback...")
     
     # Initialize config and market data provider
-    config = Config()
+    config = ConfigurationManager()
     market_data = AlpacaMarketDataProvider(config)
     
     # Test symbols with different characteristics

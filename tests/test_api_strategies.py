@@ -17,7 +17,7 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 async def test_api_strategies():
-    config = ConfigurationManager("config.yaml")
+    config = ConfigurationManager()  # Uses config/ TOML files
     market_data = AlpacaMarketDataProvider(config)
     
     now_utc = datetime.now(timezone.utc)

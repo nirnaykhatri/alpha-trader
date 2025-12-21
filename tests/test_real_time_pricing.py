@@ -30,7 +30,7 @@ async def test_real_time_pricing():
     
     try:
         # Initialize configuration and market data provider
-        config = ConfigurationManager("config.yaml")
+        config = ConfigurationManager()  # Uses config/ TOML files
         market_data = AlpacaMarketDataProvider(config)
         
         # Test symbols (including the problematic RGTI)

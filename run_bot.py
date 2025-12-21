@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from src.trading_bot import run_trading_bot, TradingBotOrchestrator
 from src.core import ConfigurationManager, setup_logging
 from src.exceptions import ConfigurationException
+from src.validation import StartupValidationService
 
 
 def print_banner():
@@ -40,78 +41,46 @@ def print_banner():
 
 
 def check_config_file():
-    """Check if config file exists and help user set it up."""
-    config_file = "config.yaml"
+    """Check if config files exist and help user set them up."""
+    config_dir = Path(__file__).parent / "config"
+    settings_file = config_dir / "settings.toml"
+    secrets_file = config_dir / ".secrets.toml"
     
-    if not os.path.exists(config_file):
-        print(f"❌ Configuration file '{config_file}' not found!")
+    if not settings_file.exists():
+        print(f"❌ Configuration file '{settings_file}' not found!")
         print("\n🔧 To get started:")
-        print("1. Copy the sample config.yaml file to your working directory")
-        print("2. Edit the configuration file with your settings:")
+        print("1. The config/ directory should contain settings.toml")
+        print("2. Copy .secrets.toml.example to .secrets.toml")
+        print("3. Edit .secrets.toml with your credentials:")
         print("   - Add your Alpaca API credentials")
         print("   - Set your webhook secret")
-        print("   - Adjust trading parameters as needed")
-        print("3. Run this script again")
-        print(f"\n📁 Sample config location: {Path(__file__).parent / 'config.yaml'}")
+        print("4. Run this script again")
+        return False
+    
+    if not secrets_file.exists():
+        print(f"⚠️  Secrets file '{secrets_file}' not found!")
+        print("\n🔧 To configure credentials:")
+        print(f"1. Copy {config_dir}/.secrets.toml.example to .secrets.toml")
+        print("2. Edit .secrets.toml with your API keys")
         return False
     
     return True
 
 
 def validate_config():
-    """Validate configuration and provide helpful error messages."""
+    """Validate configuration using centralized startup validation service."""
     try:
-        config = ConfigurationManager()
-        config.validate_required_config()
+        # Use centralized validation service (no file path - uses TOML config)
+        validator = StartupValidationService()
+        result = validator.validate(verbose=True)
         
-        # Additional checks with user-friendly messages
-        api_key = config.get_config("api.alpaca.api_key")
-        secret_key = config.get_config("api.alpaca.secret_key")
-        webhook_secret = config.get_config("api.webhook.secret")
-        security_enabled = config.get_config("api.webhook.security_enabled", False)
+        # Return validation result
+        return result.passed
         
-        issues = []
-        
-        if not api_key:
-            issues.append("❌ Alpaca API key is missing")
-        elif len(api_key) < 10:
-            issues.append("⚠️  Alpaca API key looks too short")
-            
-        if not secret_key:
-            issues.append("❌ Alpaca secret key is missing")
-        elif len(secret_key) < 20:
-            issues.append("⚠️  Alpaca secret key looks too short")
-            
-        # Only check webhook secret if security is enabled
-        if security_enabled:
-            if not webhook_secret:
-                issues.append("❌ Webhook secret is missing (required when security_enabled=true)")
-            elif len(webhook_secret) < 16:
-                issues.append("⚠️  Webhook secret should be at least 16 characters")
-        else:
-            print("ℹ️  Webhook security is disabled (development mode)")
-        
-        if issues:
-            print("\n🔧 Configuration Issues:")
-            for issue in issues:
-                print(f"   {issue}")
-            print("\n💡 Tips:")
-            print("   • Get Alpaca API keys from: https://app.alpaca.markets/")
-            if security_enabled:
-                print("   • Generate webhook secret: openssl rand -hex 32")
-            else:
-                print("   • Set security_enabled=true in production")
-            print("   • Make sure you're using paper trading keys for testing")
-            return False
-        
-        print("✅ Configuration validation passed!")
-        return True
-        
-    except ConfigurationException as e:
-        print(f"❌ Configuration error: {e}")
-        return False
     except Exception as e:
         print(f"❌ Unexpected error validating config: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
@@ -123,14 +92,14 @@ def show_quick_start_guide():
     print("\n1. 🔑 Get Alpaca API Credentials:")
     print("   • Sign up at: https://alpaca.markets/")
     print("   • Generate paper trading API keys")
-    print("   • Add them to config.yaml")
+    print("   • Add them to config/.secrets.toml")
     
     print("\n2. 🔐 Generate Webhook Secret:")
     print("   • Run: openssl rand -hex 32")
-    print("   • Add the secret to config.yaml")
+    print("   • Add the secret to config/.secrets.toml")
     
-    print("\n3. 🌐 Automated Webhook Setup (NEW!):")
-    print("   • Set 'ngrok.enabled: true' in config.yaml")
+    print("\n3. 🌐 Automated Webhook Setup:")
+    print("   • Set 'enabled = true' in config/settings.toml [default.ngrok]")
     print("   • Bot will automatically download and start ngrok")
     print("   • Copy the displayed webhook URL to TradingView")
     print("   • No manual ngrok setup required!")
@@ -153,20 +122,23 @@ def show_quick_start_guide():
     print("   • Advanced trailing profit with support/resistance averaging")
     print("   • Separate long/short strategy configurations")
     
-    print("\n6. 🚀 Start Trading:")
+    print("\n6. 🌍 Environment Switching:")
+    print("   • Demo (paper trading): set TRADING_BOT_ENV=demo")
+    print("   • Live (real money):    set TRADING_BOT_ENV=live")
+    print("   • Default is 'demo' for safety")
+    
+    print("\n7. 🚀 Start Trading:")
     print("   • Run this script to start the bot")
-    print("   • ngrok tunnel will start automatically")
+    print("   • ngrok tunnel will start automatically (if enabled)")
     print("   • Monitor logs for signal processing")
     print("   • Check your Alpaca account for trades")
     
     print("\n💡 Pro Tips:")
-    print("   • Use paper trading first (default config)")
-    print("   • Configure order types in config.yaml (market vs limit)")
-    print("   • Adjust trailing percentages and support/resistance detection")
-    print("   • Set position multipliers for averaging strategies")
+    print("   • Use paper trading first (TRADING_BOT_ENV=demo)")
+    print("   • Configure order types in config/settings.toml")
+    print("   • Risk profiles in config/profiles/ (conservative, moderate, aggressive)")
     print("   • Get free ngrok token for better reliability")
     print("   • Monitor webhook traffic at http://localhost:4040")
-    print("   • Free ngrok URLs change on restart - update TradingView accordingly")
 
 
 async def main():

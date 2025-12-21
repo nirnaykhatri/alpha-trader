@@ -6,8 +6,9 @@ Implements account information access using Alpaca Trading API.
 import asyncio
 from typing import Optional
 from alpaca.trading.client import TradingClient
-from ..interfaces import IAccountProvider
-from ..core.logging_config import get_logger
+from src.interfaces import IAccountProvider
+from src.core.logging_config import get_logger
+from src.utils import run_blocking
 
 logger = get_logger(__name__)
 
@@ -78,13 +79,26 @@ class AlpacaAccountProvider(IAccountProvider):
             logger.error(f"Error getting portfolio value: {str(e)}")
             return await self.get_account_value()
     
+    async def get_cash(self) -> float:
+        """Get available cash (not including margin)."""
+        try:
+            logger.debug("Fetching cash from Alpaca API...")
+            account = await self._get_account()
+            cash = float(account.cash)
+            logger.debug(f"Cash available: ${cash:,.2f}")
+            return cash
+            
+        except Exception as e:
+            logger.error(f"Error getting cash: {str(e)}")
+            # Fallback to half of account value (conservative estimate)
+            account_value = await self.get_account_value()
+            return account_value * 0.5
+    
     async def get_actual_position(self, symbol: str) -> Optional[float]:
         """Get actual position quantity from Alpaca for a symbol."""
         try:
             logger.debug(f"Fetching actual position for {symbol} from Alpaca...")
-            positions = await asyncio.get_event_loop().run_in_executor(
-                None, self.trading_client.get_all_positions
-            )
+            positions = await run_blocking(self.trading_client.get_all_positions)
             
             for position in positions:
                 if position.symbol == symbol:
@@ -98,6 +112,40 @@ class AlpacaAccountProvider(IAccountProvider):
         except Exception as e:
             logger.error(f"Error getting actual position for {symbol}: {str(e)}")
             return None
+    
+    async def get_positions(self) -> list:
+        """
+        Get all open positions from Alpaca.
+        
+        Returns:
+            List[Position]: List of open positions.
+        """
+        try:
+            from src.interfaces import Position
+            from datetime import datetime
+            
+            logger.debug("Fetching all positions from Alpaca...")
+            alpaca_positions = await run_blocking(self.trading_client.get_all_positions)
+            
+            positions = []
+            for p in alpaca_positions:
+                pos = Position(
+                    symbol=p.symbol,
+                    quantity=float(p.qty),
+                    avg_price=float(p.avg_entry_price),
+                    current_price=float(p.current_price),
+                    unrealized_pnl=float(p.unrealized_pl or 0),
+                    realized_pnl=0.0,  # Alpaca doesn't provide realized PnL in positions endpoint
+                    created_at=datetime.utcnow(),
+                    broker="alpaca"
+                )
+                positions.append(pos)
+                
+            return positions
+            
+        except Exception as e:
+            logger.error(f"Error getting positions from Alpaca: {str(e)}")
+            return []
     
     async def _get_account(self):
         """Get account information with caching."""
@@ -114,9 +162,7 @@ class AlpacaAccountProvider(IAccountProvider):
         # Fetch fresh account data
         try:
             logger.info(f"🔄 Fetching fresh account data from Alpaca API...")
-            account = await asyncio.get_event_loop().run_in_executor(
-                None, self.trading_client.get_account
-            )
+            account = await run_blocking(self.trading_client.get_account)
             
             # Update cache
             self._cached_account = account

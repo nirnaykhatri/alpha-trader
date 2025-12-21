@@ -9,6 +9,7 @@ import sys
 from typing import Dict, List, Tuple
 from src.trading_bot import TradingBotOrchestrator
 from src.core.logging_config import get_logger
+from src.utils import run_blocking
 
 logger = get_logger(__name__)
 
@@ -31,9 +32,7 @@ class PositionSyncMonitor:
             # Get all positions from Alpaca
             alpaca_positions = {}
             try:
-                positions = await asyncio.get_event_loop().run_in_executor(
-                    None, self.bot.trading_client.get_all_positions
-                )
+                positions = await run_blocking(self.bot.trading_client.get_all_positions)
                 
                 for position in positions:
                     alpaca_positions[position.symbol] = float(position.qty)

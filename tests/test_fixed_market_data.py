@@ -23,7 +23,7 @@ async def test_current_vs_fixed():
     
     try:
         # Load config
-        config = ConfigurationManager("config.yaml")
+        config = ConfigurationManager()  # Uses config/ TOML files
         
         # Test symbols that were showing stale data
         test_symbols = ["HIMS", "AAPL", "MSFT"]
@@ -62,7 +62,7 @@ async def test_extended_hours_specifically():
     print("=" * 70)
     
     try:
-        config = ConfigurationManager("config.yaml")
+        config = ConfigurationManager()  # Uses config/ TOML files
         provider = FixedAlpacaMarketDataProvider(config)
         
         # Check current time

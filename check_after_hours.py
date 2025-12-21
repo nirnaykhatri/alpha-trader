@@ -18,7 +18,7 @@ from src.core.configuration import ConfigurationManager
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 async def check_recent_activity():
-    config = ConfigurationManager("config.yaml")
+    config = ConfigurationManager()  # Loads from config/ directory
     market_data = AlpacaMarketDataProvider(config)
     
     print("🔍 Checking recent MSFT activity...")

@@ -69,8 +69,8 @@ class TestCompleteIntegrationExample:
             )
             mock_data_client_class.return_value = mock_data_client
             
-            # Initialize trading bot
-            bot = TradingBotOrchestrator("tests/fixtures/test_config.yaml")
+            # Initialize trading bot (uses config/ TOML files)
+            bot = TradingBotOrchestrator()
             await bot._initialize_components()
             
             # ===== PHASE 1: RECEIVE WEBHOOK SIGNAL =====

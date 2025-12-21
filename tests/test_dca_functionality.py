@@ -14,7 +14,9 @@ sys.path.insert(0, project_root)
 
 from src.core.configuration import ConfigurationManager
 from src.strategies.advanced_strategy import AdvancedTradingStrategy, PositionState, PositionDirection, TradePhase
+import pytest
 
+@pytest.mark.asyncio
 async def test_dca_triggers():
     """Test that DCA triggers when positions have losses exceeding the threshold."""
     print("🧪 Testing DCA Trigger Functionality")
@@ -43,7 +45,6 @@ async def test_dca_triggers():
         config=mock_config,
         order_manager=mock_order_manager,
         market_data=mock_market_data,
-        support_calculator=mock_support_calculator,
         risk_manager=mock_risk_manager,
         position_manager=mock_position_manager
     )

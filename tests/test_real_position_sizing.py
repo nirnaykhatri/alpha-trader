@@ -28,7 +28,7 @@ async def test_real_position_sizing():
     print()
     
     # Initialize configuration
-    config = ConfigurationManager("config.yaml")
+    config = ConfigurationManager()  # Uses config/ TOML files
     
     # Initialize Alpaca trading client
     api_key = config.get_config("api.alpaca.api_key")

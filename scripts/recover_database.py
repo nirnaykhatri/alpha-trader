@@ -88,14 +88,23 @@ async def main():
         # Initialize trading client for Alpaca access
         # Note: You may need to adjust this based on your actual trading client setup
         try:
-            from src.trading.trading_client import TradingClient
-            trading_client = TradingClient(config)
-            await trading_client.initialize()
+            from src.trading.alpaca_account_provider import AlpacaAccountProvider
+            from src.broker.router import BrokerRouter
+            from src.broker.interfaces import BrokerType
+            
+            account_provider = AlpacaAccountProvider(config)
+            # Initialize BrokerRouter with just the account provider
+            broker_router = BrokerRouter(
+                config=config,
+                executors={},
+                account_providers={BrokerType.ALPACA: account_provider},
+                market_data_providers={}
+            )
         except ImportError:
             logger.error("Trading client not available. Please ensure Alpaca client is properly configured.")
             return
         
-        position_manager = PositionManager(config, database, trading_client)
+        position_manager = PositionManager(config, database, broker_router)
         
         if args.dry_run:
             await preview_recovery(position_manager)
@@ -117,8 +126,15 @@ async def preview_recovery(position_manager: PositionManager) -> None:
     logger.info("🔍 DRY RUN: Previewing recovery from Alpaca...")
     
     try:
-        # Get Alpaca positions
-        alpaca_positions = await position_manager._get_alpaca_positions()
+        # Get Alpaca positions via router
+        # We access the router directly since we know we set it up
+        if not position_manager._broker_router:
+            logger.error("No broker router available")
+            return
+
+        from src.broker.interfaces import BrokerType
+        provider = position_manager._broker_router.get_account_provider(BrokerType.ALPACA)
+        alpaca_positions = await provider.get_positions()
         
         print(f"\n📊 Recovery Preview:")
         print(f"   Alpaca positions found: {len(alpaca_positions)}")
@@ -127,10 +143,10 @@ async def preview_recovery(position_manager: PositionManager) -> None:
             print(f"\n📋 Positions that would be recovered:")
             total_value = 0
             for pos in alpaca_positions:
-                position_value = float(pos.qty) * float(pos.current_price)
+                position_value = float(pos.quantity) * float(pos.current_price)
                 total_value += abs(position_value)
-                print(f"   • {pos.symbol}: {pos.qty} shares @ ${pos.current_price:.2f} "
-                      f"(Avg: ${pos.avg_entry_price:.2f}, P&L: ${pos.unrealized_pl:.2f})")
+                print(f"   • {pos.symbol}: {pos.quantity} shares @ ${pos.current_price:.2f} "
+                      f"(Avg: ${pos.avg_price:.2f}, P&L: ${pos.unrealized_pnl:.2f})")
             
             print(f"\n💰 Total position value: ${total_value:,.2f}")
         else:
@@ -158,7 +174,7 @@ async def perform_recovery(position_manager: PositionManager, force: bool = Fals
     
     try:
         # Perform recovery
-        recovery_stats = await position_manager.recover_database_from_alpaca(force_recovery=force)
+        recovery_stats = await position_manager.recover_database_from_brokers(force_recovery=force)
         
         # Display results
         print(f"\n✅ Database Recovery Complete!")

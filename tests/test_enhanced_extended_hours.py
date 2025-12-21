@@ -23,7 +23,7 @@ async def test_enhanced_extended_hours():
     print("=" * 60)
     
     # Initialize
-    config = ConfigurationManager("config.yaml")
+    config = ConfigurationManager()  # Uses config/ TOML files
     provider = AlpacaMarketDataProvider(config)
     
     # Test multiple symbols to see the difference

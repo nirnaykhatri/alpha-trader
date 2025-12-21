@@ -7,7 +7,18 @@ import asyncio
 import tempfile
 import os
 from pathlib import Path
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import Mock, AsyncMock, patch, MagicMock
+import sys
+
+# Mock tastytrade module BEFORE importing anything that uses it
+sys.modules["tastytrade"] = MagicMock()
+sys.modules["tastytrade.session"] = MagicMock()
+sys.modules["tastytrade.account"] = MagicMock()
+sys.modules["tastytrade.instruments"] = MagicMock()
+sys.modules["tastytrade.order"] = MagicMock()
+sys.modules["tastytrade.dxfeed"] = MagicMock()
+sys.modules["tastytrade.market_data"] = MagicMock()
+
 from typing import Dict, Any, Generator, AsyncGenerator
 from datetime import datetime
 import yaml
@@ -20,9 +31,9 @@ from src.position import PositionManager
 from src.risk import RiskManager
 from src.signals import TradingViewSignalListener
 from src.data import AlpacaMarketDataProvider
-from src.strategies import TechnicalSupportCalculator, ConfigurableTrailingProfitManager
+from src.strategies import ConfigurableTrailingProfitManager
 from src.trading_bot import TradingBotOrchestrator
-from src.interfaces import TradingSignal, Position, Order, OrderType, OrderStatus, SignalType
+from src.interfaces import TradingSignal, Position, Order, OrderType, OrderStatus, OrderSide, SignalType
 from src.exceptions import *
 
 # Configure pytest-asyncio
@@ -99,16 +110,48 @@ def test_config_data() -> Dict[str, Any]:
 
 @pytest.fixture
 def test_config_file(test_config_data: Dict[str, Any]) -> Generator[str, None, None]:
-    """Create a temporary config file for testing."""
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-        yaml.dump(test_config_data, f)
-        config_file = f.name
+    """
+    Fixture for backward compatibility - config_file parameter is now ignored.
+    The new TOML-based configuration system loads from config/ directory.
+    This fixture yields a dummy path for compatibility with existing tests.
+    """
+    # Reset the singleton before each test to ensure clean state
+    ConfigurationManager.reset_instance()
     
-    yield config_file
+    # Yield a dummy path - ConfigurationManager ignores this and uses config/ directory
+    yield "config_ignored_uses_toml"
     
-    # Cleanup
-    if os.path.exists(config_file):
-        os.unlink(config_file)
+    # Reset after test to ensure clean state for next test
+    ConfigurationManager.reset_instance()
+
+
+@pytest.fixture
+def validated_config() -> Generator[ConfigurationManager, None, None]:
+    """
+    Fixture that provides a properly validated ConfigurationManager for tests.
+    
+    This fixture ensures tests use configuration that has passed validation,
+    preventing bypass of configuration checks (addresses Issue #14).
+    
+    Usage:
+        def test_something(validated_config):
+            # validated_config is already validated and safe to use
+            broker = validated_config.get_broker_for_symbol("AAPL")
+    
+    Returns:
+        ConfigurationManager instance that has been validated
+    """
+    # Reset the singleton before test
+    ConfigurationManager.reset_instance()
+    
+    # Create and validate configuration
+    config = ConfigurationManager()
+    config.validate_required_config()
+    
+    yield config
+    
+    # Reset after test
+    ConfigurationManager.reset_instance()
 
 
 @pytest.fixture
@@ -176,36 +219,43 @@ def sample_trading_signal() -> TradingSignal:
 
 @pytest.fixture
 def sample_position() -> Position:
-    """Sample position for testing."""
+    """
+    Sample position for testing.
+    
+    Matches the actual Position dataclass schema from src/interfaces.py:
+    - symbol, quantity, avg_price, current_price, unrealized_pnl, realized_pnl
+    - created_at, broker (optional)
+    """
     return Position(
         symbol="AAPL",
         quantity=100,
-        average_price=150.0,
+        avg_price=150.0,
         current_price=155.0,
-        market_value=15500.0,
         unrealized_pnl=500.0,
-        unrealized_pnl_percent=0.033,
-        side="long",
-        created_at=1234567890,
-        updated_at=1234567890
+        realized_pnl=0.0,
+        broker="alpaca"
     )
 
 
 @pytest.fixture
 def sample_order() -> Order:
-    """Sample order for testing."""
+    """
+    Sample order for testing.
+    
+    Matches the actual Order dataclass schema from src/interfaces.py:
+    - order_id, symbol, quantity, order_type, side (OrderSide enum)
+    - price, status, filled_quantity, filled_price
+    """
     return Order(
-        id="test_order_id",
+        order_id="test_order_id",
         symbol="AAPL",
         quantity=100,
-        side="buy",
+        side=OrderSide.BUY,
         order_type=OrderType.LIMIT,
-        limit_price=150.0,
-        status=OrderStatus.NEW,
+        price=150.0,
+        status=OrderStatus.PENDING,
         filled_quantity=0,
-        filled_average_price=0.0,
-        created_at=1234567890,
-        updated_at=1234567890
+        filled_price=None
     )
 
 
@@ -268,15 +318,6 @@ def mock_market_data(mock_alpaca_data_client):
     mock_provider.get_historical_data = AsyncMock()
     mock_provider.get_latest_quote = AsyncMock()
     return mock_provider
-
-
-@pytest.fixture
-def mock_support_calculator():
-    """Mock technical support calculator."""
-    mock_calc = Mock(spec=TechnicalSupportCalculator)
-    mock_calc.calculate_support_levels = AsyncMock(return_value=[140.0, 145.0])
-    mock_calc.should_average_down = AsyncMock(return_value=True)
-    return mock_calc
 
 
 @pytest.fixture

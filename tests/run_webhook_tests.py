@@ -8,6 +8,15 @@ import sys
 import os
 import subprocess
 import requests
+
+# Add tests directory to path for imports
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(TESTS_DIR)
+if TESTS_DIR not in sys.path:
+    sys.path.insert(0, TESTS_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 from test_config import get_webhook_url, get_test_config
 
 

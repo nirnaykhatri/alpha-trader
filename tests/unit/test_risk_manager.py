@@ -26,6 +26,14 @@ class TestRiskManager:
             "trading.max_position_size": 1000,
             "trading.max_daily_trades": 50,
             "trading.account_value": 10000.0,
+            # Position sizing config (used by calculate_position_size)
+            "trading.position_sizing.method": "percentage",
+            "trading.position_sizing.initial_portfolio_percentage": 0.02,  # 2% for tests
+            "trading.position_sizing.max_quantity": 10000,
+            "trading.position_sizing.min_quantity": 1,
+            "trading.position_sizing.max_single_position_percent": 0.50,
+            "trading.position_sizing.averaging.multiplier": 2.0,
+            "trading.position_sizing.averaging.max_multiplier": 4.0,
         }.get(key, default)
         return mock_config
     
@@ -40,7 +48,10 @@ class TestRiskManager:
     @pytest.fixture
     def risk_manager(self, mock_config, mock_position_manager):
         """Create RiskManager instance with mocked dependencies."""
-        return RiskManager(mock_config, mock_position_manager)
+        rm = RiskManager(mock_config, mock_position_manager)
+        # Set account provider to None so it uses _get_account_value fallback
+        rm._account_provider = None
+        return rm
     
     @pytest.fixture
     def sample_order(self):
@@ -172,11 +183,12 @@ class TestRiskManager:
     
     @pytest.mark.asyncio
     async def test_calculate_position_size_success(self, risk_manager, sample_trading_signal):
-        """Test position size calculation."""
+        """Test position size calculation using percentage method."""
         with patch.object(risk_manager, '_get_account_value', return_value=10000.0):
             position_size = await risk_manager.calculate_position_size("AAPL", sample_trading_signal)
             
-            # Expected calculation: int((account_value * risk_per_trade) / price)
+            # Expected calculation with percentage method:
+            # quantity = int((account_value * initial_portfolio_percentage) / price)
             # int((10000 * 0.02) / 150) = int(200 / 150) = int(1.33) = 1
             expected_size = int((10000.0 * 0.02) / 150.0)
             assert position_size == float(expected_size)
@@ -184,7 +196,7 @@ class TestRiskManager:
     @pytest.mark.asyncio
     async def test_calculate_position_size_respects_max_limit(self, risk_manager, sample_trading_signal):
         """Test position size calculation respects maximum limit."""
-        # Create signal with very low price to trigger max limit
+        # Create signal with very low price to trigger higher quantity
         low_price_signal = TradingSignal(
             signal_id="low_price_signal",
             symbol="AAPL",
@@ -197,9 +209,12 @@ class TestRiskManager:
         with patch.object(risk_manager, '_get_account_value', return_value=10000.0):
             position_size = await risk_manager.calculate_position_size("AAPL", low_price_signal)
             
-            # Expected calculation: int((10000 * 0.02) / 1.0) = int(200) = 200
-            # min(200, 1000) = 200
-            assert position_size == 200.0
+            # Expected calculation with percentage method:
+            # quantity = int((account_value * initial_portfolio_percentage) / price)
+            # int((10000 * 0.02) / 1.0) = int(200) = 200
+            # This is below max_quantity of 10000, so no cap
+            expected_size = int((10000.0 * 0.02) / 1.0)
+            assert position_size == float(expected_size)
     
     @pytest.mark.asyncio
     async def test_get_max_exposure_success(self, risk_manager):

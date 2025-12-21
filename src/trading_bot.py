@@ -12,46 +12,54 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 
 # Core imports
-from .core import ConfigurationManager, setup_logging, get_logger
-from .signals import TradingViewSignalListener
-from .trading import OrderManager
-from .trading.alpaca_account_provider import AlpacaAccountProvider
-from .strategies import TechnicalSupportCalculator, ConfigurableTrailingProfitManager, MartingaleDCAManager
-from .strategies.advanced_strategy import AdvancedTradingStrategy
-from .data import AlpacaMarketDataProvider
-from .risk import RiskManager
-from .position import PositionManager
-from .database import DatabaseManager
+from src.core import ConfigurationManager, setup_logging, get_logger
+from src.signals import TradingViewSignalListener
+from src.trading import OrderManager
+from src.broker.subsystem import BrokerSubsystem
+from src.broker.interfaces import BrokerType
+from src.strategies import ConfigurableTrailingProfitManager
+from src.strategies.advanced_strategy import AdvancedTradingStrategy
+from src.risk import RiskManager
+from src.position import PositionManager
+from src.database import DatabaseManager
 
 # Utility imports
-from .utils import NgrokManager
-
-# API clients
-from alpaca.trading.client import TradingClient
-from alpaca.data.historical import StockHistoricalDataClient
+from src.utils import NgrokManager, run_blocking, BoundedFetcher
 
 # Data models
-from . import TradingSignal, Order, Position, OrderType, OrderSide, OrderStatus, SignalType
-from .exceptions import TradingBotException, ConfigurationException, OrderExecutionException
+from src import TradingSignal, Order, Position, OrderType, OrderSide, OrderStatus, SignalType
+from src.interfaces import IAsyncContextManager
+from src.exceptions import TradingBotException, ConfigurationException, OrderExecutionException
+from src.trading import OrderManager, ExitPlanner, TradeService, PositionMonitor
 
 
 logger = get_logger(__name__)
 
 
-class TradingBotOrchestrator:
+class TradingBotOrchestrator(IAsyncContextManager):
     """
     Main orchestrator class that coordinates all trading bot components.
     This is the central hub that users interact with to run the trading bot.
     """
     
-    def __init__(self, config_file: str = "config.yaml"):
+    def __init__(self, config_file: str = None):
         """
         Initialize the trading bot orchestrator.
         
         Args:
-            config_file: Path to configuration file
+            config_file: DEPRECATED - No longer used. Configuration is loaded from
+                        config/ directory using TOML files. Kept for backward compatibility.
         """
-        self.config_file = config_file
+        if config_file is not None:
+            import warnings
+            warnings.warn(
+                "config_file parameter is deprecated. Configuration is now loaded from "
+                "config/ directory using TOML files. Set TRADING_BOT_ENV environment "
+                "variable to switch between 'demo' and 'live' environments.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+        
         self.config: Optional[ConfigurationManager] = None
         self.is_running = False
         self.shutdown_event = asyncio.Event()
@@ -59,21 +67,23 @@ class TradingBotOrchestrator:
         # Track background tasks for proper cleanup
         self.background_tasks: List[asyncio.Task] = []
         
+        # Subsystems
+        self.broker_subsystem: Optional[BrokerSubsystem] = None
+        
         # Component instances
         self.signal_listener: Optional[TradingViewSignalListener] = None
         self.order_manager: Optional[OrderManager] = None
         self.position_manager: Optional[PositionManager] = None
         self.risk_manager: Optional[RiskManager] = None
-        self.support_calculator: Optional[TechnicalSupportCalculator] = None
         self.trailing_manager: Optional[ConfigurableTrailingProfitManager] = None
-        self.martingale_dca: Optional[MartingaleDCAManager] = None
         self.advanced_strategy: Optional[AdvancedTradingStrategy] = None
-        self.market_data: Optional[AlpacaMarketDataProvider] = None
         self.database: Optional[DatabaseManager] = None
         
-        # API clients
-        self.trading_client: Optional[TradingClient] = None
-        self.data_client: Optional[StockHistoricalDataClient] = None
+        # Bounded concurrency utilities
+        self._price_fetcher: Optional[BoundedFetcher] = None
+        self._exit_planner: Optional[ExitPlanner] = None
+        self._trade_service: Optional[TradeService] = None
+        self._position_monitor: Optional[PositionMonitor] = None
         
         # Ngrok manager for local development
         self.ngrok_manager: Optional[NgrokManager] = None
@@ -136,8 +146,12 @@ class TradingBotOrchestrator:
                     self.signal_listener._server.should_exit = True
                     if hasattr(self.signal_listener._server, 'force_exit'):
                         self.signal_listener._server.force_exit = True
-                await self.signal_listener.stop_listening()
+                await self.signal_listener.stop()
             
+            # Stop Broker Subsystem
+            if self.broker_subsystem:
+                await self.broker_subsystem.stop()
+
             # Cancel all background tasks
             logger.info("Cancelling background tasks...")
             for task in self.background_tasks:
@@ -185,8 +199,8 @@ class TradingBotOrchestrator:
         """Initialize all trading bot components."""
         logger.info("Initializing components...")
         
-        # Load configuration
-        self.config = ConfigurationManager(self.config_file)
+        # Load configuration (singleton - no file path needed)
+        self.config = ConfigurationManager()
         
         # Setup logging
         setup_logging(
@@ -195,52 +209,61 @@ class TradingBotOrchestrator:
             log_file=self.config.get_config("logging.file")
         )
         
-        # Initialize API clients
-        self._initialize_api_clients()
-        
         # Initialize database
         self.database = DatabaseManager(self.config)
         await self.database.initialize()
         
-        # Initialize market data provider
-        self.market_data = AlpacaMarketDataProvider(self.config)
+        # Initialize Broker Subsystem
+        self.broker_subsystem = BrokerSubsystem(self.config)
+        await self.broker_subsystem.initialize()
         
-        # Initialize position manager with trading client for Alpaca sync
-        self.position_manager = PositionManager(self.config, self.database, self.trading_client)
-        
-        # Initialize account provider for real-time balance information
-        self.account_provider = AlpacaAccountProvider(self.trading_client)
+        # Initialize position manager with broker router for multi-broker sync
+        self.position_manager = PositionManager(self.config, self.database, self.broker_subsystem.router)
         
         # Initialize risk manager with account provider
-        self.risk_manager = RiskManager(self.config, self.position_manager, self.account_provider)
+        self.risk_manager = RiskManager(self.config, self.position_manager, self.broker_subsystem.primary_account_provider)
         
-        # Initialize order manager
-        self.order_manager = OrderManager(self.config, self.trading_client)
+        # Initialize order manager with broker router
+        self.order_manager = OrderManager(self.config, self.broker_subsystem.router)
         
         # Initialize strategy components
-        self.support_calculator = TechnicalSupportCalculator(self.config, self.market_data)
         self.trailing_manager = ConfigurableTrailingProfitManager(self.config)
-        self.martingale_dca = MartingaleDCAManager(self.config, self.market_data, self.risk_manager)
         
         # Initialize advanced strategy (main strategy handler)
         self.advanced_strategy = AdvancedTradingStrategy(
             self.config, 
             self.order_manager, 
-            self.market_data,
-            self.support_calculator,
+            self.broker_subsystem.market_data,
             self.risk_manager,
             self.position_manager  # Add position manager for database persistence
         )
-        
-        # Pass martingale DCA manager to advanced strategy
-        self.advanced_strategy.martingale_dca = self.martingale_dca
         
         # Initialize signal listener with market data provider for accurate pricing
         self.signal_listener = TradingViewSignalListener(
             self.config, 
             self._handle_trading_signal,
-            self.market_data,  # Pass market data provider for current price fetching
+            self.broker_subsystem.market_data,  # Pass market data provider for current price fetching
             bot_instance=self  # Pass bot instance for status endpoints
+        )
+        
+        # Initialize bounded concurrency utilities
+        max_concurrent_price_fetches = self.config.get_config("performance.max_concurrent_orders", 5)
+        self._price_fetcher = BoundedFetcher(max_concurrency=max_concurrent_price_fetches)
+        
+        # Initialize exit planner service
+        self._exit_planner = ExitPlanner(self.config, self.broker_subsystem.market_data)
+        
+        # Initialize trade service for trade lifecycle management
+        self._trade_service = TradeService(self.database, self.order_manager)
+        
+        # Initialize position monitor service
+        self._position_monitor = PositionMonitor(
+            config=self.config,
+            position_manager=self.position_manager,
+            broker_subsystem=self.broker_subsystem,
+            trailing_manager=self.trailing_manager,
+            price_fetcher=self._price_fetcher,
+            advanced_strategy=self.advanced_strategy
         )
         
         # Initialize ngrok manager for local development
@@ -253,27 +276,6 @@ class TradingBotOrchestrator:
         
         logger.info("All components initialized successfully")
     
-    def _initialize_api_clients(self) -> None:
-        """Initialize Alpaca API clients."""
-        api_key = self.config.get_config("api.alpaca.api_key")
-        secret_key = self.config.get_config("api.alpaca.secret_key")
-        base_url = self.config.get_config("api.alpaca.base_url")
-        
-        if not api_key or not secret_key:
-            raise ConfigurationException("Alpaca API credentials are required")
-        
-        # Initialize trading client
-        self.trading_client = TradingClient(
-            api_key=api_key,
-            secret_key=secret_key,
-            paper=True if "paper" in base_url else False
-        )
-        
-        # Initialize data client
-        self.data_client = StockHistoricalDataClient(api_key, secret_key)
-        
-        logger.info("API clients initialized")
-    
     async def _validate_configuration(self) -> None:
         """Validate configuration and check API connections."""
         logger.info("Validating configuration...")
@@ -281,27 +283,10 @@ class TradingBotOrchestrator:
         # Validate required configuration
         self.config.validate_required_config()
         
-        # Test API connections
-        await self._test_api_connections()
+        # Test API connections via subsystem
+        await self.broker_subsystem.validate_connections()
         
         logger.info("Configuration validation completed")
-    
-    async def _test_api_connections(self) -> None:
-        """Test API connections to ensure they're working."""
-        try:
-            # Test trading client
-            account = await asyncio.get_event_loop().run_in_executor(
-                None, self.trading_client.get_account
-            )
-            logger.info(f"Trading API connected - Account: {account.account_number}")
-            
-            # Test market data
-            current_time = datetime.now()
-            logger.info("Market data API connected")
-            
-        except Exception as e:
-            logger.error(f"API connection test failed: {str(e)}")
-            raise ConfigurationException(f"API connection failed: {str(e)}")
     
     async def _start_components(self) -> None:
         """Start all components that need to run continuously."""
@@ -343,7 +328,7 @@ class TradingBotOrchestrator:
                 print("   Your bot will run locally only.")
                 print("   TradingView webhooks will not reach your bot.")
                 print("   To fix this:")
-                print("   1. Check your ngrok auth token in config.yaml")
+                print("   1. Check ngrok auth token in config/.secrets.toml")
                 print("   2. Ensure your firewall allows outbound connections")
                 print("   3. Try running: start_ngrok_standalone.bat")
                 print("   4. Or restart the bot")
@@ -356,30 +341,43 @@ class TradingBotOrchestrator:
             print("   Your bot will run locally only.")
             print("   TradingView webhooks will not reach your bot.")
             print("   To enable ngrok:")
-            print("   1. Set 'ngrok.enabled: true' in config.yaml")
-            print("   2. Add your ngrok auth token to config.yaml")
+            print("   1. Set 'enabled = true' in config/settings.toml [default.ngrok]")
+            print("   2. Add your ngrok auth token to config/.secrets.toml")
             print("   3. Or run: start_ngrok_standalone.bat")
             print("="*60)
         
         # Start signal listener
-        signal_task = asyncio.create_task(self.signal_listener.start_listening())
+        signal_task = asyncio.create_task(self.signal_listener.start())
         self.background_tasks.append(signal_task)
+        
+        # Start Broker Subsystem (handles market data, TT session, etc.)
+        await self.broker_subsystem.start()
         
         # Start background monitoring tasks (only if ngrok is enabled)
         if self.ngrok_manager:
             ngrok_task = asyncio.create_task(self._monitor_ngrok_tunnel())
             self.background_tasks.append(ngrok_task)
         
-        # Start position monitoring
-        position_task = asyncio.create_task(self._monitor_positions())
+        # Start position monitoring via PositionMonitor service
+        position_task = asyncio.create_task(
+            self._position_monitor.start_monitoring(
+                shutdown_event=self.shutdown_event,
+                on_profit_opportunity=self._execute_profit_taking,
+                on_fill_detected=self._handle_order_fill,
+                on_status_log=self.log_position_status,
+                check_fills_callback=self.order_manager.check_and_update_fills
+            )
+        )
         self.background_tasks.append(position_task)
         
         # Start order monitoring
         order_task = asyncio.create_task(self._monitor_orders())
         self.background_tasks.append(order_task)
         
-        # Start market data updates
-        market_task = asyncio.create_task(self._update_market_data())
+        # Start market data updates via PositionMonitor service
+        market_task = asyncio.create_task(
+            self._position_monitor.update_market_data(shutdown_event=self.shutdown_event)
+        )
         self.background_tasks.append(market_task)
         
         logger.info("All components started")
@@ -409,7 +407,7 @@ class TradingBotOrchestrator:
             logger.error(f"Error processing signal {signal.signal_id}: {str(e)}")
     
     async def _handle_buy_signal(self, signal: TradingSignal) -> None:
-        """Handle buy signals with support level averaging."""
+        """Handle buy signals - DCA is now handled by AdvancedTradingStrategy."""
         try:
             symbol = signal.symbol
             
@@ -417,11 +415,9 @@ class TradingBotOrchestrator:
             existing_position = await self.position_manager.get_position(symbol)
             
             if existing_position and existing_position.quantity > 0:
-                # We already have a long position, check for averaging down
-                if self._should_average_down(existing_position, signal.price):
-                    await self._execute_averaging_down(existing_position, signal)
-                else:
-                    logger.info(f"Skipping buy signal for {symbol} - already have position")
+                # We already have a long position - DCA is handled by AdvancedTradingStrategy
+                # The martingale DCA logic monitors positions and places DCA orders automatically
+                logger.info(f"Position exists for {symbol} - DCA handled by AdvancedTradingStrategy")
                 return
             
             # Calculate position size
@@ -486,201 +482,19 @@ class TradingBotOrchestrator:
                 logger.warning(f"No position to close for {symbol}")
                 return
             
-            # Get configured order type (respects global configuration)
-            configured_order_type = self.config.get_config("trading.order_type", "limit")
-            order_type = OrderType.LIMIT if configured_order_type.lower() == "limit" else OrderType.MARKET
-            
-            # For limit orders, get current price and calculate appropriate price
-            order_price = None
-            if order_type == OrderType.LIMIT:
-                current_price = await self.market_data.get_current_price(symbol)
-                limit_offset = self.config.get_config("trading.limit_order_offset", 0.001)
-                
-                order_side = OrderSide.SELL if position.quantity > 0 else OrderSide.BUY
-                
-                if order_side == OrderSide.SELL:
-                    # Sell slightly below current price to ensure fill
-                    order_price = current_price * (1 - limit_offset)
-                else:
-                    # Buy slightly above current price to ensure fill
-                    order_price = current_price * (1 + limit_offset)
-                
-                # Round to penny for Alpaca compliance
-                order_price = round(order_price, 2)
-            
-            # Close entire position
-            order = Order(
-                order_id=None,
-                symbol=symbol,
-                quantity=abs(position.quantity),
-                order_type=order_type,
-                side=OrderSide.SELL if position.quantity > 0 else OrderSide.BUY,
-                price=order_price
+            # Use ExitPlanner to build exit order
+            exit_plan = await self._exit_planner.plan_exit(
+                position,
+                reason="signal_close"
             )
             
+            # Submit the exit order
+            order = exit_plan.to_order()
             order_id = await self.order_manager.place_order(order)
             logger.info(f"Close order placed: {order_id}")
             
         except Exception as e:
             logger.error(f"Error handling close signal: {str(e)}")
-    
-    def _should_average_down(self, position: Position, current_price: float) -> bool:
-        """Determine if we should average down on a position."""
-        if not self.config.get_config("strategies.averaging_down.enabled", True):
-            return False
-        
-        # Check if price has moved against us enough to warrant averaging down
-        step_percentage = self.config.get_config("strategies.averaging_down.step_percentage", 0.02)
-        price_drop = (position.avg_price - current_price) / position.avg_price
-        
-        return price_drop >= step_percentage
-    
-    async def _execute_averaging_down(self, position: Position, signal: TradingSignal) -> None:
-        """Execute averaging down strategy."""
-        try:
-            # Get timeframe from signal metadata (if available) or use default
-            timeframe = signal.metadata.get("timeframe") or self.config.get_config("strategies.averaging_down.timeframe", "1h")
-            
-            logger.debug(f"Calculating support for {position.symbol} using timeframe: {timeframe}")
-            
-            # Calculate support level using the extracted timeframe
-            support_level = await self.support_calculator.calculate_support(
-                position.symbol, timeframe
-            )
-            
-            logger.info(f"Support level for {position.symbol} ({timeframe}): ${support_level.price:.4f} "
-                       f"(confidence: {support_level.confidence:.1%})")
-            
-            # Only average down if we're near support
-            support_threshold = support_level.price * 1.02  # Within 2% of support
-            if signal.price <= support_threshold:
-                logger.info(f"Signal price ${signal.price:.2f} is near support ${support_level.price:.2f}, executing averaging down")
-                
-                # Calculate additional quantity
-                additional_quantity = await self.risk_manager.calculate_position_size(
-                    position.symbol, signal
-                )
-                
-                # Create averaging down order
-                order = Order(
-                    order_id=None,
-                    symbol=position.symbol,
-                    quantity=additional_quantity,
-                    order_type=OrderType.LIMIT,
-                    side=OrderSide.BUY,
-                    price=signal.price
-                )
-                
-                order_id = await self.order_manager.place_order(order)
-                logger.info(f"Averaging down order placed: {order_id} for {additional_quantity} shares at ${signal.price:.2f}")
-            else:
-                logger.info(f"Signal price ${signal.price:.2f} too far from support ${support_level.price:.2f}, skipping averaging down")
-            
-        except Exception as e:
-            logger.error(f"Error executing averaging down: {str(e)}")
-    
-    async def _monitor_positions(self) -> None:
-        """Monitor positions for trailing profit opportunities."""
-        try:
-            sync_counter = 0
-            status_log_counter = 0
-            monitoring_interval = self.config.get_config("monitoring.position_monitoring_interval", 10)
-            sync_interval_seconds = self.config.get_config("monitoring.alpaca_sync_interval", 60)
-            status_log_interval_seconds = self.config.get_config("monitoring.status_log_interval", 300)  # 5 minutes default
-            
-            sync_interval_cycles = max(1, sync_interval_seconds // monitoring_interval)
-            status_log_cycles = max(1, status_log_interval_seconds // monitoring_interval)
-            
-            while self.is_running and not self.shutdown_event.is_set():
-                try:
-                    # Periodically sync with Alpaca to prevent zombie positions
-                    if sync_counter % sync_interval_cycles == 0:
-                        logger.info("🔄 SYNCING with Alpaca positions...")
-                        try:
-                            await self.position_manager.sync_with_alpaca()
-                            logger.info("✅ Position sync completed")
-                        except Exception as sync_error:
-                            logger.error(f"❌ Position sync failed: {sync_error}")
-                    
-                    # CRITICAL: Check for order fills every cycle (non-blocking)
-                    try:
-                        newly_filled_orders = await self.order_manager.check_and_update_fills()
-                        
-                        # Process any newly filled orders
-                        for filled_order in newly_filled_orders:
-                            logger.info(f"🔄 Processing newly filled order: {filled_order.order_id}")
-                            await self._handle_order_fill(filled_order)
-                            
-                    except Exception as fill_check_error:
-                        logger.error(f"❌ Error checking order fills: {fill_check_error}")
-                    
-                    # ENHANCED: Aggressive order management for unfilled orders
-                    try:
-                        await self._monitor_unfilled_orders_aggressively()
-                    except Exception as order_monitor_error:
-                        logger.error(f"❌ Error in aggressive order monitoring: {order_monitor_error}")
-                    
-                    # Periodically log detailed trading status
-                    if status_log_counter % status_log_cycles == 0:
-                        await self.log_position_status()
-                    
-                    sync_counter += 1
-                    status_log_counter += 1
-                    
-                    positions = await self.position_manager.get_all_positions()
-                    
-                    for position in positions:
-                        if position.quantity == 0:
-                            continue
-                        
-                        # Get current price
-                        current_price = await self.market_data.get_current_price(position.symbol)
-                        
-                        # Update advanced strategy positions and check for DCA opportunities
-                        if self.advanced_strategy:
-                            await self.advanced_strategy.update_position_monitoring(position.symbol, current_price)
-                        
-                        # Check trailing profit conditions
-                        if await self.trailing_manager.should_take_profit(position, current_price):
-                            # Check if we're in error cooldown for this symbol
-                            import time
-                            current_time = time.time()
-                            symbol_key = f"profit_taking_{position.symbol}"
-                            
-                            if symbol_key in self.last_error_time:
-                                if current_time - self.last_error_time[symbol_key] < self.error_cooldown:
-                                    # Skip profit taking during cooldown
-                                    continue
-                            
-                            try:
-                                await self._execute_profit_taking(position, current_price)
-                                # Reset error time on success
-                                if symbol_key in self.last_error_time:
-                                    del self.last_error_time[symbol_key]
-                            except Exception as e:
-                                # Set error cooldown time
-                                self.last_error_time[symbol_key] = current_time
-                                logger.error(f"❌ PROFIT TAKING ERROR: {position.symbol} - Entering {self.error_cooldown}s cooldown")
-                                logger.error(f"   Error: {e}")
-                                continue
-                    
-                    # Check at configurable interval or until shutdown
-                    try:
-                        await asyncio.wait_for(self.shutdown_event.wait(), timeout=monitoring_interval)
-                        break  # Shutdown signal received
-                    except asyncio.TimeoutError:
-                        continue  # Continue monitoring
-                        
-                except Exception as e:
-                    logger.error(f"Error monitoring positions: {str(e)}")
-                    try:
-                        await asyncio.wait_for(self.shutdown_event.wait(), timeout=30)
-                        break  # Shutdown signal received
-                    except asyncio.TimeoutError:
-                        continue  # Continue monitoring
-        except asyncio.CancelledError:
-            logger.debug("Position monitor task cancelled")
-            raise
     
     async def _monitor_unfilled_orders_aggressively(self) -> None:
         """
@@ -718,7 +532,7 @@ class TradingBotOrchestrator:
                         continue
                     
                     # Get current market price for comparison
-                    current_market_price = await self.market_data.get_current_price(order.symbol)
+                    current_market_price = await self.broker_subsystem.market_data.get_current_price(order.symbol)
                     
                     # Log unfilled order status
                     logger.info(f"📋 UNFILLED ORDER: {order.symbol} {order.side.value} {order.quantity} @ ${order.price:.4f}")
@@ -786,173 +600,58 @@ class TradingBotOrchestrator:
             
             logger.info(f"🎯 {action_type} TRIGGERED: {position.symbol}")
             
-            # Verify actual position with Alpaca before proceeding
-            actual_position_qty = await self.account_provider.get_actual_position(position.symbol)
+            # Verify actual position with broker before proceeding
+            actual_position_qty = await self.broker_subsystem.primary_account_provider.get_actual_position(position.symbol)
             if actual_position_qty is None:
                 logger.error(f"❌ Could not verify actual position for {position.symbol}, skipping profit taking")
                 return
             
+            # Handle position already closed externally
             if actual_position_qty == 0:
-                logger.info(f"📋 POSITION ALREADY CLOSED: {position.symbol}")
-                logger.info(f"   Database shows: {position.quantity} @ ${position.avg_price:.2f}")
-                logger.info(f"   Alpaca shows: 0 (position was closed externally)")
-                
-                # Instead of auto-fixing as zombie, let's complete the trade properly
-                logger.info(f"🎯 COMPLETING TRADE AUDIT: {position.symbol}")
-                
-                # Get the exit order that closed this position from order history
-                exit_order = None
-                for historical_order in await self.order_manager.get_order_history(limit=50):
-                    if (historical_order.symbol == position.symbol and 
-                        historical_order.status == OrderStatus.FILLED and
-                        ((position.quantity > 0 and historical_order.side == OrderSide.SELL) or
-                         (position.quantity < 0 and historical_order.side == OrderSide.BUY))):
-                        exit_order = historical_order
-                        break
-                
-                if exit_order:
-                    logger.info(f"📄 Found exit order: {exit_order.order_id} @ ${exit_order.filled_price:.4f}")
-                    
-                    # Complete the trade in our database
-                    try:
-                        # Find the corresponding trade entry
-                        open_trades = await self.database.get_open_trades()
-                        matching_trade = None
-                        for trade in open_trades:
-                            if trade['symbol'] == position.symbol:
-                                matching_trade = trade
-                                break
-                        
-                        if matching_trade:
-                            logger.info(f"💰 COMPLETING TRADE: {matching_trade['trade_id']}")
-                            await self.database.complete_trade(
-                                matching_trade['trade_id'],
-                                exit_order,
-                                "external_close"  # Position was closed externally
-                            )
-                            logger.info(f"✅ TRADE COMPLETED: {position.symbol}")
-                        else:
-                            logger.warning(f"⚠️ No matching open trade found for {position.symbol}")
-                            
-                    except Exception as trade_error:
-                        logger.error(f"❌ Error completing trade: {trade_error}")
-                else:
-                    logger.warning(f"⚠️ No exit order found for {position.symbol}")
-                
-                # Now close the position in our database
-                try:
-                    await self.position_manager.close_position(position.symbol)
-                    logger.info(f"✅ POSITION CLOSED IN DATABASE: {position.symbol}")
-                except Exception as close_error:
-                    logger.error(f"❌ Failed to close position in database: {close_error}")
-                
+                await self._handle_externally_closed_position(position)
                 return
             
-            # Check if database and Alpaca positions match direction (sign)
-            db_sign = 1 if position.quantity > 0 else -1
-            alpaca_sign = 1 if actual_position_qty > 0 else -1
-            
-            if db_sign != alpaca_sign:
-                logger.error(f"❌ POSITION DIRECTION MISMATCH for {position.symbol}:")
-                logger.error(f"   Database: {position.quantity} ({'LONG' if position.quantity > 0 else 'SHORT'})")
-                logger.error(f"   Alpaca: {actual_position_qty} ({'LONG' if actual_position_qty > 0 else 'SHORT'})")
-                logger.error(f"   Cannot safely place profit-taking order - manual intervention required")
+            # Check if database and broker positions match direction (sign)
+            if not self._validate_position_direction(position, actual_position_qty):
                 return
             
-            logger.info(f"✅ Position verified - DB: {position.quantity}, Alpaca: {actual_position_qty}")
+            logger.info(f"✅ Position verified - DB: {position.quantity}, Broker: {actual_position_qty}")
             
-            # Check if there are already pending orders for this symbol
+            # Get pending orders and calculate available quantity
             open_orders = await self.order_manager.get_open_orders()
-            pending_sell_qty = 0
-            pending_buy_qty = 0
+            pending_qty = self._calculate_pending_quantity(position, open_orders)
             
-            for order in open_orders:
-                if order.symbol == position.symbol:
-                    if order.side == OrderSide.SELL:
-                        pending_sell_qty += order.quantity
-                    elif order.side == OrderSide.BUY:
-                        pending_buy_qty += order.quantity
-            
-            # For long positions, check if we already have enough sell orders
-            if position.quantity > 0 and pending_sell_qty >= abs(position.quantity):
-                logger.warning(f"⚠️  SKIP PROFIT TAKING: {position.symbol} already has pending sell orders ({pending_sell_qty} >= {abs(position.quantity)})")
-                return
-            
-            # For short positions, check if we already have enough buy orders  
-            if position.quantity < 0 and pending_buy_qty >= abs(position.quantity):
-                logger.warning(f"⚠️  SKIP PROFIT TAKING: {position.symbol} already has pending buy orders ({pending_buy_qty} >= {abs(position.quantity)})")
-                return
-            
-            # Calculate available quantity to close
-            available_qty = abs(position.quantity)
-            if position.quantity > 0:
-                available_qty -= pending_sell_qty
-            else:
-                available_qty -= pending_buy_qty
-                
-            if available_qty <= 0:
-                logger.warning(f"⚠️  NO AVAILABLE QUANTITY: {position.symbol} has no shares available for closing (pending orders cover position)")
-                return
-            
-            # Final safety check: don't sell more than we actually own in Alpaca
-            max_sellable = abs(actual_position_qty)
-            if available_qty > max_sellable:
-                logger.warning(f"⚠️ QUANTITY ADJUSTMENT: Reducing order from {available_qty} to {max_sellable} (max available in Alpaca)")
-                available_qty = max_sellable
-            
-            if available_qty <= 0:
-                logger.warning(f"⚠️ NO QUANTITY TO CLOSE: {position.symbol} - no shares available after adjustment")
-                return
-            
-            # Create position exit order (profit-taking or stop-loss)
-            # For LONG positions (quantity > 0): SELL to close
-            # For SHORT positions (quantity < 0): BUY to close
-            order_side = OrderSide.SELL if position.quantity > 0 else OrderSide.BUY
-            
-            logger.info(f"🔍 ORDER DETAILS:")
-            logger.info(f"   Position Quantity: {position.quantity:.2f}")
-            logger.info(f"   Alpaca Position: {actual_position_qty:.2f}")
-            logger.info(f"   Available Quantity: {available_qty:.2f}")
-            logger.info(f"   Order Side: {order_side.value}")
-            logger.info(f"   Logic: {'LONG position -> SELL to close' if position.quantity > 0 else 'SHORT position -> BUY to close'}")
-            
-            # Double-check: for sell orders, ensure we're not creating a short position
-            if order_side == OrderSide.SELL and available_qty > abs(actual_position_qty):
-                logger.error(f"❌ CRITICAL ERROR PREVENTION: Sell order of {available_qty} would exceed position {abs(actual_position_qty)}")
-                logger.error(f"   This would create an unwanted short position! Aborting order.")
-                return
-            
-            # Get configured order type (respects global configuration)
-            configured_order_type = self.config.get_config("trading.order_type", "limit")
-            order_type = OrderType.LIMIT if configured_order_type.lower() == "limit" else OrderType.MARKET
-            
-            # For limit orders, calculate appropriate price
-            order_price = None
-            if order_type == OrderType.LIMIT:
-                limit_offset = self.config.get_config("trading.limit_order_offset", 0.001)
-                
-                if order_side == OrderSide.SELL:
-                    # Sell slightly below current price to ensure fill
-                    order_price = current_price * (1 - limit_offset)
-                else:
-                    # Buy slightly above current price to ensure fill
-                    order_price = current_price * (1 + limit_offset)
-                
-                # Round to penny for Alpaca compliance
-                order_price = round(order_price, 2)
-                
-                logger.info(f"📊 LIMIT ORDER PRICING: {order_side.value} @ ${order_price:.2f} "
-                           f"(current: ${current_price:.2f}, offset: {limit_offset:.3f})")
-            
-            order = Order(
-                order_id=None,
-                symbol=position.symbol,
-                quantity=available_qty,
-                order_type=order_type,
-                side=order_side,
-                price=order_price
+            # Validate exit quantity using ExitPlanner
+            available_qty, is_valid = self._exit_planner.validate_exit_quantity(
+                requested_qty=abs(position.quantity),
+                position_qty=position.quantity,
+                pending_qty=pending_qty
             )
             
+            if not is_valid or available_qty <= 0:
+                logger.warning(f"⚠️  NO AVAILABLE QUANTITY: {position.symbol} - pending orders cover position")
+                return
+            
+            # Final safety check: don't exit more than we actually own in broker
+            max_available = abs(actual_position_qty)
+            if available_qty > max_available:
+                logger.warning(f"⚠️ QUANTITY ADJUSTMENT: Reducing from {available_qty} to {max_available}")
+                available_qty = max_available
+            
+            if available_qty <= 0:
+                logger.warning(f"⚠️ NO QUANTITY TO CLOSE: {position.symbol}")
+                return
+            
+            # Use ExitPlanner to build exit order
+            exit_plan = await self._exit_planner.plan_exit(
+                position,
+                reason=action_type.lower().replace(" ", "_"),
+                quantity_override=available_qty,
+                current_price=current_price  # Reuse fetched price
+            )
+            
+            # Submit the exit order
+            order = exit_plan.to_order()
             order_id = await self.order_manager.place_order(order)
             
             # Log with appropriate action type
@@ -971,6 +670,56 @@ class TradingBotOrchestrator:
                 # Don't retry immediately - let the monitoring cycle handle it
             else:
                 logger.error(f"❌ Error executing profit taking: {error_msg}")
+    
+    async def _handle_externally_closed_position(self, position: Position) -> None:
+        """Handle position that was closed externally (outside the bot)."""
+        logger.info(f"📋 POSITION ALREADY CLOSED: {position.symbol}")
+        logger.info(f"   Database shows: {position.quantity} @ ${position.avg_price:.2f}")
+        logger.info(f"   Broker shows: 0 (position was closed externally)")
+        
+        # Use TradeService to handle trade completion
+        await self._trade_service.handle_externally_closed_position(
+            symbol=position.symbol,
+            position_quantity=position.quantity
+        )
+        
+        # Close the position in our database
+        try:
+            await self.position_manager.close_position(position.symbol)
+            logger.info(f"✅ POSITION CLOSED IN DATABASE: {position.symbol}")
+        except Exception as close_error:
+            logger.error(f"❌ Failed to close position in database: {close_error}")
+    
+    def _validate_position_direction(self, position: Position, actual_position_qty: float) -> bool:
+        """Validate that database and broker position directions match."""
+        db_sign = 1 if position.quantity > 0 else -1
+        broker_sign = 1 if actual_position_qty > 0 else -1
+        
+        if db_sign != broker_sign:
+            logger.error(f"❌ POSITION DIRECTION MISMATCH for {position.symbol}:")
+            logger.error(f"   Database: {position.quantity} ({'LONG' if position.quantity > 0 else 'SHORT'})")
+            logger.error(f"   Broker: {actual_position_qty} ({'LONG' if actual_position_qty > 0 else 'SHORT'})")
+            logger.error(f"   Cannot safely place profit-taking order - manual intervention required")
+            return False
+        return True
+    
+    def _calculate_pending_quantity(self, position: Position, open_orders: List[Order]) -> float:
+        """Calculate pending quantity for a position from open orders."""
+        pending_sell_qty = 0
+        pending_buy_qty = 0
+        
+        for order in open_orders:
+            if order.symbol == position.symbol:
+                if order.side == OrderSide.SELL:
+                    pending_sell_qty += order.quantity
+                elif order.side == OrderSide.BUY:
+                    pending_buy_qty += order.quantity
+        
+        # Return pending quantity in the exit direction
+        if position.quantity > 0:  # Long position exits via sell
+            return pending_sell_qty
+        else:  # Short position exits via buy
+            return pending_buy_qty
     
     async def _monitor_orders(self) -> None:
         """Monitor open orders for fills and timeouts."""
@@ -1205,8 +954,7 @@ class TradingBotOrchestrator:
                 logger.info(f"   Next DCA order will be attempt #{strategy_position.averaging_attempts + 1}")
             
             # Clean up order manager's DCA tracking
-            if order.order_id in self.order_manager._dca_orders:
-                del self.order_manager._dca_orders[order.order_id]
+            if self.order_manager.clear_dca_metadata(order.order_id):
                 logger.info(f"   Cleaned up DCA metadata for {order.order_id}")
         
         await self.database.save_order(order)
@@ -1215,13 +963,14 @@ class TradingBotOrchestrator:
         """Get the most up-to-date order information including fill data."""
         try:
             # Check if order is in active orders (updated by refresh)
-            if order_id in self.order_manager._active_orders:
-                return self.order_manager._active_orders[order_id]
+            order = self.order_manager.get_active_order(order_id)
+            if order:
+                return order
             
             # Check order history (moved there after fill)
-            for order in self.order_manager._order_history:
-                if order.order_id == order_id:
-                    return order
+            order = self.order_manager.get_historical_order(order_id)
+            if order:
+                return order
             
             logger.warning(f"Order {order_id} not found in active orders or history")
             return None
@@ -1276,7 +1025,7 @@ class TradingBotOrchestrator:
             # Add current position details
             for position in positions:
                 if position.quantity != 0:
-                    current_price = await self.market_data.get_current_price(position.symbol)
+                    current_price = await self.broker_subsystem.market_data.get_current_price(position.symbol)
                     unrealized_pnl = (current_price - position.avg_price) * position.quantity
                     unrealized_pct = ((current_price - position.avg_price) / position.avg_price) * 100
                     
@@ -1325,45 +1074,6 @@ class TradingBotOrchestrator:
             
         except Exception as e:
             logger.error(f"Error logging position status: {str(e)}")
-    
-    async def _update_market_data(self) -> None:
-        """Update market data periodically."""
-        try:
-            while self.is_running and not self.shutdown_event.is_set():
-                try:
-                    # Update prices for all active positions
-                    positions = await self.position_manager.get_all_positions()
-                    
-                    for position in positions:
-                        if position.quantity != 0:
-                            current_price = await self.market_data.get_current_price(position.symbol)
-                            # Update position with current price
-                            position.current_price = current_price
-                            
-                            # Calculate unrealized P&L
-                            if position.quantity > 0:
-                                position.unrealized_pnl = (current_price - position.avg_price) * position.quantity
-                            else:
-                                position.unrealized_pnl = (position.avg_price - current_price) * abs(position.quantity)
-                    
-                    # Update at configurable interval or until shutdown
-                    refresh_interval = self.config.get_config("monitoring.market_data_refresh_interval", 60)
-                    try:
-                        await asyncio.wait_for(self.shutdown_event.wait(), timeout=refresh_interval)
-                        break  # Shutdown signal received
-                    except asyncio.TimeoutError:
-                        continue  # Continue monitoring
-                        
-                except Exception as e:
-                    logger.error(f"Error updating market data: {str(e)}")
-                    try:
-                        await asyncio.wait_for(self.shutdown_event.wait(), timeout=60)
-                        break  # Shutdown signal received
-                    except asyncio.TimeoutError:
-                        continue  # Continue monitoring
-        except asyncio.CancelledError:
-            logger.debug("Market data update task cancelled")
-            raise
     
     async def _cancel_all_orders(self) -> None:
         """Cancel all open orders during shutdown."""
@@ -1554,37 +1264,14 @@ class TradingBotOrchestrator:
             if not position or position.quantity == 0:
                 return False
             
-            # Get configured order type (respects global configuration)
-            configured_order_type = self.config.get_config("trading.order_type", "limit")
-            order_type = OrderType.LIMIT if configured_order_type.lower() == "limit" else OrderType.MARKET
-            
-            # For limit orders, get current price and calculate appropriate price
-            order_price = None
-            if order_type == OrderType.LIMIT:
-                current_price = await self.market_data.get_current_price(symbol)
-                limit_offset = self.config.get_config("trading.limit_order_offset", 0.001)
-                
-                order_side = OrderSide.SELL if position.quantity > 0 else OrderSide.BUY
-                
-                if order_side == OrderSide.SELL:
-                    # Sell slightly below current price to ensure fill
-                    order_price = current_price * (1 - limit_offset)
-                else:
-                    # Buy slightly above current price to ensure fill
-                    order_price = current_price * (1 + limit_offset)
-                
-                # Round to penny for Alpaca compliance
-                order_price = round(order_price, 2)
-            
-            order = Order(
-                order_id=None,
-                symbol=symbol,
-                quantity=abs(position.quantity),
-                order_type=order_type,
-                side=OrderSide.SELL if position.quantity > 0 else OrderSide.BUY,
-                price=order_price
+            # Use ExitPlanner to build exit order
+            exit_plan = await self._exit_planner.plan_exit(
+                position,
+                reason="manual_close"
             )
             
+            # Submit the exit order
+            order = exit_plan.to_order()
             await self.order_manager.place_order(order)
             return True
             
@@ -1595,8 +1282,14 @@ class TradingBotOrchestrator:
 
 # Context manager for easy usage
 @asynccontextmanager
-async def trading_bot_context(config_file: str = "config.yaml"):
-    """Context manager for easy trading bot usage."""
+async def trading_bot_context(config_file: str = None):
+    """
+    Context manager for easy trading bot usage.
+    
+    Args:
+        config_file: DEPRECATED - No longer used. Configuration is loaded from
+                    config/ directory. Set TRADING_BOT_ENV for environment selection.
+    """
     bot = TradingBotOrchestrator(config_file)
     try:
         yield bot
@@ -1606,10 +1299,13 @@ async def trading_bot_context(config_file: str = "config.yaml"):
 
 
 # Main entry point for users
-async def run_trading_bot(config_file: str = "config.yaml") -> None:
+async def run_trading_bot(config_file: str = None) -> None:
     """
     Main entry point to run the trading bot.
-    This is the function users should call to start the bot.
+    
+    Args:
+        config_file: DEPRECATED - No longer used. Configuration is loaded from
+                    config/ directory. Set TRADING_BOT_ENV for environment selection.
     """
     bot = TradingBotOrchestrator(config_file)
     await bot.start()
@@ -1620,20 +1316,21 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Trading Bot")
-    parser.add_argument("--config", default="config.yaml", help="Configuration file path")
+    parser.add_argument("--env", choices=["demo", "live"], default="demo",
+                       help="Trading environment (demo or live)")
     parser.add_argument("--validate", action="store_true", help="Validate configuration only")
     
     args = parser.parse_args()
     
+    # Set environment before loading config
+    if args.env:
+        os.environ["TRADING_BOT_ENV"] = args.env
+    
     if args.validate:
-        # Validate configuration
-        try:
-            config = ConfigurationManager(args.config)
-            config.validate_required_config()
-            print("Configuration is valid!")
-        except Exception as e:
-            print(f"Configuration error: {str(e)}")
-            sys.exit(1)
+        # Validate configuration using centralized startup validation
+        from src.config.settings import validate_and_exit_on_error
+        config = validate_and_exit_on_error()
+        print(f"✅ Configuration for '{args.env}' environment is valid!")
     else:
         # Run the bot
-        asyncio.run(run_trading_bot(args.config))
+        asyncio.run(run_trading_bot())

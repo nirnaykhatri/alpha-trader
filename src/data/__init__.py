@@ -2,6 +2,6 @@
 Data module initialization.
 """
 
-from .market_data import AlpacaMarketDataProvider
+from src.data.market_data import AlpacaMarketDataProvider
 
 __all__ = ["AlpacaMarketDataProvider"]

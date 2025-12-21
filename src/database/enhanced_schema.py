@@ -4,13 +4,13 @@ This provides comprehensive tracking for localhost endpoints with complete visib
 """
 
 from sqlalchemy import Column, String, Float, Integer, DateTime, Text, JSON, ForeignKey, Boolean
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import relationship
 from datetime import datetime
 import json
 import uuid
 from typing import List, Optional, Dict, Any
 
-Base = declarative_base()
+from src.database.base import Base
 
 class EnhancedPositionRecord(Base):
     """

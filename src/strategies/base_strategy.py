@@ -11,9 +11,9 @@ from datetime import datetime
 from dataclasses import dataclass
 from enum import Enum
 
-from ..interfaces import IConfigurationManager, IMarketDataProvider
-from ..core.logging_config import get_logger
-from ..exceptions import TradingBotException, ConfigurationException
+from src.interfaces import IConfigurationManager, IMarketDataProvider
+from src.core.logging_config import get_logger
+from src.exceptions import TradingBotException, ConfigurationException
 
 
 logger = get_logger(__name__)

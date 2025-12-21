@@ -1,0 +1,17 @@
+[default.api.alpaca]
+base_url = "https://api.alpaca.markets"
+
+[default.api.tastytrade]
+is_sandbox = false
+
+[default.api.webhook]
+security_enabled = true
+
+[default.trading]
+max_daily_trades = 50
+
+[default.logging]
+level = "INFO"
+
+[default.development]
+enable_admin_endpoints = false

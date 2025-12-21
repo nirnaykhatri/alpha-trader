@@ -12,17 +12,19 @@ from datetime import datetime, timezone
 # Add the project root to Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+import pytest
 from src.data.market_data import AlpacaMarketDataProvider
-from src.core.config import ConfigManager
+from src.core.configuration import ConfigurationManager
 
+@pytest.mark.asyncio
 async def test_complete_system():
     """Test the complete enhanced market data system"""
     print("🔍 COMPLETE MARKET DATA SYSTEM VALIDATION")
     print("=" * 60)
     
     # Load config
-    config = ConfigManager()
-    config.load_config()
+    config = ConfigurationManager()  # Uses config/ TOML files
+    # config.load_config() # This method doesn't exist in ConfigurationManager, it loads in __init__
     
     # Initialize market data provider
     market_data = AlpacaMarketDataProvider(config)

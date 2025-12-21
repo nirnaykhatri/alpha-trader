@@ -9,8 +9,8 @@ import sys
 import os
 from datetime import datetime
 
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 async def emergency_sync():
     """Emergency sync to fix zombie positions."""
@@ -24,15 +24,25 @@ async def emergency_sync():
         from src.database.database_manager import DatabaseManager
         from src.position.position_manager import PositionManager
         from src.trading.alpaca_account_provider import AlpacaAccountProvider
+        from src.broker.router import BrokerRouter
+        from src.broker.interfaces import BrokerType
         
         # Initialize components
         print("\n📋 Initializing components...")
-        config = ConfigurationManager("config.yaml")
+        config = ConfigurationManager()  # Loads from config/ directory
         db_manager = DatabaseManager(config)
         account_provider = AlpacaAccountProvider(config)
         
-        # Initialize position manager with Alpaca client
-        position_manager = PositionManager(config, db_manager, account_provider.trading_client)
+        # Initialize BrokerRouter with just the account provider
+        broker_router = BrokerRouter(
+            config=config,
+            executors={},
+            account_providers={BrokerType.ALPACA: account_provider},
+            market_data_providers={}
+        )
+        
+        # Initialize position manager with BrokerRouter
+        position_manager = PositionManager(config, db_manager, broker_router)
         
         print("✅ Components initialized")
         
@@ -49,10 +59,11 @@ async def emergency_sync():
         # Get current Alpaca positions
         print("\n🔍 ALPACA Positions:")
         try:
-            alpaca_positions = await position_manager._get_alpaca_positions()
+            # Use the provider directly or via router
+            alpaca_positions = await account_provider.get_positions()
             if alpaca_positions:
                 for pos in alpaca_positions:
-                    print(f"   {pos.symbol}: {float(pos.qty):.2f} @ ${float(pos.avg_entry_price):.2f}")
+                    print(f"   {pos.symbol}: {float(pos.quantity):.2f} @ ${float(pos.avg_price):.2f}")
             else:
                 print("   No active positions found in Alpaca")
         except Exception as e:
@@ -62,7 +73,7 @@ async def emergency_sync():
         # Perform sync
         print("\n🔄 PERFORMING SYNC...")
         try:
-            await position_manager.sync_with_alpaca()
+            await position_manager.sync_positions()
             print("✅ Sync completed successfully!")
         except Exception as e:
             print(f"❌ Sync failed: {e}")

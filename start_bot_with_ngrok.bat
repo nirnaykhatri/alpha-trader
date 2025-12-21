@@ -18,10 +18,10 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-REM Check if config.yaml exists
-if not exist "config.yaml" (
-    echo ❌ config.yaml not found
-    echo Please create config.yaml with your Alpaca credentials
+REM Check if config directory exists (TOML-based configuration)
+if not exist "config\settings.toml" (
+    echo ❌ config\settings.toml not found
+    echo Please run: python configure_bot.py
     echo.
     pause
     exit /b 1

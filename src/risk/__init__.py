@@ -2,6 +2,6 @@
 Risk module initialization.
 """
 
-from .risk_manager import RiskManager
+from src.risk.risk_manager import RiskManager
 
 __all__ = ["RiskManager"]

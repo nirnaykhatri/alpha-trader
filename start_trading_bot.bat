@@ -19,14 +19,12 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-REM Check if config.yaml exists
-if not exist "config.yaml" (
-    echo [X] config.yaml not found
+REM Check if config directory exists (TOML-based configuration)
+if not exist "config\settings.toml" (
+    echo [X] config\settings.toml not found
     echo.
-    echo Please:
-    echo 1. Copy and edit config.yaml with your Alpaca credentials
-    echo 2. Set ngrok.enabled: true for automatic webhook setup
-    echo 3. Run this script again
+    echo Please run: python configure_bot.py
+    echo Or copy config\settings.toml.example to config\settings.toml
     echo.
     pause
     exit /b 1

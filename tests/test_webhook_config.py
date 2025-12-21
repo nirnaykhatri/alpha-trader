@@ -14,7 +14,7 @@ def test_webhook_security():
     print("🔧 Testing Webhook Security Configuration")
     print("="*50)
     
-    config = ConfigurationManager('config.yaml')
+    config = ConfigurationManager()  # Uses config/ TOML files
     
     # Get current settings
     security_enabled = config.get_config('api.webhook.security_enabled', True)

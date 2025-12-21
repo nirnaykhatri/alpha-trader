@@ -5,10 +5,12 @@ Tracks and manages trading positions with persistence.
 
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from ..interfaces import IPositionManager, IConfigurationManager
-from ..exceptions import PositionNotFoundException
-from ..core.logging_config import get_logger
-from .. import Position, Order, OrderStatus, OrderType
+from src.interfaces import IPositionManager, IConfigurationManager
+from src.exceptions import PositionNotFoundException
+from src.core.logging_config import get_logger
+from src import Position, Order, OrderStatus, OrderType
+from src.broker.router import BrokerRouter
+from src.broker.interfaces import BrokerType
 
 
 logger = get_logger(__name__)
@@ -18,43 +20,66 @@ class PositionManager(IPositionManager):
     """
     Manages trading positions with database persistence.
     Tracks position updates, P&L, and position history.
+    Supports multiple brokers via BrokerRouter.
     """
     
-    def __init__(self, config: IConfigurationManager, database_manager, trading_client=None):
+    def __init__(self, config: IConfigurationManager, database_manager, broker_router: Optional[BrokerRouter] = None):
         """
         Initialize position manager.
         
         Args:
             config: Configuration manager instance
             database_manager: Database manager for persistence
-            trading_client: Optional Alpaca trading client for position sync
+            broker_router: Broker router for multi-broker support
         """
         self._config = config
         self._database = database_manager
-        self._trading_client = trading_client
+        self._broker_router = broker_router
+        # Cache key: f"{symbol}_{broker}"
         self._positions: Dict[str, Position] = {}
         
         logger.info("PositionManager initialized")
     
-    async def get_position(self, symbol: str) -> Optional[Position]:
+    def _get_cache_key(self, symbol: str, broker: str) -> str:
+        """Generate cache key for position."""
+        return f"{symbol}_{broker}"
+
+    async def get_position(self, symbol: str, broker: str = None) -> Optional[Position]:
         """
         Get current position for a symbol.
         
         Args:
             symbol: Trading symbol
+            broker: Optional broker name. If None, tries to find any position for symbol.
             
         Returns:
             Current position or None if no position exists
         """
         try:
-            # Check memory cache first
-            if symbol in self._positions:
-                return self._positions[symbol]
+            # If broker is specified, check cache directly
+            if broker:
+                cache_key = self._get_cache_key(symbol, broker)
+                if cache_key in self._positions:
+                    return self._positions[cache_key]
+                
+                # Load from database
+                position = await self._database.get_position(symbol, broker)
+                if position:
+                    self._positions[cache_key] = position
+                    return position
+                return None
             
-            # Load from database
+            # If broker not specified, try to find any position for this symbol
+            # Check cache first
+            for key, pos in self._positions.items():
+                if pos.symbol == symbol:
+                    return pos
+            
+            # Load from database (will return first found)
             position = await self._database.get_position(symbol)
             if position:
-                self._positions[symbol] = position
+                broker = position.broker or 'alpaca'
+                self._positions[self._get_cache_key(symbol, broker)] = position
                 return position
             
             return None
@@ -63,20 +88,24 @@ class PositionManager(IPositionManager):
             logger.error(f"Error getting position for {symbol}: {str(e)}")
             return None
     
-    async def get_all_positions(self) -> List[Position]:
+    async def get_all_positions(self, broker: str = None) -> List[Position]:
         """
         Get all current positions.
         
+        Args:
+            broker: Optional broker filter
+            
         Returns:
             List of all current positions
         """
         try:
             # Load all positions from database
-            all_positions = await self._database.get_all_positions()
+            all_positions = await self._database.get_all_positions(broker)
             
             # Update memory cache
             for position in all_positions:
-                self._positions[position.symbol] = position
+                pos_broker = position.broker or 'alpaca'
+                self._positions[self._get_cache_key(position.symbol, pos_broker)] = position
             
             # Filter out zero positions
             active_positions = [pos for pos in all_positions if pos.quantity != 0]
@@ -88,7 +117,7 @@ class PositionManager(IPositionManager):
             logger.error(f"Error getting all positions: {str(e)}")
             return list(self._positions.values())
     
-    async def update_position(self, symbol: str, quantity: float, price: float) -> None:
+    async def update_position(self, symbol: str, quantity: float, price: float, broker: str = 'alpaca') -> None:
         """
         Update position after a trade.
         
@@ -96,12 +125,13 @@ class PositionManager(IPositionManager):
             symbol: Trading symbol
             quantity: Quantity change (positive for buy, negative for sell)
             price: Trade price
+            broker: Broker name
         """
         try:
-            logger.debug(f"Updating position: {symbol} {quantity:+.2f} @ {price:.4f}")
+            logger.debug(f"Updating position: {symbol} ({broker}) {quantity:+.2f} @ {price:.4f}")
             
             # Get existing position or create new one
-            existing_position = await self.get_position(symbol)
+            existing_position = await self.get_position(symbol, broker)
             
             if existing_position:
                 # Update existing position
@@ -150,7 +180,7 @@ class PositionManager(IPositionManager):
                     existing_position.unrealized_pnl = 0
                 
                 # Update cache
-                self._positions[symbol] = existing_position
+                self._positions[self._get_cache_key(symbol, broker)] = existing_position
                 
             else:
                 # Create new position
@@ -161,35 +191,37 @@ class PositionManager(IPositionManager):
                     current_price=price,
                     unrealized_pnl=0,
                     realized_pnl=0,
-                    created_at=datetime.utcnow()
+                    created_at=datetime.utcnow(),
+                    broker=broker
                 )
                 
-                self._positions[symbol] = new_position
+                self._positions[self._get_cache_key(symbol, broker)] = new_position
             
             # Save to database
-            await self._database.save_position(self._positions[symbol])
+            await self._database.save_position(self._positions[self._get_cache_key(symbol, broker)])
             
-            logger.info(f"Position updated: {symbol} - Qty: {self._positions[symbol].quantity}, "
-                       f"Avg: {self._positions[symbol].avg_price:.4f}")
+            logger.info(f"Position updated: {symbol} ({broker}) - Qty: {self._positions[self._get_cache_key(symbol, broker)].quantity}, "
+                       f"Avg: {self._positions[self._get_cache_key(symbol, broker)].avg_price:.4f}")
             
         except Exception as e:
             logger.error(f"Error updating position for {symbol}: {str(e)}")
             raise
     
-    async def close_position(self, symbol: str) -> bool:
+    async def close_position(self, symbol: str, broker: str = None) -> bool:
         """
         Close a position completely.
         
         Args:
             symbol: Trading symbol
+            broker: Optional broker name
             
         Returns:
             True if position was closed successfully
         """
         try:
-            position = await self.get_position(symbol)
+            position = await self.get_position(symbol, broker)
             if not position or position.quantity == 0:
-                logger.warning(f"No position to close for {symbol}")
+                logger.warning(f"No position to close for {symbol} ({broker})")
                 return False
             
             # Set quantity to zero
@@ -197,10 +229,11 @@ class PositionManager(IPositionManager):
             position.unrealized_pnl = 0
             
             # Update cache and database
-            self._positions[symbol] = position
+            pos_broker = position.broker or 'alpaca'
+            self._positions[self._get_cache_key(symbol, pos_broker)] = position
             await self._database.save_position(position)
             
-            logger.info(f"Position closed: {symbol}")
+            logger.info(f"Position closed: {symbol} ({pos_broker})")
             return True
             
         except Exception as e:
@@ -255,6 +288,7 @@ class PositionManager(IPositionManager):
                 "positions": [
                     {
                         "symbol": pos.symbol,
+                        "broker": pos.broker,
                         "quantity": pos.quantity,
                         "avg_price": pos.avg_price,
                         "current_price": pos.current_price,
@@ -278,297 +312,105 @@ class PositionManager(IPositionManager):
         self._positions.clear()
         logger.info("Position cache cleared")
     
-    async def sync_with_alpaca(self) -> None:
+    async def sync_positions(self) -> Dict[str, Any]:
         """
-        Sync local positions with Alpaca positions.
-        This addresses the question: "Why store locally when Alpaca has the data?"
+        Synchronize local positions with broker positions.
         
-        Benefits of local storage:
-        1. Faster access (no API calls for every lookup)
-        2. Offline operation capability
-        3. Custom P&L tracking with our specific logic
-        4. Historical position data for analysis
-        5. Backup if Alpaca API is temporarily unavailable
-        
-        This sync ensures consistency between local and Alpaca data.
+        Returns:
+            Dictionary with sync results
         """
-        if not self._trading_client:
-            logger.warning("No trading client available for Alpaca sync")
-            return
-            
+        logger.info("Starting position synchronization...")
+        stats = {"updated": 0, "closed": 0, "created": 0, "errors": 0}
+        
         try:
-            logger.info("Syncing positions with Alpaca...")
+            # 1. Get all broker positions (fetch in parallel for performance)
+            broker_positions_map = {}  # Key: f"{symbol}_{broker}" -> Position object
             
-            # Get positions from Alpaca
-            alpaca_positions = await self._get_alpaca_positions()
-            
-            # Track symbols we've seen from Alpaca
-            alpaca_symbols = set()
-            
-            for alpaca_pos in alpaca_positions:
-                symbol = alpaca_pos.symbol
-                alpaca_symbols.add(symbol)
+            if self._broker_router:
+                brokers = self._broker_router.get_registered_brokers()
                 
-                # Convert Alpaca position to our Position format
-                position = Position(
-                    symbol=symbol,
-                    quantity=float(alpaca_pos.qty),
-                    avg_price=float(alpaca_pos.avg_entry_price),
-                    current_price=float(alpaca_pos.current_price),
-                    unrealized_pnl=float(alpaca_pos.unrealized_pl or 0),
-                    realized_pnl=0,  # Alpaca doesn't track this the way we do
-                    created_at=datetime.utcnow()
+                async def fetch_broker_positions(broker_type):
+                    """Fetch positions from a single broker."""
+                    try:
+                        provider = self._broker_router.get_account_provider(broker_type)
+                        positions = await provider.get_positions()
+                        return broker_type, positions, None
+                    except Exception as e:
+                        return broker_type, [], e
+                
+                # Fetch from all brokers in parallel
+                import asyncio
+                results = await asyncio.gather(
+                    *[fetch_broker_positions(bt) for bt in brokers],
+                    return_exceptions=False
                 )
                 
-                # Update local position
-                self._positions[symbol] = position
-                await self._database.save_position(position)
-                
-                logger.debug(f"Synced position: {symbol} - Qty: {position.quantity}, "
-                           f"Avg Price: ${position.avg_price:.2f}")
+                # Process results
+                for broker_type, positions, error in results:
+                    if error:
+                        logger.error(f"Error fetching positions from {broker_type.value}: {error}")
+                        stats["errors"] += 1
+                        continue
+                        
+                    for pos in positions:
+                        # Ensure broker field is set
+                        pos.broker = broker_type.value
+                        key = self._get_cache_key(pos.symbol, pos.broker)
+                        broker_positions_map[key] = pos
             
-            # Check for positions we have locally but not in Alpaca
-            local_positions = await self._database.get_all_positions()
-            for local_pos in local_positions:
-                if local_pos.symbol not in alpaca_symbols and local_pos.quantity != 0:
-                    logger.warning(f"Local position {local_pos.symbol} not found in Alpaca - "
-                                 f"may have been closed outside this bot")
-                    # Optionally close the local position
+            # 2. Get all local positions
+            local_positions = await self.get_all_positions()
+            local_positions_map = {
+                self._get_cache_key(p.symbol, p.broker or 'alpaca'): p 
+                for p in local_positions
+            }
+            
+            # 3. Reconcile: Update or Create from Broker
+            for key, broker_pos in broker_positions_map.items():
+                if key in local_positions_map:
+                    local_pos = local_positions_map[key]
+                    
+                    # Check for differences
+                    if (local_pos.quantity != broker_pos.quantity or 
+                        abs(local_pos.avg_price - broker_pos.avg_price) > 0.0001):
+                        
+                        logger.info(f"Syncing update for {broker_pos.symbol} ({broker_pos.broker}): "
+                                   f"Qty {local_pos.quantity}->{broker_pos.quantity}, "
+                                   f"Price {local_pos.avg_price}->{broker_pos.avg_price}")
+                        
+                        local_pos.quantity = broker_pos.quantity
+                        local_pos.avg_price = broker_pos.avg_price
+                        local_pos.current_price = broker_pos.current_price
+                        local_pos.unrealized_pnl = broker_pos.unrealized_pnl
+                        
+                        await self._database.save_position(local_pos)
+                        self._positions[key] = local_pos
+                        stats["updated"] += 1
+                else:
+                    # New position found in broker
+                    logger.info(f"Syncing new position {broker_pos.symbol} ({broker_pos.broker})")
+                    await self._database.save_position(broker_pos)
+                    self._positions[key] = broker_pos
+                    stats["created"] += 1
+            
+            # 4. Reconcile: Close missing positions
+            for key, local_pos in local_positions_map.items():
+                if key not in broker_positions_map and local_pos.quantity != 0:
+                    # Position exists locally but not in broker -> It was closed externally
+                    logger.info(f"Syncing external close for {local_pos.symbol} ({local_pos.broker})")
+                    
                     local_pos.quantity = 0
                     local_pos.unrealized_pnl = 0
+                    
                     await self._database.save_position(local_pos)
+                    self._positions[key] = local_pos
+                    stats["closed"] += 1
             
-            logger.info(f"Position sync complete: {len(alpaca_positions)} positions synced")
-            
-        except Exception as e:
-            logger.error(f"Error syncing with Alpaca: {str(e)}")
-
-    async def _get_alpaca_positions(self):
-        """
-        Get ALL positions from Alpaca API (async wrapper).
-        
-        Note: This returns ALL open positions in the account.
-        Alpaca maintains one position per symbol (not multiple positions per stock).
-        
-        Returns:
-            List[Position]: All open positions from Alpaca account
-        """
-        try:
-            import asyncio
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, self._trading_client.get_all_positions)
-        except Exception as e:
-            logger.error(f"Failed to get Alpaca positions: {str(e)}")
-            return []
-
-    async def get_position_source_comparison(self, symbol: str) -> Dict[str, Any]:
-        """
-        Compare local position with Alpaca position for debugging.
-        Useful for understanding discrepancies.
-        """
-        result = {
-            "symbol": symbol,
-            "local_position": None,
-            "alpaca_position": None,
-            "discrepancies": []
-        }
-        
-        try:
-            # Get local position
-            local_pos = await self.get_position(symbol)
-            if local_pos:
-                result["local_position"] = {
-                    "quantity": local_pos.quantity,
-                    "avg_price": local_pos.avg_price,
-                    "unrealized_pnl": local_pos.unrealized_pnl
-                }
-            
-            # Get Alpaca position
-            if self._trading_client:
-                alpaca_positions = await self._get_alpaca_positions()
-                alpaca_pos = next((pos for pos in alpaca_positions if pos.symbol == symbol), None)
-                
-                if alpaca_pos:
-                    result["alpaca_position"] = {
-                        "quantity": float(alpaca_pos.qty),
-                        "avg_price": float(alpaca_pos.avg_entry_price),
-                        "unrealized_pnl": float(alpaca_pos.unrealized_pl or 0)
-                    }
-                    
-                    # Check for discrepancies
-                    if local_pos:
-                        if abs(local_pos.quantity - float(alpaca_pos.qty)) > 0.001:
-                            result["discrepancies"].append("quantity_mismatch")
-                        if abs(local_pos.avg_price - float(alpaca_pos.avg_entry_price)) > 0.01:
-                            result["discrepancies"].append("avg_price_mismatch")
-            
-            return result
+            logger.info(f"Position sync completed: {stats}")
+            return stats
             
         except Exception as e:
-            logger.error(f"Error comparing position sources: {str(e)}")
-            return result
-
-    async def recover_database_from_alpaca(self, force_recovery: bool = False) -> Dict[str, Any]:
-        """
-        Recover local database from Alpaca positions after data loss.
-        
-        This method can rebuild your position database if the local SQLite file is lost,
-        corrupted, or you're starting fresh on a new machine.
-        
-        Args:
-            force_recovery: If True, clears existing local data before recovery
-            
-        Returns:
-            Dictionary with recovery statistics and results
-        """
-        if not self._trading_client:
-            raise ValueError("No trading client available for database recovery")
-            
-        recovery_stats = {
-            "recovered_positions": 0,
-            "skipped_positions": 0,
-            "errors": [],
-            "timestamp": datetime.utcnow(),
-            "force_recovery": force_recovery
-        }
-        
-        try:
-            logger.info("Starting database recovery from Alpaca...")
-            
-            if force_recovery:
-                logger.warning("Force recovery enabled - clearing existing local positions")
-                # Clear existing positions if force recovery
-                await self._clear_all_positions()
-                self._positions.clear()
-            
-            # Get all current positions from Alpaca
-            alpaca_positions = await self._get_alpaca_positions()
-            logger.info(f"Found {len(alpaca_positions)} positions in Alpaca account")
-            
-            if not alpaca_positions:
-                logger.info("No positions found in Alpaca account")
-                return recovery_stats
-            
-            # Process each Alpaca position
-            for alpaca_pos in alpaca_positions:
-                try:
-                    symbol = alpaca_pos.symbol
-                    
-                    # Check if we already have this position locally (unless force recovery)
-                    if not force_recovery:
-                        existing_pos = await self.get_position(symbol)
-                        if existing_pos and existing_pos.quantity != 0:
-                            logger.debug(f"Skipping {symbol} - already exists locally")
-                            recovery_stats["skipped_positions"] += 1
-                            continue
-                    
-                    # Create position from Alpaca data
-                    recovered_position = Position(
-                        symbol=symbol,
-                        quantity=float(alpaca_pos.qty),
-                        avg_price=float(alpaca_pos.avg_entry_price),
-                        current_price=float(alpaca_pos.current_price),
-                        unrealized_pnl=float(alpaca_pos.unrealized_pl or 0),
-                        realized_pnl=0,  # Cannot recover historical realized P&L
-                        created_at=datetime.utcnow()  # Use current time as creation date
-                    )
-                    
-                    # Save to database and cache
-                    await self._database.save_position(recovered_position)
-                    self._positions[symbol] = recovered_position
-                    
-                    recovery_stats["recovered_positions"] += 1
-                    logger.info(f"Recovered position: {symbol} - Qty: {recovered_position.quantity}, "
-                              f"Avg Price: ${recovered_position.avg_price:.2f}")
-                    
-                except Exception as e:
-                    error_msg = f"Failed to recover position {alpaca_pos.symbol}: {str(e)}"
-                    logger.error(error_msg)
-                    recovery_stats["errors"].append(error_msg)
-            
-            # Additional recovery steps
-            await self._recover_recent_orders_from_alpaca(recovery_stats)
-            
-            logger.info(f"Database recovery completed: {recovery_stats['recovered_positions']} positions recovered, "
-                       f"{recovery_stats['skipped_positions']} skipped, {len(recovery_stats['errors'])} errors")
-            
-            return recovery_stats
-            
-        except Exception as e:
-            error_msg = f"Database recovery failed: {str(e)}"
-            logger.error(error_msg)
-            recovery_stats["errors"].append(error_msg)
+            logger.error(f"Error during position sync: {str(e)}")
             raise
 
-    async def _clear_all_positions(self) -> None:
-        """Clear all positions from local database (used in force recovery)."""
-        try:
-            session = self._database._session_factory()
-            try:
-                # Import the PositionRecord class from database module
-                from ..database.database_manager import PositionRecord
-                deleted_count = session.query(PositionRecord).delete()
-                session.commit()
-                logger.info(f"Cleared {deleted_count} positions from local database")
-            finally:
-                session.close()
-        except Exception as e:
-            logger.error(f"Error clearing positions: {str(e)}")
-            raise
 
-    async def _recover_recent_orders_from_alpaca(self, recovery_stats: Dict[str, Any]) -> None:
-        """
-        Attempt to recover recent order history from Alpaca.
-        Note: Alpaca has limited order history compared to your local tracking.
-        """
-        try:
-            logger.info("Attempting to recover recent order history...")
-            
-            # Get recent orders from Alpaca (last 30 days)
-            import asyncio
-            loop = asyncio.get_event_loop()
-            
-            # Alpaca's get_orders method with date filtering
-            from datetime import datetime, timedelta
-            recent_date = datetime.now() - timedelta(days=30)
-            
-            # Note: This is a simplified example - actual Alpaca API calls may vary
-            # You may need to adjust based on your specific Alpaca client implementation
-            orders = await loop.run_in_executor(
-                None, 
-                lambda: self._trading_client.get_orders(
-                    status='all',
-                    after=recent_date.isoformat()
-                )
-            )
-            
-            recovered_orders = 0
-            for alpaca_order in orders:
-                try:
-                    # Convert Alpaca order to your Order format
-                    order = Order(
-                        order_id=alpaca_order.id,
-                        symbol=alpaca_order.symbol,
-                        quantity=float(alpaca_order.qty),
-                        order_type=OrderType.MARKET if alpaca_order.order_type == 'market' else OrderType.LIMIT,
-                        side=alpaca_order.side,
-                        price=float(alpaca_order.limit_price) if alpaca_order.limit_price else None,
-                        status=OrderStatus.FILLED if alpaca_order.status == 'filled' else OrderStatus.CANCELED,
-                        created_at=alpaca_order.created_at,
-                        filled_at=alpaca_order.filled_at,
-                        filled_price=float(alpaca_order.filled_avg_price) if alpaca_order.filled_avg_price else None,
-                        filled_quantity=float(alpaca_order.filled_qty) if alpaca_order.filled_qty else None
-                    )
-                    
-                    await self._database.save_order(order)
-                    recovered_orders += 1
-                    
-                except Exception as e:
-                    logger.warning(f"Failed to recover order {alpaca_order.id}: {str(e)}")
-            
-            recovery_stats["recovered_orders"] = recovered_orders
-            logger.info(f"Recovered {recovered_orders} recent orders from Alpaca")
-            
-        except Exception as e:
-            logger.warning(f"Could not recover order history: {str(e)}")
-            recovery_stats["order_recovery_error"] = str(e)

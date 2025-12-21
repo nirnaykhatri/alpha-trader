@@ -1,0 +1,32 @@
+[default.trading.position_sizing]
+initial_portfolio_percentage = 0.005
+risk_per_trade = 0.01
+max_total_position_percentage = 0.10
+max_single_position_percent = 0.25
+max_account_risk_percent = 0.15
+daily_loss_limit_percent = 0.05
+weekly_loss_limit_percent = 0.10
+
+[default.trading.position_sizing.averaging]
+multiplier = 1.25
+max_multiplier = 2.5
+max_attempts = 2
+
+[default.trading.risk_management.advanced]
+max_positions = 5
+max_symbol_allocation = 0.15
+daily_loss_limit = 0.02
+portfolio_drawdown_limit = 0.10
+
+[default.strategies.dca]
+base_threshold_percent = 2.0
+progressive_multiplier = 2.0
+max_threshold_percent = 8.0
+
+[default.strategies.long_strategy.averaging]
+max_attempts = 2
+position_multiplier = 1.25
+
+[default.strategies.short_strategy.resistance_averaging]
+max_attempts = 2
+position_multiplier = 1.25

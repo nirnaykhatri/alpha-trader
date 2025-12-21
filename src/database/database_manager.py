@@ -1,24 +1,37 @@
 """
-Database management implementation using SQLAlchemy.
+Database management implementation using SQLAlchemy with async support.
 Handles persistence of positions, orders, and trading history.
 """
 
 import asyncio
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, AsyncGenerator
 from datetime import datetime, timedelta
-from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, Text
-from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy.pool import StaticPool
+from contextlib import asynccontextmanager
+
+# Async SQLAlchemy imports
+from sqlalchemy.ext.asyncio import (
+    create_async_engine,
+    async_sessionmaker,
+    AsyncSession,
+    AsyncEngine
+)
+from sqlalchemy import Column, String, Float, Integer, DateTime, Text, select, delete
 import json
-from ..interfaces import IConfigurationManager
-from ..exceptions import TradingBotException
-from ..core.logging_config import get_logger
-from .. import Position, Order, OrderStatus, OrderType
+
+from src.interfaces import IConfigurationManager
+from src.exceptions import TradingBotException
+from src.core.logging_config import get_logger
+from src import Position, Order, OrderStatus, OrderType
+from src.constants import DatabaseConstants
+from src.database.base import Base
+
+# Import other schema modules to register their models with the shared Base
+# This ensures all tables are created when Base.metadata.create_all() is called
+import src.database.enhanced_schema  # noqa: F401
+import src.database.dca_metadata_manager  # noqa: F401
 
 
 logger = get_logger(__name__)
-
-Base = declarative_base()
 
 
 class PositionRecord(Base):
@@ -26,6 +39,7 @@ class PositionRecord(Base):
     __tablename__ = 'positions'
     
     symbol = Column(String(10), primary_key=True)
+    broker = Column(String(20), primary_key=True, default='alpaca')  # Added broker to PK
     quantity = Column(Float, nullable=False)
     avg_price = Column(Float, nullable=False)
     current_price = Column(Float, nullable=False)
@@ -40,6 +54,7 @@ class OrderRecord(Base):
     __tablename__ = 'orders'
     
     order_id = Column(String(50), primary_key=True)
+    broker = Column(String(20), nullable=True, default='alpaca')  # Added broker
     symbol = Column(String(10), nullable=False)
     quantity = Column(Float, nullable=False)
     order_type = Column(String(20), nullable=False)
@@ -58,6 +73,7 @@ class TradeRecord(Base):
     __tablename__ = 'trades'
     
     trade_id = Column(String(50), primary_key=True)
+    broker = Column(String(20), nullable=True, default='alpaca')  # Added broker
     symbol = Column(String(10), nullable=False)
     
     # Entry details
@@ -128,8 +144,9 @@ class TradingSignalRecord(Base):
 
 class DatabaseManager:
     """
-    Database manager for persisting trading data.
-    Supports SQLite for development and PostgreSQL for production.
+    Async database manager for persisting trading data.
+    Uses async SQLAlchemy for non-blocking database operations.
+    Supports SQLite (with aiosqlite) for development and PostgreSQL (with asyncpg) for production.
     """
     
     def __init__(self, config: IConfigurationManager):
@@ -140,74 +157,156 @@ class DatabaseManager:
             config: Configuration manager instance
         """
         self._config = config
-        self._engine = None
-        self._session_factory = None
+        self._engine: Optional[AsyncEngine] = None
+        self._async_session_factory = None
         
-        # Database configuration
-        self._db_url = config.get_config("database.url", "sqlite:///data/trading_bot.db")
+        # Database configuration with defaults from constants
+        db_url = config.get_config("database.url", "sqlite:///data/trading_bot.db")
+        
+        # Convert sync URL to async URL
+        if db_url.startswith("sqlite://"):
+            self._db_url = db_url.replace("sqlite://", "sqlite+aiosqlite://")
+        elif db_url.startswith("postgresql://"):
+            self._db_url = db_url.replace("postgresql://", "postgresql+asyncpg://")
+        else:
+            self._db_url = db_url  # Assume already async-compatible
+        
         self._echo = config.get_config("database.echo", False)
-        self._pool_size = config.get_config("database.pool_size", 5)
-        self._max_overflow = config.get_config("database.max_overflow", 10)
+        self._pool_size = config.get_config("database.pool_size", DatabaseConstants.POOL_SIZE)
+        self._max_overflow = config.get_config("database.max_overflow", DatabaseConstants.POOL_MAX_OVERFLOW)
+        self._pool_timeout = config.get_config("database.pool_timeout", DatabaseConstants.POOL_TIMEOUT)
+        self._pool_recycle = config.get_config("database.pool_recycle", DatabaseConstants.POOL_RECYCLE)
         
-        logger.info(f"DatabaseManager initialized with URL: {self._db_url}")
+        logger.info(f"DatabaseManager initialized with async URL: {self._db_url}")
     
     async def initialize(self) -> None:
-        """Initialize database connection and create tables."""
+        """
+        Initialize async database connection and create tables with proper connection pooling.
+        
+        This method sets up the SQLAlchemy async engine with connection pooling parameters
+        configured in the application settings. It handles both SQLite (using aiosqlite)
+        and PostgreSQL (using asyncpg) dialects.
+        
+        For SQLite, it configures the engine to allow access from multiple threads/tasks.
+        For PostgreSQL, it sets up a connection pool with configurable size, overflow,
+        timeout, and recycle settings to ensure efficient resource usage under load.
+        
+        Finally, it creates all defined database tables if they do not exist.
+        
+        Raises:
+            TradingBotException: If initialization fails due to configuration or connection errors.
+        """
         try:
-            logger.info("Initializing database...")
+            logger.info("Initializing async database with connection pooling...")
             
-            # Create engine
-            if self._db_url.startswith("sqlite"):
-                # SQLite configuration
-                self._engine = create_engine(
+            # Create async engine with appropriate settings
+            if "sqlite" in self._db_url:
+                # SQLite async configuration
+                logger.info("Using async SQLite with aiosqlite")
+                self._engine = create_async_engine(
                     self._db_url,
                     echo=self._echo,
-                    poolclass=StaticPool,
                     connect_args={"check_same_thread": False}
                 )
             else:
-                # PostgreSQL or other database configuration
-                self._engine = create_engine(
+                # PostgreSQL or other database with connection pooling
+                logger.info(f"Using async engine with pool_size={self._pool_size}, max_overflow={self._max_overflow}")
+                self._engine = create_async_engine(
                     self._db_url,
                     echo=self._echo,
                     pool_size=self._pool_size,
-                    max_overflow=self._max_overflow
+                    max_overflow=self._max_overflow,
+                    pool_timeout=self._pool_timeout,
+                    pool_recycle=self._pool_recycle,
+                    pool_pre_ping=True  # Verify connections before using
                 )
             
-            # Create session factory
-            self._session_factory = sessionmaker(bind=self._engine)
+            # Create async session factory
+            self._async_session_factory = async_sessionmaker(
+                self._engine,
+                class_=AsyncSession,
+                expire_on_commit=False
+            )
             
-            # Create tables
-            Base.metadata.create_all(self._engine)
+            # Create tables asynchronously
+            async with self._engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
             
-            logger.info("Database initialized successfully")
+            logger.info("Async database initialized successfully")
             
         except Exception as e:
-            logger.error(f"Failed to initialize database: {str(e)}")
-            raise TradingBotException(f"Database initialization failed: {str(e)}")
+            logger.error(f"Failed to initialize async database: {str(e)}")
+            raise TradingBotException(f"Async database initialization failed: {str(e)}")
     
     async def close(self) -> None:
-        """Close database connections."""
+        """Close async database connections."""
         try:
             if self._engine:
-                self._engine.dispose()
-                logger.info("Database connections closed")
+                await self._engine.dispose()
+                logger.info("Async database connections closed")
         except Exception as e:
-            logger.error(f"Error closing database: {str(e)}")
+            logger.error(f"Error closing async database: {str(e)}")
+    
+    @asynccontextmanager
+    async def get_session(self) -> AsyncGenerator[AsyncSession, None]:
+        """
+        Context manager for providing async database sessions.
+        
+        This method yields an AsyncSession that is automatically committed on success
+        or rolled back on exception. It ensures that the session is properly closed
+        regardless of the outcome.
+        
+        The session is created from the configured session factory and is thread-safe
+        (or task-safe in asyncio context).
+        
+        Usage:
+            async with db_manager.get_session() as session:
+                # Perform database operations
+                await session.execute(...)
+                # Commit happens automatically at the end of the block
+        
+        Yields:
+            AsyncSession: An active async database session.
+            
+        Raises:
+            TradingBotException: If the database has not been initialized.
+            Exception: Re-raises any exception that occurs within the context block
+                      after rolling back the transaction.
+        """
+        if not self._async_session_factory:
+            raise TradingBotException("Database not initialized. Call initialize() first.")
+        
+        session = self._async_session_factory()
+        try:
+            yield session
+            await session.commit()
+        except Exception as e:
+            logger.warning(f"Database session rolled back due to: {e}")
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
     
     async def save_position(self, position: Position) -> None:
         """
-        Save or update a position in the database.
+        Save or update a position in the database with proper async transaction boundaries.
         
         Args:
             position: Position to save
+            
+        Raises:
+            TradingBotException: If save operation fails
         """
         try:
-            session = self._session_factory()
-            
-            try:
-                # Check if position exists
-                existing = session.query(PositionRecord).filter_by(symbol=position.symbol).first()
+            async with self.get_session() as session:
+                # Check if position exists for this symbol AND broker
+                broker = position.broker or 'alpaca'
+                stmt = select(PositionRecord).where(
+                    PositionRecord.symbol == position.symbol,
+                    PositionRecord.broker == broker
+                )
+                result = await session.execute(stmt)
+                existing = result.scalar_one_or_none()
                 
                 if existing:
                     # Update existing position
@@ -221,6 +320,7 @@ class DatabaseManager:
                     # Create new position
                     new_position = PositionRecord(
                         symbol=position.symbol,
+                        broker=broker,
                         quantity=position.quantity,
                         avg_price=position.avg_price,
                         current_price=position.current_price,
@@ -230,32 +330,35 @@ class DatabaseManager:
                         updated_at=datetime.utcnow()
                     )
                     session.add(new_position)
-                
-                session.commit()
-                logger.debug(f"Position saved: {position.symbol}")
-                
-            finally:
-                session.close()
-                
+            # Transaction auto-commits on success via context manager, auto-rolls back on exception
+            
+            logger.debug(f"Position saved successfully: {position.symbol} ({broker})")
+            
         except Exception as e:
             logger.error(f"Error saving position {position.symbol}: {str(e)}")
-            raise
+            raise TradingBotException(f"Failed to save position: {str(e)}")
     
-    async def get_position(self, symbol: str) -> Optional[Position]:
+    async def get_position(self, symbol: str, broker: str = None) -> Optional[Position]:
         """
         Get a position from the database.
         
         Args:
             symbol: Trading symbol
+            broker: Optional broker name. If None, returns first found (legacy behavior) or prefers default.
             
         Returns:
             Position if found, None otherwise
         """
         try:
-            session = self._session_factory()
-            
-            try:
-                record = session.query(PositionRecord).filter_by(symbol=symbol).first()
+            async with self.get_session() as session:
+                stmt = select(PositionRecord).where(PositionRecord.symbol == symbol)
+                if broker:
+                    stmt = stmt.where(PositionRecord.broker == broker)
+                
+                result = await session.execute(stmt)
+                # If broker not specified, this might return multiple. For now, take first.
+                # Ideally, caller should specify broker.
+                record = result.scalars().first()
                 
                 if record:
                     return Position(
@@ -265,48 +368,49 @@ class DatabaseManager:
                         current_price=record.current_price,
                         unrealized_pnl=record.unrealized_pnl,
                         realized_pnl=record.realized_pnl,
-                        created_at=record.created_at
+                        created_at=record.created_at,
+                        broker=record.broker
                     )
                 
                 return None
-                
-            finally:
-                session.close()
                 
         except Exception as e:
             logger.error(f"Error getting position {symbol}: {str(e)}")
             return None
     
-    async def get_all_positions(self) -> List[Position]:
+    async def get_all_positions(self, broker: str = None) -> List[Position]:
         """
         Get all positions from the database.
         
+        Args:
+            broker: Optional broker filter
+            
         Returns:
             List of all positions
         """
         try:
-            session = self._session_factory()
-            
-            try:
-                records = session.query(PositionRecord).all()
+            async with self.get_session() as session:
+                stmt = select(PositionRecord)
+                if broker:
+                    stmt = stmt.where(PositionRecord.broker == broker)
+                    
+                result = await session.execute(stmt)
+                records = result.scalars().all()
                 
                 positions = []
                 for record in records:
-                    position = Position(
+                    positions.append(Position(
                         symbol=record.symbol,
                         quantity=record.quantity,
                         avg_price=record.avg_price,
                         current_price=record.current_price,
                         unrealized_pnl=record.unrealized_pnl,
                         realized_pnl=record.realized_pnl,
-                        created_at=record.created_at
-                    )
-                    positions.append(position)
+                        created_at=record.created_at,
+                        broker=record.broker
+                    ))
                 
                 return positions
-                
-            finally:
-                session.close()
                 
         except Exception as e:
             logger.error(f"Error getting all positions: {str(e)}")
@@ -320,11 +424,11 @@ class DatabaseManager:
             order: Order to save
         """
         try:
-            session = self._session_factory()
-            
-            try:
+            async with self.get_session() as session:
                 # Check if order exists
-                existing = session.query(OrderRecord).filter_by(order_id=str(order.order_id)).first()  # Convert UUID to string
+                stmt = select(OrderRecord).where(OrderRecord.order_id == str(order.order_id))
+                result = await session.execute(stmt)
+                existing = result.scalar_one_or_none()
                 
                 if existing:
                     # Update existing order
@@ -332,14 +436,18 @@ class DatabaseManager:
                     existing.filled_at = order.filled_at
                     existing.filled_price = order.filled_price
                     existing.filled_quantity = order.filled_quantity
+                    # Ensure broker is set if missing
+                    if not existing.broker and order.broker:
+                        existing.broker = order.broker
                 else:
                     # Create new order
                     new_order = OrderRecord(
                         order_id=str(order.order_id),  # Convert UUID to string
+                        broker=order.broker or 'alpaca',
                         symbol=order.symbol,
                         quantity=order.quantity,
                         order_type=order.order_type.value,
-                        side=order.side.value if hasattr(order.side, 'value') else str(order.side),  # Handle OrderSide enum
+                        side=order.side.value if hasattr(order.side, 'value') else str(order.side),
                         price=order.price,
                         stop_price=order.stop_price,
                         status=order.status.value,
@@ -349,42 +457,44 @@ class DatabaseManager:
                         filled_quantity=order.filled_quantity
                     )
                     session.add(new_order)
-                
-                session.commit()
-                logger.debug(f"Order saved: {order.order_id}")
-                
-            finally:
-                session.close()
+            # Transaction auto-commits on success via context manager
+            
+            logger.debug(f"Order saved successfully: {order.order_id}")
                 
         except Exception as e:
             logger.error(f"Error saving order {order.order_id}: {str(e)}")
-            raise
+            raise TradingBotException(f"Failed to save order: {str(e)}")
     
     async def get_orders(self, symbol: Optional[str] = None, 
-                        status: Optional[OrderStatus] = None) -> List[Order]:
+                        status: Optional[OrderStatus] = None,
+                        broker: Optional[str] = None) -> List[Order]:
         """
         Get orders from the database with optional filtering.
         
         Args:
             symbol: Optional symbol filter
             status: Optional status filter
+            broker: Optional broker filter
             
         Returns:
             List of orders matching criteria
         """
         try:
-            session = self._session_factory()
-            
-            try:
-                query = session.query(OrderRecord)
+            async with self.get_session() as session:
+                # Build query with filters
+                stmt = select(OrderRecord)
                 
                 if symbol:
-                    query = query.filter_by(symbol=symbol)
+                    stmt = stmt.where(OrderRecord.symbol == symbol)
                 
                 if status:
-                    query = query.filter_by(status=status.value)
+                    stmt = stmt.where(OrderRecord.status == status.value)
                 
-                records = query.all()
+                if broker:
+                    stmt = stmt.where(OrderRecord.broker == broker)
+                
+                result = await session.execute(stmt)
+                records = result.scalars().all()
                 
                 orders = []
                 for record in records:
@@ -400,14 +510,12 @@ class DatabaseManager:
                         created_at=record.created_at,
                         filled_at=record.filled_at,
                         filled_price=record.filled_price,
-                        filled_quantity=record.filled_quantity
+                        filled_quantity=record.filled_quantity,
+                        broker=record.broker
                     )
                     orders.append(order)
                 
                 return orders
-                
-            finally:
-                session.close()
                 
         except Exception as e:
             logger.error(f"Error getting orders: {str(e)}")
@@ -421,9 +529,7 @@ class DatabaseManager:
             signal: Trading signal to save
         """
         try:
-            session = self._session_factory()
-            
-            try:
+            async with self.get_session() as session:
                 new_signal = TradingSignalRecord(
                     signal_id=signal.signal_id,
                     symbol=signal.symbol,
@@ -435,12 +541,9 @@ class DatabaseManager:
                 )
                 
                 session.add(new_signal)
-                session.commit()
-                
-                logger.debug(f"Signal saved: {signal.signal_id}")
-                
-            finally:
-                session.close()
+            # Auto-commit via context manager
+            
+            logger.debug(f"Signal saved: {signal.signal_id}")
                 
         except Exception as e:
             logger.error(f"Error saving signal {signal.signal_id}: {str(e)}")
@@ -459,23 +562,22 @@ class DatabaseManager:
             Dictionary with trading statistics
         """
         try:
-            session = self._session_factory()
-            
-            try:
+            async with self.get_session() as session:
                 # Calculate date range
                 end_date = datetime.utcnow()
                 start_date = end_date - timedelta(days=days)
                 
-                # Query orders in date range
-                query = session.query(OrderRecord).filter(
+                # Build query with filters
+                stmt = select(OrderRecord).where(
                     OrderRecord.created_at >= start_date,
                     OrderRecord.created_at <= end_date
                 )
                 
                 if symbol:
-                    query = query.filter_by(symbol=symbol)
+                    stmt = stmt.where(OrderRecord.symbol == symbol)
                 
-                orders = query.all()
+                result = await session.execute(stmt)
+                orders = result.scalars().all()
                 
                 # Calculate statistics
                 total_trades = len([o for o in orders if o.status == OrderStatus.FILLED.value])
@@ -491,9 +593,6 @@ class DatabaseManager:
                     "symbol": symbol
                 }
                 
-            finally:
-                session.close()
-                
         except Exception as e:
             logger.error(f"Error getting trading history: {str(e)}")
             return {}
@@ -507,59 +606,28 @@ class DatabaseManager:
             days: Number of days of data to keep
         """
         try:
-            session = self._session_factory()
-            
-            try:
+            async with self.get_session() as session:
                 cutoff_date = datetime.utcnow() - timedelta(days=days)
                 
                 # Delete old filled/canceled orders (SAFE - never deletes open orders)
-                deleted_orders = session.query(OrderRecord).filter(
+                stmt_orders = delete(OrderRecord).where(
                     OrderRecord.created_at < cutoff_date,
                     OrderRecord.status.in_([OrderStatus.FILLED.value, OrderStatus.CANCELED.value])
-                ).delete()
+                )
+                result_orders = await session.execute(stmt_orders)
+                deleted_orders = result_orders.rowcount
                 
                 # Delete old signals
-                deleted_signals = session.query(TradingSignalRecord).filter(
+                stmt_signals = delete(TradingSignalRecord).where(
                     TradingSignalRecord.timestamp < cutoff_date
-                ).delete()
+                )
+                result_signals = await session.execute(stmt_signals)
+                deleted_signals = result_signals.rowcount
                 
-                session.commit()
                 logger.info(f"Cleaned up {deleted_orders} old orders and {deleted_signals} old signals (older than {days} days)")
-                
-            finally:
-                session.close()
                 
         except Exception as e:
             logger.error(f"Error cleaning up old data: {str(e)}")
-    
-    async def cleanup_closed_positions(self, days: int = 30) -> None:
-        """
-        Clean up closed positions (quantity = 0) older than specified days.
-        SAFE: Only deletes positions that are completely closed.
-        
-        Args:
-            days: Number of days to keep closed positions for historical reference
-        """
-        try:
-            session = self._session_factory()
-            
-            try:
-                cutoff_date = datetime.utcnow() - timedelta(days=days)
-                
-                # Only delete positions with zero quantity that are old
-                deleted_positions = session.query(PositionRecord).filter(
-                    PositionRecord.quantity == 0,  # CRITICAL: Only zero quantity positions
-                    PositionRecord.updated_at < cutoff_date
-                ).delete()
-                
-                session.commit()
-                logger.info(f"Cleaned up {deleted_positions} closed positions (older than {days} days)")
-                
-            finally:
-                session.close()
-                
-        except Exception as e:
-            logger.error(f"Error cleaning up closed positions: {str(e)}")
     
     async def backup_database(self, backup_path: str = None) -> str:
         """
@@ -582,9 +650,11 @@ class DatabaseManager:
             # Ensure backup directory exists
             Path(backup_path).parent.mkdir(parents=True, exist_ok=True)
             
-            # Extract database path from URL
-            if self._db_url.startswith("sqlite:///"):
-                source_db = self._db_url.replace("sqlite:///", "")
+            # Extract database path from async URL
+            if "sqlite" in self._db_url:
+                # Remove async prefix for file path
+                source_db = self._db_url.replace("sqlite+aiosqlite:///", "")
+                source_db = source_db.replace("sqlite:///", "")
                 
                 if Path(source_db).exists():
                     shutil.copy2(source_db, backup_path)
@@ -613,13 +683,15 @@ class DatabaseManager:
             if not Path(backup_path).exists():
                 raise FileNotFoundError(f"Backup file not found: {backup_path}")
             
-            # Extract database path from URL
-            if self._db_url.startswith("sqlite:///"):
-                target_db = self._db_url.replace("sqlite:///", "")
+            # Extract database path from async URL
+            if "sqlite" in self._db_url:
+                # Remove async prefix for file path
+                target_db = self._db_url.replace("sqlite+aiosqlite:///", "")
+                target_db = target_db.replace("sqlite:///", "")
                 
                 # Close existing connections
                 if self._engine:
-                    self._engine.dispose()
+                    await self._engine.dispose()
                 
                 # Restore backup
                 shutil.copy2(backup_path, target_db)
@@ -643,52 +715,50 @@ class DatabaseManager:
             Dictionary with database statistics
         """
         try:
-            session = self._session_factory()
-            
-            try:
+            async with self.get_session() as session:
                 stats = {}
                 
                 # Count records in each table
-                stats["positions_total"] = session.query(PositionRecord).count()
-                stats["positions_open"] = session.query(PositionRecord).filter(
-                    PositionRecord.quantity != 0
-                ).count()
-                stats["positions_closed"] = session.query(PositionRecord).filter(
-                    PositionRecord.quantity == 0
-                ).count()
+                result = await session.execute(select(PositionRecord))
+                stats["positions_total"] = len(result.scalars().all())
                 
-                stats["orders_total"] = session.query(OrderRecord).count()
-                stats["orders_filled"] = session.query(OrderRecord).filter(
-                    OrderRecord.status == OrderStatus.FILLED.value
-                ).count()
+                result = await session.execute(select(PositionRecord).where(PositionRecord.quantity != 0))
+                stats["positions_open"] = len(result.scalars().all())
                 
-                stats["signals_total"] = session.query(TradingSignalRecord).count()
+                result = await session.execute(select(PositionRecord).where(PositionRecord.quantity == 0))
+                stats["positions_closed"] = len(result.scalars().all())
+                
+                result = await session.execute(select(OrderRecord))
+                stats["orders_total"] = len(result.scalars().all())
+                
+                result = await session.execute(select(OrderRecord).where(OrderRecord.status == OrderStatus.FILLED.value))
+                stats["orders_filled"] = len(result.scalars().all())
+                
+                result = await session.execute(select(TradingSignalRecord))
+                stats["signals_total"] = len(result.scalars().all())
                 
                 # Get date ranges
-                oldest_position = session.query(PositionRecord.created_at).order_by(
-                    PositionRecord.created_at.asc()
-                ).first()
-                newest_position = session.query(PositionRecord.updated_at).order_by(
-                    PositionRecord.updated_at.desc()
-                ).first()
+                result = await session.execute(select(PositionRecord.created_at).order_by(PositionRecord.created_at.asc()).limit(1))
+                oldest_position = result.scalar_one_or_none()
+                
+                result = await session.execute(select(PositionRecord.updated_at).order_by(PositionRecord.updated_at.desc()).limit(1))
+                newest_position = result.scalar_one_or_none()
                 
                 if oldest_position:
-                    stats["oldest_position_date"] = oldest_position[0]
+                    stats["oldest_position_date"] = oldest_position
                 if newest_position:
-                    stats["newest_position_date"] = newest_position[0]
+                    stats["newest_position_date"] = newest_position
                 
                 # Database file size (SQLite only)
-                if self._db_url.startswith("sqlite:///"):
+                if "sqlite" in self._db_url:
                     from pathlib import Path
-                    db_file = self._db_url.replace("sqlite:///", "")
+                    db_file = self._db_url.replace("sqlite+aiosqlite:///", "")
+                    db_file = db_file.replace("sqlite:///", "")
                     if Path(db_file).exists():
                         stats["database_size_bytes"] = Path(db_file).stat().st_size
                         stats["database_size_mb"] = stats["database_size_bytes"] / (1024 * 1024)
                 
                 return stats
-                
-            finally:
-                session.close()
                 
         except Exception as e:
             logger.error(f"Error getting database stats: {str(e)}")
@@ -709,13 +779,12 @@ class DatabaseManager:
             trade_id: Unique identifier for the trade
         """
         try:
-            session = self._session_factory()
-            
-            try:
+            async with self.get_session() as session:
                 trade_id = f"{symbol}_{str(entry_order.order_id)}"
                 
                 trade = TradeRecord(
                     trade_id=trade_id,
+                    broker=entry_order.broker or 'alpaca',
                     symbol=symbol,
                     entry_order_id=str(entry_order.order_id),  # Convert UUID to string
                     entry_price=entry_order.filled_price or entry_order.price,
@@ -727,15 +796,12 @@ class DatabaseManager:
                 )
                 
                 session.add(trade)
-                session.commit()
-                
-                logger.info(f"Trade entry created: {trade_id} - {symbol} {entry_order.side} "
-                           f"{trade.entry_quantity} @ ${trade.entry_price:.4f}")
-                
-                return trade_id
-                
-            finally:
-                session.close()
+            # Auto-commit via context manager
+            
+            logger.info(f"Trade entry created: {trade_id} - {symbol} {entry_order.side} "
+                       f"{trade.entry_quantity} @ ${trade.entry_price:.4f}")
+            
+            return trade_id
                 
         except Exception as e:
             logger.error(f"Error creating trade entry: {str(e)}")
@@ -754,10 +820,11 @@ class DatabaseManager:
             Trade summary with P&L information
         """
         try:
-            session = self._session_factory()
-            
-            try:
-                trade = session.query(TradeRecord).filter_by(trade_id=trade_id).first()
+            async with self.get_session() as session:
+                stmt = select(TradeRecord).where(TradeRecord.trade_id == trade_id)
+                result = await session.execute(stmt)
+                trade = result.scalar_one_or_none()
+                
                 if not trade:
                     raise TradingBotException(f"Trade {trade_id} not found")
                 
@@ -780,8 +847,6 @@ class DatabaseManager:
                     trade.realized_pnl = (trade.entry_price - trade.exit_price) * trade.exit_quantity
                     trade.profit_percentage = ((trade.entry_price - trade.exit_price) / trade.entry_price) * 100
                 
-                session.commit()
-                
                 # Create summary
                 trade_summary = {
                     'trade_id': trade_id,
@@ -794,15 +859,13 @@ class DatabaseManager:
                     'exit_reason': exit_reason,
                     'duration_minutes': (trade.exit_time - trade.entry_time).total_seconds() / 60
                 }
-                
-                logger.info(f"Trade completed: {trade_id} - {trade.symbol} "
-                           f"P&L: ${trade.realized_pnl:.2f} ({trade.profit_percentage:.2f}%) "
-                           f"Reason: {exit_reason}")
-                
-                return trade_summary
-                
-            finally:
-                session.close()
+            # Auto-commit via context manager
+            
+            logger.info(f"Trade completed: {trade_id} - {trade.symbol} "
+                       f"P&L: ${trade.realized_pnl:.2f} ({trade.profit_percentage:.2f}%) "
+                       f"Reason: {exit_reason}")
+            
+            return trade_summary
                 
         except Exception as e:
             logger.error(f"Error completing trade: {str(e)}")
@@ -819,25 +882,73 @@ class DatabaseManager:
             peak_price: Peak price reached during trailing
         """
         try:
-            session = self._session_factory()
-            
-            try:
-                trade = session.query(TradeRecord).filter_by(trade_id=trade_id).first()
+            async with self.get_session() as session:
+                stmt = select(TradeRecord).where(TradeRecord.trade_id == trade_id)
+                result = await session.execute(stmt)
+                trade = result.scalar_one_or_none()
+                
                 if trade:
                     if activation_price is not None:
                         trade.trailing_started_at = activation_price
                     if peak_price is not None:
                         trade.trailing_peak_price = peak_price
                     
-                    session.commit()
                     logger.debug(f"Updated trailing info for {trade_id}")
-                
-            finally:
-                session.close()
                 
         except Exception as e:
             logger.error(f"Error updating trade trailing info: {str(e)}")
     
+    async def get_trade_by_exit_order_id(self, exit_order_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Find a trade by its exit order ID (deterministic lookup).
+        
+        This method provides deterministic trade lookup for externally closed
+        positions by directly querying the exit_order_id foreign key.
+        
+        Args:
+            exit_order_id: Exit order ID to search for
+            
+        Returns:
+            Trade dictionary if found, None otherwise
+            
+        Example:
+            ```python
+            trade = await db.get_trade_by_exit_order_id("abc-123-def-456")
+            if trade:
+                print(f"Found trade {trade['trade_id']} for exit order")
+            ```
+        """
+        try:
+            async with self.get_session() as session:
+                stmt = select(TradeRecord).where(TradeRecord.exit_order_id == str(exit_order_id))
+                result = await session.execute(stmt)
+                trade = result.scalar_one_or_none()
+                
+                if not trade:
+                    return None
+                
+                return {
+                    'trade_id': trade.trade_id,
+                    'symbol': trade.symbol,
+                    'entry_price': trade.entry_price,
+                    'entry_quantity': trade.entry_quantity,
+                    'entry_time': trade.entry_time,
+                    'entry_side': trade.entry_side,
+                    'exit_order_id': trade.exit_order_id,
+                    'exit_price': trade.exit_price,
+                    'exit_quantity': trade.exit_quantity,
+                    'exit_time': trade.exit_time,
+                    'exit_side': trade.exit_side,
+                    'exit_reason': trade.exit_reason,
+                    'realized_pnl': trade.realized_pnl,
+                    'profit_percentage': trade.profit_percentage,
+                    'strategy_used': trade.strategy_used
+                }
+                
+        except Exception as e:
+            logger.error(f"Error finding trade by exit order ID {exit_order_id}: {str(e)}")
+            return None
+
     async def get_open_trades(self, symbol: str = None) -> List[Dict[str, Any]]:
         """
         Get all open trades (not yet completed).
@@ -849,15 +960,14 @@ class DatabaseManager:
             List of open trade dictionaries
         """
         try:
-            session = self._session_factory()
-            
-            try:
-                query = session.query(TradeRecord).filter(TradeRecord.completed_at.is_(None))
+            async with self.get_session() as session:
+                stmt = select(TradeRecord).where(TradeRecord.completed_at.is_(None))
                 
                 if symbol:
-                    query = query.filter(TradeRecord.symbol == symbol)
+                    stmt = stmt.where(TradeRecord.symbol == symbol)
                 
-                trades = query.all()
+                result = await session.execute(stmt)
+                trades = result.scalars().all()
                 
                 open_trades = []
                 for trade in trades:
@@ -875,9 +985,6 @@ class DatabaseManager:
                 
                 return open_trades
                 
-            finally:
-                session.close()
-                
         except Exception as e:
             logger.error(f"Error getting open trades: {str(e)}")
             return []
@@ -894,15 +1001,15 @@ class DatabaseManager:
             List of completed trade dictionaries
         """
         try:
-            session = self._session_factory()
-            
-            try:
-                query = session.query(TradeRecord).filter(TradeRecord.completed_at.isnot(None))
+            async with self.get_session() as session:
+                stmt = select(TradeRecord).where(TradeRecord.completed_at.isnot(None))
                 
                 if symbol:
-                    query = query.filter(TradeRecord.symbol == symbol)
+                    stmt = stmt.where(TradeRecord.symbol == symbol)
                 
-                trades = query.order_by(TradeRecord.completed_at.desc()).limit(limit).all()
+                stmt = stmt.order_by(TradeRecord.completed_at.desc()).limit(limit)
+                result = await session.execute(stmt)
+                trades = result.scalars().all()
                 
                 completed_trades = []
                 for trade in trades:
@@ -923,9 +1030,6 @@ class DatabaseManager:
                     })
                 
                 return completed_trades
-                
-            finally:
-                session.close()
                 
         except Exception as e:
             logger.error(f"Error getting completed trades: {str(e)}")
@@ -949,11 +1053,11 @@ class DatabaseManager:
             stop_price: Current trailing stop price
         """
         try:
-            session = self._session_factory()
-            
-            try:
+            async with self.get_session() as session:
                 # Get or create position tracking record
-                tracking = session.query(PositionTrackingRecord).filter_by(symbol=symbol).first()
+                stmt = select(PositionTrackingRecord).where(PositionTrackingRecord.symbol == symbol)
+                result = await session.execute(stmt)
+                tracking = result.scalar_one_or_none()
                 
                 if tracking:
                     # Update existing
@@ -978,11 +1082,7 @@ class DatabaseManager:
                         trailing_stop_price=stop_price
                     )
                     session.add(tracking)
-                
-                session.commit()
-                
-            finally:
-                session.close()
+            # Auto-commit via context manager
                 
         except Exception as e:
             logger.error(f"Error saving position tracking: {str(e)}")
@@ -998,10 +1098,10 @@ class DatabaseManager:
             Position tracking dictionary or None
         """
         try:
-            session = self._session_factory()
-            
-            try:
-                tracking = session.query(PositionTrackingRecord).filter_by(symbol=symbol).first()
+            async with self.get_session() as session:
+                stmt = select(PositionTrackingRecord).where(PositionTrackingRecord.symbol == symbol)
+                result = await session.execute(stmt)
+                tracking = result.scalar_one_or_none()
                 
                 if tracking:
                     return {
@@ -1018,9 +1118,6 @@ class DatabaseManager:
                     }
                 
                 return None
-                
-            finally:
-                session.close()
                 
         except Exception as e:
             logger.error(f"Error getting position tracking: {str(e)}")

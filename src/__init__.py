@@ -7,7 +7,7 @@ __author__ = "Trading Bot Team"
 __email__ = "support@tradingbot.com"
 
 # Core imports for easy access
-from .interfaces import (
+from src.interfaces import (
     TradingSignal, Order, Position, SupportLevel,
     SignalType, OrderType, OrderSide, OrderStatus,
     ISignalListener, IOrderManager, IPositionManager,
@@ -15,7 +15,7 @@ from .interfaces import (
     IMarketDataProvider, IConfigurationManager
 )
 
-from .exceptions import (
+from src.exceptions import (
     TradingBotException, SignalProcessingException,
     OrderExecutionException, MarketDataException,
     RiskManagementException, ConfigurationException,

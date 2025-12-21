@@ -2,6 +2,6 @@
 Position module initialization.
 """
 
-from .position_manager import PositionManager
+from src.position.position_manager import PositionManager
 
 __all__ = ["PositionManager"]

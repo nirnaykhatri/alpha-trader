@@ -11,10 +11,10 @@ from alpaca.data.live import StockDataStream
 from alpaca.trading.stream import TradingStream
 from alpaca.trading.enums import OrderSide
 from alpaca.common.exceptions import APIError
-from ..interfaces import IConfigurationManager
-from ..exceptions import APIException, ConnectionException
-from ..core.logging_config import get_logger
-from .. import Order, OrderStatus, TradingSignal
+from src.interfaces import IConfigurationManager
+from src.exceptions import APIException, ConnectionException, BrokerAPIException
+from src.core.logging_config import get_logger
+from src import Order, OrderStatus, TradingSignal
 
 
 logger = get_logger(__name__)
@@ -152,7 +152,7 @@ class AlpacaWebSocketClient:
             
         except Exception as e:
             logger.error(f"Failed to subscribe to {symbol}: {str(e)}")
-            raise APIException(f"Subscription failed for {symbol}: {str(e)}")
+            raise BrokerAPIException(f"Subscription failed for {symbol}: {str(e)}")
     
     async def unsubscribe_from_symbol(self, symbol: str) -> None:
         """

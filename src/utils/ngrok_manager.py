@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 import logging
 
+from src.constants import NgrokConstants
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,7 +30,7 @@ class NgrokManager:
         self.ngrok_exe = self._get_ngrok_executable_path()
         self.ngrok_process: Optional[subprocess.Popen] = None
         self.tunnel_url: Optional[str] = None
-        self.api_url = "http://localhost:4040/api/tunnels"
+        self.api_url = f"http://{NgrokConstants.API_HOST}:{NgrokConstants.API_PORT}{NgrokConstants.API_TUNNELS_ENDPOINT}"
         
     def _get_ngrok_executable_path(self) -> Path:
         """Get the path to ngrok executable based on OS."""
@@ -195,10 +197,10 @@ class NgrokManager:
             )
             
             # Give ngrok a moment to start its web interface
-            await asyncio.sleep(2)
+            await asyncio.sleep(NgrokConstants.INITIAL_STARTUP_DELAY)
             
             # Wait for tunnel to be ready with better diagnostics
-            max_attempts = 60  # Increase to 60 seconds for slower systems
+            max_attempts = NgrokConstants.MAX_STARTUP_ATTEMPTS  # 60 seconds for slower systems
             for attempt in range(max_attempts):
                 try:
                     # Check if process is still running
@@ -221,7 +223,7 @@ class NgrokManager:
                         print("=" * 60)
                         print(f"🌐 Public URL: {tunnel_url}")
                         print(f"🎯 Webhook URL: {tunnel_url}/webhook")
-                        print(f"📊 Monitor traffic: http://localhost:4040")
+                        print(f"📊 Monitor traffic: http://{NgrokConstants.API_HOST}:{NgrokConstants.API_PORT}")
                         print()
                         print("📋 COPY THIS TO TRADINGVIEW:")
                         print(f"   {tunnel_url}/webhook")
@@ -247,7 +249,8 @@ class NgrokManager:
                     stdout, stderr = self.ngrok_process.communicate(timeout=5)
                     print(f"🔍 Final stdout: {stdout}")
                     print(f"🔍 Final stderr: {stderr}")
-                except:
+                except Exception as e:
+                    logger.debug(f"Could not get process output: {e}")
                     print("🔍 Could not get process output")
             
             raise TimeoutError(f"ngrok tunnel failed to start within {max_attempts} seconds")
@@ -265,10 +268,11 @@ class NgrokManager:
                             stdout, stderr = self.ngrok_process.communicate(timeout=5)
                             if stderr:
                                 print(f"🔍 ngrok error output: {stderr}")
-                        except:
+                        except Exception as comm_error:
+                            logger.debug(f"Process communication timed out, killing: {comm_error}")
                             self.ngrok_process.kill()
-                except:
-                    pass
+                except Exception as cleanup_error:
+                    logger.debug(f"Error during ngrok cleanup: {cleanup_error}")
                 self.ngrok_process = None
             return None
     
@@ -278,7 +282,7 @@ class NgrokManager:
             import urllib.request
             import json
             
-            with urllib.request.urlopen(self.api_url, timeout=5) as response:
+            with urllib.request.urlopen(self.api_url, timeout=NgrokConstants.API_TIMEOUT) as response:
                 data = json.loads(response.read().decode())
                 
             tunnels = data.get("tunnels", [])
@@ -293,7 +297,7 @@ class NgrokManager:
     
     async def _get_tunnel_url_with_retry(self) -> Optional[str]:
         """Get the public tunnel URL from ngrok API with retry logic."""
-        max_retries = 3
+        max_retries = NgrokConstants.MAX_URL_RETRIES
         for retry in range(max_retries):
             try:
                 import urllib.request
@@ -301,13 +305,13 @@ class NgrokManager:
                 
                 # Try multiple API endpoints that ngrok might use
                 api_endpoints = [
-                    "http://localhost:4040/api/tunnels",
-                    "http://127.0.0.1:4040/api/tunnels"
+                    f"http://{NgrokConstants.API_HOST}:{NgrokConstants.API_PORT}{NgrokConstants.API_TUNNELS_ENDPOINT}",
+                    f"http://127.0.0.1:{NgrokConstants.API_PORT}{NgrokConstants.API_TUNNELS_ENDPOINT}"
                 ]
                 
                 for api_url in api_endpoints:
                     try:
-                        with urllib.request.urlopen(api_url, timeout=10) as response:
+                        with urllib.request.urlopen(api_url, timeout=NgrokConstants.EXTENDED_API_TIMEOUT) as response:
                             data = json.loads(response.read().decode())
                             
                         tunnels = data.get("tunnels", [])
@@ -343,7 +347,7 @@ class NgrokManager:
             print("🛑 Stopping ngrok tunnel...")
             self.ngrok_process.terminate()
             try:
-                self.ngrok_process.wait(timeout=5)
+                self.ngrok_process.wait(timeout=NgrokConstants.PROCESS_WAIT_TIMEOUT)
             except subprocess.TimeoutExpired:
                 self.ngrok_process.kill()
             self.ngrok_process = None
@@ -361,7 +365,7 @@ class NgrokManager:
             print("🌐 CURRENT NGROK TUNNEL INFO")
             print("=" * 60)
             print(f"🎯 Webhook URL: {self.tunnel_url}/webhook")
-            print(f"📊 Monitor traffic: http://localhost:4040")
+            print(f"📊 Monitor traffic: http://{NgrokConstants.API_HOST}:{NgrokConstants.API_PORT}")
             print()
             print("📋 For TradingView webhook settings:")
             print(f"   {self.tunnel_url}/webhook")
@@ -393,7 +397,8 @@ class NgrokManager:
             import urllib.request
             import json
             
-            with urllib.request.urlopen("http://localhost:4040/api/tunnels", timeout=5) as response:
+            api_url = f"http://{NgrokConstants.API_HOST}:{NgrokConstants.API_PORT}{NgrokConstants.API_TUNNELS_ENDPOINT}"
+            with urllib.request.urlopen(api_url, timeout=NgrokConstants.API_TIMEOUT) as response:
                 data = json.loads(response.read().decode())
                 health_info["api_accessible"] = True
                 health_info["tunnel_count"] = len(data.get("tunnels", []))

@@ -1,254 +1,204 @@
-"""
-Configuration management implementation.
-Handles loading and managing configuration from YAML files and environment variables.
+"""Configuration management implementation.
+
+This module provides backward-compatible access to the configuration system.
+The implementation delegates to src.config.settings which uses Dynaconf for
+layered TOML configuration with environment support.
+
+.. deprecated::
+    This module is DEPRECATED. New code should import from src.config.settings:
+    
+        from src.config.settings import ConfigurationManager, get_config
+    
+    This legacy wrapper will be removed in a future version.
 """
 
-import os
-import yaml
+import warnings
+
 from typing import Any, Dict, Optional
-from pathlib import Path
-from .logging_config import get_logger
-from ..interfaces import IConfigurationManager
-from ..exceptions import ConfigurationException
+
+from src.interfaces import IConfigurationManager
+from src.exceptions import ConfigurationException
 
 
-logger = get_logger(__name__)
+# Import the new Dynaconf-based implementation
+from src.config.settings import (
+    ConfigurationManager as DynaconfConfigManager,
+    validate_startup,
+)
 
 
 class ConfigurationManager(IConfigurationManager):
     """
-    Manages application configuration from multiple sources.
-    Supports YAML files, environment variables, and runtime updates.
+    Configuration manager providing backward-compatible interface.
+    
+    Delegates to the new Dynaconf-based ConfigurationManager while maintaining
+    the legacy API for existing code.
     """
+    
+    _instance: Optional['ConfigurationManager'] = None
+    _initialized: bool = False
+    
+    @classmethod
+    def reset_instance(cls) -> None:
+        """
+        Reset the singleton instance.
+        
+        This is primarily used for testing to ensure a clean state between tests.
+        """
+        cls._instance = None
+        cls._initialized = False
+        DynaconfConfigManager.reset_instance()
+    
+    def __new__(cls, config_file: Optional[str] = None):
+        """
+        Create or return existing singleton instance.
+        
+        Args:
+            config_file: Ignored - retained for backward compatibility
+            
+        Returns:
+            Singleton ConfigurationManager instance
+        """
+        if cls._instance is None:
+            cls._instance = super(ConfigurationManager, cls).__new__(cls)
+        return cls._instance
     
     def __init__(self, config_file: Optional[str] = None):
         """
-        Initialize configuration manager.
+        Initialize configuration manager (only runs once).
         
         Args:
-            config_file: Path to YAML configuration file
-        """
-        self._config: Dict[str, Any] = {}
-        self._config_file = config_file or "config.yaml"
-        self._env_prefix = "TRADING_BOT_"
-        
-        # Load default configuration
-        self._load_defaults()
-        
-        # Load configuration from file
-        self._load_from_file()
-        
-        # Override with environment variables
-        self._load_from_env()
-        
-        logger.info(f"Configuration loaded successfully, config_file={self._config_file}")
-    
-    def _load_defaults(self) -> None:
-        """Load default configuration values."""
-        self._config = {
-            "api": {
-                "alpaca": {
-                    "base_url": "https://paper-api.alpaca.markets",
-                    "api_key": "",
-                    "secret_key": "",
-                    "timeout": 30
-                },
-                "webhook": {
-                    "host": "0.0.0.0",
-                    "port": 8080,
-                    "secret": "",
-                    "security_enabled": False
-                }
-            },
-            "trading": {
-                "default_quantity": 100,
-                "max_position_size": 1000,
-                "max_daily_trades": 50,
-                "risk_per_trade": 0.02,
-                "max_portfolio_risk": 0.10
-            },
-            "strategies": {
-                "averaging_down": {
-                    "enabled": True,
-                    "max_attempts": 3,
-                    "step_percentage": 0.02,
-                    "timeframe": "1h"
-                },
-                "trailing_profit": {
-                    "enabled": True,
-                    "activation_threshold": 0.03,
-                    "trailing_percentage": 0.015,
-                    "take_profit_percentage": 0.05
-                }
-            },
-            "logging": {
-                "level": "INFO",
-                "format": "json",
-                "file": "trading_bot.log"
-            },
-            "database": {
-                "url": "sqlite:///trading_bot.db",
-                "echo": False
-            }
-        }
-    
-    def _load_from_file(self) -> None:
-        """Load configuration from YAML file."""
-        try:
-            config_path = Path(self._config_file)
-            if config_path.exists():
-                with open(config_path, 'r') as f:
-                    file_config = yaml.safe_load(f)
-                    if file_config:
-                        self._merge_config(file_config)
-                        logger.info(f"Configuration loaded from file, path={str(config_path)}")
-        except Exception as e:
-            logger.warning(f"Failed to load configuration file, error={str(e)}, file={self._config_file}")
-    
-    def _load_from_env(self) -> None:
-        """Load configuration from environment variables."""
-        env_mappings = {
-            f"{self._env_prefix}ALPACA_API_KEY": "api.alpaca.api_key",
-            f"{self._env_prefix}ALPACA_SECRET_KEY": "api.alpaca.secret_key",
-            f"{self._env_prefix}ALPACA_BASE_URL": "api.alpaca.base_url",
-            f"{self._env_prefix}WEBHOOK_SECRET": "api.webhook.secret",
-            f"{self._env_prefix}WEBHOOK_PORT": "api.webhook.port",
-            f"{self._env_prefix}DATABASE_URL": "database.url",
-            f"{self._env_prefix}LOG_LEVEL": "logging.level",
-        }
-        
-        for env_var, config_key in env_mappings.items():
-            value = os.getenv(env_var)
-            if value:
-                self._set_nested_value(config_key, value)
-                logger.debug(f"Configuration loaded from environment, env_var={env_var}, config_key={config_key}")
-    
-    def _merge_config(self, new_config: Dict[str, Any]) -> None:
-        """Merge new configuration into existing config."""
-        def merge_dicts(base: Dict[str, Any], update: Dict[str, Any]) -> None:
-            for key, value in update.items():
-                if (key in base and isinstance(base[key], dict) 
-                    and isinstance(value, dict)):
-                    merge_dicts(base[key], value)
-                else:
-                    base[key] = value
-        
-        merge_dicts(self._config, new_config)
-    
-    def _set_nested_value(self, key: str, value: Any) -> None:
-        """Set nested configuration value using dot notation."""
-        if not key or not key.strip():
-            raise ConfigurationException("Configuration key cannot be empty")
+            config_file: Ignored - configuration now loaded from config/ directory
             
-        keys = key.split('.')
-        current = self._config
+        .. deprecated::
+            Use src.config.settings.ConfigurationManager instead.
+        """
+        if self._initialized:
+            return
         
-        for k in keys[:-1]:
-            if not k.strip():
-                raise ConfigurationException("Configuration key parts cannot be empty")
-            if k not in current:
-                current[k] = {}
-            current = current[k]
+        # Emit deprecation warning on first initialization
+        warnings.warn(
+            "src.core.configuration.ConfigurationManager is deprecated. "
+            "Use src.config.settings.ConfigurationManager instead.",
+            DeprecationWarning,
+            stacklevel=3
+        )
         
-        final_key = keys[-1]
-        if not final_key.strip():
-            raise ConfigurationException("Configuration key parts cannot be empty")
-        
-        # Type conversion for common cases
-        if isinstance(value, str):
-            if value.lower() in ('true', 'false'):
-                value = value.lower() == 'true'
-            elif value.isdigit():
-                value = int(value)
-            elif value.replace('.', '', 1).isdigit():
-                value = float(value)
-        
-        current[final_key] = value
+        # Use the new Dynaconf-based manager
+        self._manager = DynaconfConfigManager()
+        self._initialized = True
     
     def get_config(self, key: str, default: Any = None) -> Any:
         """
-        Get configuration value by key with enhanced error handling and type safety.
+        Get configuration value by key.
+        
+        Supports dot notation for accessing nested configuration values.
         
         Args:
-            key: Configuration key (supports dot notation)
-            default: Default value if key not found
+            key: Configuration key (supports dot notation, e.g., "api.alpaca.api_key")
+            default: Default value to return if the key is not found.
             
         Returns:
-            Configuration value or default
-            
-        Raises:
-            ConfigurationException: If key format is invalid
+            The configuration value if found, otherwise the default value.
         """
         if not key or not isinstance(key, str):
             raise ConfigurationException("Configuration key must be a non-empty string")
         
-        try:
-            keys = key.split('.')
-            current = self._config
-            
-            for k in keys:
-                if not k.strip():
-                    raise ConfigurationException(f"Empty key component in '{key}'")
-                
-                if isinstance(current, dict) and k in current:
-                    current = current[k]
-                else:
-                    logger.debug(f"Configuration key not found: {key}, using default: {default}")
-                    return default
-            
-            return current
-            
-        except ConfigurationException:
-            raise
-        except Exception as e:
-            logger.error(f"Failed to get configuration, key={key}, error={str(e)}")
-            return default
+        return self._manager.get_config(key, default)
     
     def set_config(self, key: str, value: Any) -> None:
         """
-        Set configuration value.
+        Set configuration value at runtime.
+        
+        Note: Changes are not persisted to files.
         
         Args:
             key: Configuration key (supports dot notation)
             value: Value to set
         """
-        try:
-            self._set_nested_value(key, value)
-            logger.info(f"Configuration updated, key={key}, value={value}")
-        except Exception as e:
-            logger.error(f"Failed to set configuration, key={key}, error={str(e)}")
-            raise ConfigurationException(f"Failed to set config {key}: {str(e)}")
+        self._manager.set_config(key, value)
     
     def reload_config(self) -> None:
         """Reload configuration from all sources."""
-        logger.info("Reloading configuration")
-        self._load_defaults()
-        self._load_from_file()
-        self._load_from_env()
-        logger.info("Configuration reloaded successfully")
+        self._manager.reload_config()
     
     def get_all_config(self) -> Dict[str, Any]:
-        """Get all configuration as dictionary."""
-        return self._config.copy()
+        """
+        Get all configuration as dictionary.
+        
+        Returns:
+            Dictionary containing all configuration values
+        """
+        # Build a dict from common config paths
+        settings = self._manager._settings
+        
+        # Return the settings as a dict
+        if hasattr(settings, 'as_dict'):
+            return settings.as_dict()
+        
+        # Fallback: build from known top-level keys
+        result = {}
+        top_level_keys = ['api', 'ngrok', 'trading', 'strategies', 'logging', 
+                         'database', 'monitoring', 'symbols', 'performance',
+                         'data', 'development', 'extended_hours', 'risk',
+                         'resilience', 'confidence', 'technical_analysis']
+        
+        for key in top_level_keys:
+            value = self.get_config(key)
+            if value is not None:
+                result[key] = value
+        
+        return result
     
     def validate_required_config(self) -> None:
-        """Validate that all required configuration is present."""
-        required_keys = [
-            "api.alpaca.api_key",
-            "api.alpaca.secret_key"
-        ]
+        """
+        Validate that all required configuration is present.
         
-        # Only require webhook secret if security is enabled
-        security_enabled = self.get_config("api.webhook.security_enabled", False)
-        if security_enabled:
-            required_keys.append("api.webhook.secret")
+        Raises:
+            ConfigurationException: If validation fails
+        """
+        issues = validate_startup()
+        errors = [i for i in issues if i.severity == "ERROR"]
         
-        missing_keys = []
-        for key in required_keys:
-            if not self.get_config(key):
-                missing_keys.append(key)
-        
-        if missing_keys:
+        if errors:
+            error_messages = [str(e) for e in errors]
             raise ConfigurationException(
-                f"Missing required configuration: {', '.join(missing_keys)}"
+                f"Configuration validation failed: {'; '.join(error_messages)}"
             )
+    
+    # Additional methods for typed access (delegate to new manager)
+    
+    def get_alpaca_config(self):
+        """Get validated Alpaca broker configuration."""
+        return self._manager.get_alpaca_config()
+    
+    def get_tastytrade_config(self):
+        """Get validated Tastytrade broker configuration."""
+        return self._manager.get_tastytrade_config()
+    
+    def get_webhook_config(self):
+        """Get validated webhook configuration."""
+        return self._manager.get_webhook_config()
+    
+    def get_broker_for_symbol(self, symbol: str) -> str:
+        """Get the broker to use for a specific symbol."""
+        return self._manager.get_broker_for_symbol(symbol)
+    
+    def get_configured_brokers(self):
+        """Get list of properly configured brokers."""
+        return self._manager.get_configured_brokers()
+    
+    def load_profile(self, profile_name: str) -> None:
+        """Load a risk profile to override current settings."""
+        self._manager.load_profile(profile_name)
+    
+    @property
+    def current_profile(self) -> Optional[str]:
+        """Get currently loaded risk profile name."""
+        return self._manager.current_profile
+    
+    @property
+    def current_environment(self) -> str:
+        """Get current environment (demo/live)."""
+        return self._manager.current_environment
+

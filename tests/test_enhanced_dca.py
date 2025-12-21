@@ -9,6 +9,7 @@ from unittest.mock import Mock, AsyncMock
 from datetime import datetime
 
 # Test the enhanced DCA functionality
+@pytest.mark.asyncio
 async def test_enhanced_dca_with_support_breach():
     """Test DCA triggering when price breaches support level"""
     
@@ -97,6 +98,7 @@ async def test_enhanced_dca_with_support_breach():
     print("   • Respects market structure and chart patterns")
     print("   • No premature DCA triggers")
 
+@pytest.mark.asyncio
 async def test_comparison_old_vs_new():
     """Compare old loss threshold vs new technical approach"""
     

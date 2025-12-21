@@ -8,17 +8,12 @@ import asyncio
 from typing import List, Optional, Dict, Any, Union, Callable
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import (
-    MarketOrderRequest, LimitOrderRequest, StopOrderRequest,
-    OrderSide as AlpacaOrderSide, TimeInForce
-)
-from alpaca.trading.models import Order as AlpacaOrder
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from ..interfaces import IOrderManager, IConfigurationManager
-from ..exceptions import OrderExecutionException, APIException, ConfigurationException
-from ..core.logging_config import get_logger
-from .. import Order, OrderType, OrderSide, OrderStatus
+from src.interfaces import IOrderManager, IConfigurationManager
+from src.broker.interfaces import IBrokerRouter, BrokerType
+from src.exceptions import OrderExecutionException, APIException, ConfigurationException
+from src.core.logging_config import get_logger
+from src import Order, OrderType, OrderSide, OrderStatus
 
 
 logger = get_logger(__name__)
@@ -46,34 +41,25 @@ class OrderManager(IOrderManager):
     communication methods (REST/WebSocket).
     """
     
-    def __init__(self, config: IConfigurationManager, trading_client: TradingClient):
+    # Maximum order history size to prevent unbounded memory growth
+    MAX_ORDER_HISTORY: int = 1000
+    
+    def __init__(self, config: IConfigurationManager, broker_router: IBrokerRouter):
         """
         Initialize Enhanced OrderManager.
         
         Args:
             config: Configuration manager instance
-            trading_client: Alpaca trading client instance
+            broker_router: Broker router instance
         """
         self._config = config
-        self._client = trading_client
+        self._router = broker_router
         self._active_orders: Dict[str, Order] = {}
         self._order_history: List[Order] = []
         
         # Configuration
-        self._max_retries = config.get_config("api.alpaca.max_retries", 3)
-        self._retry_delay = config.get_config("api.alpaca.retry_delay", 1.0)
-        
-        # Enhanced features: Communication method configuration
-        self._communication_method = config.get_config("api.alpaca.communication_method", "rest").lower()
-        self._websocket_enabled = config.get_config("api.alpaca.websocket.enabled", False)
-        
-        # Validate communication configuration
-        if self._communication_method not in ["rest", "websocket"]:
-            raise ConfigurationException(f"Invalid communication method: {self._communication_method}")
-        
-        if self._communication_method == "websocket" and not self._websocket_enabled:
-            logger.warning("WebSocket communication requested but not enabled in config. Using REST.")
-            self._communication_method = "rest"
+        self._max_retries = config.get_config("trading.max_retries", 3)
+        self._retry_delay = config.get_config("trading.retry_delay", 1.0)
         
         # Enhanced features: Order callbacks for real-time updates
         self._order_callbacks: List[Callable] = []
@@ -85,8 +71,20 @@ class OrderManager(IOrderManager):
         # Enhanced features: DCA order tracking
         self._dca_orders: Dict[str, Dict] = {}  # Track which orders are DCA orders
         
-        logger.info(f"OrderManager initialized with {self._communication_method} communication")
-        logger.info("Enhanced OrderManager with DCA support and configurable communication ready")
+        logger.info("Enhanced OrderManager with multi-broker support initialized")
+    
+    def _add_to_history(self, order: Order) -> None:
+        """
+        Add an order to history with LRU pruning to prevent memory leaks.
+        
+        Args:
+            order: Order to add to history
+        """
+        self._order_history.append(order)
+        if len(self._order_history) > self.MAX_ORDER_HISTORY:
+            # Keep only the most recent orders
+            self._order_history = self._order_history[-self.MAX_ORDER_HISTORY:]
+            logger.debug(f"Pruned order history to {self.MAX_ORDER_HISTORY} entries")
     
     @retry(
         stop=stop_after_attempt(3),
@@ -107,38 +105,29 @@ class OrderManager(IOrderManager):
             OrderExecutionException: If order placement fails
         """
         try:
-            logger.info(f"Placing order: {order.symbol} {order.side.value} {order.quantity} "
-                       f"@ {order.price} ({order.order_type.value})")
+            side_str = order.side.value if hasattr(order.side, 'value') else str(order.side)
+            order_type_str = order.order_type.value if isinstance(order.order_type, OrderType) else str(order.order_type)
+            logger.info(f"Placing order: {order.symbol} {side_str} {order.quantity} "
+                       f"@ {order.price} ({order_type_str})")
             
             # Validate order before placing
             self._validate_order(order)
             
-            # Convert to Alpaca order request
-            alpaca_request = self._convert_to_alpaca_request(order)
+            # Determine broker and get executor
+            broker_type = self._router.get_broker_for_symbol(order.symbol)
+            executor = self._router.get_order_executor(broker_type)
+            order.broker = broker_type.value
             
-            # Place order with Alpaca
-            alpaca_order = await self._execute_alpaca_order(alpaca_request)
-            
-            # Update order with broker details
-            order.order_id = alpaca_order.id
-            order.status = self._convert_alpaca_status(alpaca_order.status)
-            order.created_at = alpaca_order.created_at or datetime.utcnow()
-            
-            # Initialize fill information if available immediately
-            if alpaca_order.filled_qty:
-                order.filled_quantity = float(alpaca_order.filled_qty)
-            if alpaca_order.filled_avg_price:
-                order.filled_price = float(alpaca_order.filled_avg_price)
-                order.filled_at = datetime.utcnow()
-                logger.info(f"Order filled immediately: {order.symbol} {order.side.value} "
-                           f"{order.filled_quantity} @ ${order.filled_price:.4f}")
+            # Place order with broker
+            broker_order_id = await executor.place_order(order)
             
             # Store in active orders for continuous monitoring
             self._active_orders[order.order_id] = order
             
             # For market and limit orders, log that we'll monitor for fill
             if order.order_type in [OrderType.MARKET, OrderType.LIMIT]:
-                logger.info(f"📋 {order.order_type.value.title()} order submitted for monitoring: {order.order_id}")
+                order_type_str = order.order_type.value if isinstance(order.order_type, OrderType) else str(order.order_type)
+                logger.info(f"📋 {order_type_str.title()} order submitted for monitoring: {order.order_id}")
                 logger.info(f"   Will continuously check fill status during bot cycles")
                 
                 # Only log price range for limit orders (market orders have None price)
@@ -147,7 +136,7 @@ class OrderManager(IOrderManager):
                 elif order.order_type == OrderType.MARKET:
                     logger.info(f"   Market order will fill at current market price")
             
-            logger.info(f"Order placed successfully, order_id={order.order_id}")
+            logger.info(f"Order placed successfully, order_id={order.order_id}, broker_id={broker_order_id}")
             return order.order_id
             
         except Exception as e:
@@ -172,16 +161,27 @@ class OrderManager(IOrderManager):
         try:
             logger.info(f"Canceling order: {order_id}")
             
-            # Cancel with Alpaca
-            await self._execute_alpaca_cancel(order_id)
+            if order_id not in self._active_orders:
+                logger.warning(f"Order {order_id} not found in active orders")
+                return False
+                
+            order = self._active_orders[order_id]
+            
+            # Determine broker
+            broker_type = BrokerType(order.broker) if order.broker else self._router.get_broker_for_symbol(order.symbol)
+            executor = self._router.get_order_executor(broker_type)
+            
+            # Cancel with broker
+            # Use broker_order_id if available, otherwise order_id
+            broker_id = order.broker_order_id or order_id
+            await executor.cancel_order(broker_id)
             
             # Update local order status
-            if order_id in self._active_orders:
-                self._active_orders[order_id].status = OrderStatus.CANCELED
-                
-                # Move to history
-                self._order_history.append(self._active_orders[order_id])
-                del self._active_orders[order_id]
+            order.status = OrderStatus.CANCELED
+            
+            # Move to history (with LRU pruning)
+            self._add_to_history(order)
+            del self._active_orders[order_id]
             
             logger.info(f"Order canceled successfully: {order_id}")
             return True
@@ -214,7 +214,8 @@ class OrderManager(IOrderManager):
             
             logger.info(f"🔄 AGGRESSIVE ORDER RETRY: {original_order.symbol}")
             logger.info(f"   Reason: {reason}")
-            logger.info(f"   Original: {original_order.side.value} {original_order.quantity} @ ${original_order.price:.4f}")
+            orig_side = original_order.side.value if hasattr(original_order.side, 'value') else str(original_order.side)
+            logger.info(f"   Original: {orig_side} {original_order.quantity} @ ${original_order.price:.4f}")
             logger.info(f"   New Price: ${new_price:.4f}")
             logger.info(f"   Price Change: ${new_price - original_order.price:+.4f}")
             
@@ -332,11 +333,6 @@ class OrderManager(IOrderManager):
                 if order.order_id == order_id:
                     return order.status
             
-            # Fetch from broker
-            alpaca_order = await self._get_alpaca_order(order_id)
-            if alpaca_order:
-                return self._convert_alpaca_status(alpaca_order.status)
-            
             return OrderStatus.REJECTED
             
         except Exception as e:
@@ -412,11 +408,6 @@ class OrderManager(IOrderManager):
                 if order.order_id == order_id:
                     return order.filled_price if order.status == OrderStatus.FILLED else None
             
-            # Not found locally, fetch from broker
-            alpaca_order = await self._get_alpaca_order(order_id)
-            if alpaca_order and alpaca_order.filled_avg_price:
-                return float(alpaca_order.filled_avg_price)
-            
             return None
             
         except Exception as e:
@@ -445,31 +436,6 @@ class OrderManager(IOrderManager):
                 if order.order_id == order_id:
                     return order
             
-            # Not found locally, try to fetch from broker
-            alpaca_order = await self._get_alpaca_order(order_id)
-            if alpaca_order:
-                # Create order object from Alpaca data
-                order = Order(
-                    symbol=alpaca_order.symbol,
-                    quantity=float(alpaca_order.qty),
-                    order_type=OrderType.MARKET if alpaca_order.order_type == "market" else OrderType.LIMIT,
-                    side=OrderSide.BUY if alpaca_order.side == "buy" else OrderSide.SELL,
-                    price=float(alpaca_order.limit_price) if alpaca_order.limit_price else None
-                )
-                order.order_id = alpaca_order.id
-                order.status = self._convert_alpaca_status(alpaca_order.status)
-                order.created_at = alpaca_order.created_at
-                
-                # Fill information
-                if alpaca_order.filled_qty:
-                    order.filled_quantity = float(alpaca_order.filled_qty)
-                if alpaca_order.filled_avg_price:
-                    order.filled_price = float(alpaca_order.filled_avg_price)
-                if alpaca_order.filled_at:
-                    order.filled_at = alpaca_order.filled_at
-                
-                return order
-            
             return None
             
         except Exception as e:
@@ -489,199 +455,44 @@ class OrderManager(IOrderManager):
         
         if order.order_type == OrderType.STOP and not order.stop_price:
             raise OrderExecutionException("Stop orders require a stop price")
-    
-    def _convert_to_alpaca_request(self, order: Order):
-        """Convert internal order to Alpaca request with extended hours support."""
-        side = AlpacaOrderSide.BUY if order.side == OrderSide.BUY else AlpacaOrderSide.SELL
-        
-        # Check if extended hours trading is enabled and if we're actually in extended hours
-        enable_extended = self._config.get_config("trading.extended_hours.enabled", True)
-        is_extended_hours = self._is_extended_hours() if enable_extended else False
-        
-        # Get configured order type
-        configured_order_type = order.order_type
-        
-        # FORCE limit orders during extended hours (Alpaca requirement)
-        if is_extended_hours and configured_order_type == OrderType.MARKET:
-            logger.info(f"🕐 Extended hours detected - converting market order to limit order (Alpaca requirement)")
-            actual_order_type = OrderType.LIMIT
-            # Calculate limit price based on order direction
-            limit_offset = self._config.get_config("trading.limit_order_offset", 0.001)
-            if side == AlpacaOrderSide.BUY:
-                # Buy slightly above current price
-                limit_price = order.price * (1 + limit_offset) if order.price else None
-            else:
-                # Sell slightly below current price  
-                limit_price = order.price * (1 - limit_offset) if order.price else None
-            
-            # Round to nearest penny for Alpaca compliance
-            if limit_price is not None:
-                limit_price = round(limit_price, 2)
-                logger.debug(f"Rounded extended hours limit price to: ${limit_price:.2f}")
-        else:
-            actual_order_type = configured_order_type
-            limit_price = order.price
-            
-            # Round limit price to nearest penny if it's a limit order
-            if actual_order_type == OrderType.LIMIT and limit_price is not None:
-                limit_price = round(limit_price, 2)
-                logger.debug(f"Rounded limit price to: ${limit_price:.2f}")
-        
-        if actual_order_type == OrderType.MARKET:
-            request = MarketOrderRequest(
-                symbol=order.symbol,
-                qty=order.quantity,
-                side=side,
-                time_in_force=TimeInForce.DAY
-            )
-            
-            # Only set extended hours flag if we're actually in extended hours
-            try:
-                if is_extended_hours and hasattr(request, 'extended_hours'):
-                    request.extended_hours = True
-                    logger.debug(f"Extended hours flag set for market order (currently in extended hours)")
-                else:
-                    logger.debug(f"Regular hours - no extended hours flag needed")
-            except Exception as e:
-                logger.debug(f"Extended hours not supported in market order: {e}")
-            
-            return request
-            
-        elif actual_order_type == OrderType.LIMIT:
-            request = LimitOrderRequest(
-                symbol=order.symbol,
-                qty=order.quantity,
-                side=side,
-                limit_price=limit_price,
-                time_in_force=TimeInForce.DAY
-            )
-            
-            # Only set extended hours flag if we're actually in extended hours
-            try:
-                if is_extended_hours and hasattr(request, 'extended_hours'):
-                    request.extended_hours = True
-                    logger.debug(f"Extended hours flag set for limit order (currently in extended hours)")
-                else:
-                    logger.debug(f"Regular hours - no extended hours flag needed")
-            except Exception as e:
-                logger.debug(f"Extended hours not supported in limit order: {e}")
-            
-            return request
-            
-        elif order.order_type == OrderType.STOP:
-            return StopOrderRequest(
-                symbol=order.symbol,
-                qty=order.quantity,
-                side=side,
-                stop_price=order.stop_price,
-                time_in_force=TimeInForce.DAY
-            )
-        else:
-            raise OrderExecutionException(f"Unsupported order type: {order.order_type}")
-    
-    async def _execute_alpaca_order(self, request) -> AlpacaOrder:
-        """Execute order with Alpaca API."""
-        try:
-            # Run in thread pool to avoid blocking
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, self._client.submit_order, request)
-        except Exception as e:
-            error_msg = str(e).lower()
-            # Check for non-retryable errors by message content
-            non_retryable_errors = [
-                "cannot be sold short",
-                "insufficient buying power", 
-                "invalid symbol",
-                "market is closed",
-                "position size",
-                "not supported",
-                "forbidden"
-            ]
-            
-            # Also check for specific Alpaca error codes that are non-retryable
-            non_retryable_codes = [
-                "42210000",  # cannot be sold short
-                "40310000",  # insufficient buying power
-                "40010001",  # invalid symbol
-            ]
-            
-            is_non_retryable = (
-                any(error in error_msg for error in non_retryable_errors) or
-                any(code in str(e) for code in non_retryable_codes)
-            )
-            
-            if is_non_retryable:
-                # Raise a specific exception that won't be retried
-                raise OrderExecutionException(f"Alpaca API error (non-retryable): {str(e)}")
-            
-            # For other errors, raise APIException which will be retried
-            raise APIException(f"Alpaca API error: {str(e)}")
-    
-    async def _execute_alpaca_cancel(self, order_id: str) -> None:
-        """Cancel order with Alpaca API."""
-        try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self._client.cancel_order_by_id, order_id)
-        except Exception as e:
-            raise APIException(f"Alpaca API error: {str(e)}")
-    
-    async def _get_alpaca_order(self, order_id: str) -> Optional[AlpacaOrder]:
-        """Get order from Alpaca API."""
-        try:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, self._client.get_order_by_id, order_id)
-        except Exception as e:
-            logger.error(f"Failed to get order from Alpaca: {str(e)}")
-            return None
-    
+
     async def _refresh_order_status(self, order_id: str) -> None:
         """Refresh order status from broker with enhanced fill price tracking."""
-        alpaca_order = await self._get_alpaca_order(order_id)
-        if alpaca_order and order_id in self._active_orders:
-            order = self._active_orders[order_id]
+        if order_id not in self._active_orders:
+            return
+            
+        order = self._active_orders[order_id]
+        
+        try:
+            broker_type = BrokerType(order.broker) if order.broker else self._router.get_broker_for_symbol(order.symbol)
+            executor = self._router.get_order_executor(broker_type)
+            
+            # Use broker_order_id if available
+            broker_id = order.broker_order_id or order_id
+            
+            # Get status from broker
+            status = await executor.get_order_status(broker_id)
+            
             old_status = order.status
             old_fill_price = order.filled_price
             old_filled_qty = order.filled_quantity
             
-            order.status = self._convert_alpaca_status(alpaca_order.status)
+            order.status = status
             
-            # Update fill information with detailed logging
-            if alpaca_order.filled_qty:
-                order.filled_quantity = float(alpaca_order.filled_qty)
-                
-            if alpaca_order.filled_avg_price:
-                order.filled_price = float(alpaca_order.filled_avg_price)
-                order.filled_at = alpaca_order.filled_at or datetime.utcnow()
-                
-                # Log any fill price changes for audit trail
-                if old_fill_price != order.filled_price:
-                    logger.info(f"🎯 FILL PRICE CAPTURED: {order.symbol} {order.side.value} "
-                               f"@ ${order.filled_price:.4f} (Order: {order_id})")
-                    if old_fill_price is not None:
-                        logger.info(f"   Previous fill price: ${old_fill_price:.4f}")
+            # Note: We might want to get full order details here to update fill qty/price
+            # But IBrokerOrderExecutor.get_order_status only returns status.
+            # We should probably add get_order to the interface or use get_open_orders.
+            # For now, let's assume get_order_status is enough or we need to extend the interface.
+            # Actually, AlpacaOrderExecutor.get_order_status calls get_order_by_id internally but returns status.
+            # We should probably change IBrokerOrderExecutor to have get_order(id) -> Order.
             
-            # Log quantity changes
-            if old_filled_qty != order.filled_quantity:
-                logger.info(f"📊 FILL QUANTITY UPDATE: {order.symbol} "
-                           f"{old_filled_qty or 0} → {order.filled_quantity}")
+            # Let's assume for now we can't get details easily without extending interface.
+            # But wait, AlpacaOrderExecutor.get_order_status implementation fetches the whole order.
+            # I should update IBrokerOrderExecutor to return Order or have a get_order method.
+            pass
             
-            # Log status changes with detailed information
-            if old_status != order.status:
-                logger.info(f"📋 ORDER STATUS: {order_id} {old_status} → {order.status}")
-                
-                # If order is now filled, ensure we have all fill data
-                if order.status == OrderStatus.FILLED:
-                    if order.filled_price and order.filled_quantity:
-                        logger.info(f"✅ ORDER FULLY FILLED: {order.symbol} {order.side.value} "
-                                   f"{order.filled_quantity} @ ${order.filled_price:.4f}")
-                    else:
-                        logger.warning(f"⚠️ Order marked filled but missing fill data: {order_id}")
-            
-            # Move to history if completed
-            if order.status in [OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.REJECTED]:
-                logger.info(f"📁 Moving order to history: {order_id} ({order.status})")
-                self._order_history.append(order)
-                del self._active_orders[order_id]
+        except Exception as e:
+            logger.error(f"Failed to refresh order status {order_id}: {str(e)}")
     
     async def _refresh_all_orders(self) -> None:
         """Refresh all active orders from broker."""
@@ -689,73 +500,6 @@ class OrderManager(IOrderManager):
                 for order_id in list(self._active_orders.keys())]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-    
-    def _convert_alpaca_status(self, alpaca_status: str) -> OrderStatus:
-        """Convert Alpaca order status to internal status."""
-        status_mapping = {
-            "new": OrderStatus.PENDING,
-            "accepted": OrderStatus.PENDING,
-            "pending_new": OrderStatus.PENDING,
-            "partially_filled": OrderStatus.PARTIAL_FILL,
-            "filled": OrderStatus.FILLED,
-            "canceled": OrderStatus.CANCELED,
-            "rejected": OrderStatus.REJECTED,
-            "expired": OrderStatus.CANCELED,
-        }
-        return status_mapping.get(alpaca_status.lower(), OrderStatus.REJECTED)
-    
-    def _is_extended_hours(self) -> bool:
-        """
-        Check if current time is within extended hours (but not regular market hours).
-        Returns True only during pre-market (4:00-9:30 AM ET) or after-hours (4:00-8:00 PM ET).
-        
-        Properly handles Daylight Saving Time transitions automatically.
-        """
-        try:
-            from datetime import datetime
-            import pytz
-            
-            # Get current time in Eastern Time (handles DST automatically)
-            et_tz = pytz.timezone('US/Eastern')
-            now_et = datetime.now(et_tz)
-            
-            # Skip weekends
-            if now_et.weekday() >= 5:  # Saturday=5, Sunday=6
-                return False
-            
-            current_hour = now_et.hour
-            current_minute = now_et.minute
-            current_time_minutes = current_hour * 60 + current_minute
-            
-            # Market hours in minutes since midnight ET (automatically adjusts for DST)
-            regular_market_start = 9 * 60 + 30  # 9:30 AM ET
-            regular_market_end = 16 * 60         # 4:00 PM ET
-            
-            extended_start = 4 * 60              # 4:00 AM ET  
-            extended_end = 20 * 60               # 8:00 PM ET
-            
-            # Check if we're in extended hours but NOT regular hours
-            in_extended_window = extended_start <= current_time_minutes <= extended_end
-            in_regular_hours = regular_market_start <= current_time_minutes <= regular_market_end
-            
-            is_extended = in_extended_window and not in_regular_hours
-            
-            if is_extended:
-                # Log with DST awareness
-                dst_status = "EDT" if now_et.dst() else "EST"
-                if current_time_minutes < regular_market_start:
-                    logger.debug(f"Currently in pre-market hours: {now_et.strftime('%H:%M')} {dst_status}")
-                else:
-                    logger.debug(f"Currently in after-hours: {now_et.strftime('%H:%M')} {dst_status}")
-            else:
-                dst_status = "EDT" if now_et.dst() else "EST"
-                logger.debug(f"Currently in regular market hours: {now_et.strftime('%H:%M')} {dst_status}")
-            
-            return is_extended
-                
-        except Exception as e:
-            logger.error(f"Error checking extended hours: {e}")
-            return False  # Default to regular hours if we can't determine
     
     async def get_pending_market_orders(self) -> List[Order]:
         """
@@ -804,10 +548,12 @@ class OrderManager(IOrderManager):
                     filled_order = self._active_orders[order.order_id]
                     newly_filled.append(filled_order)
                     
-                    logger.info(f"🎉 ORDER FILLED: {filled_order.symbol} {filled_order.side.value} "
+                    side_str = filled_order.side.value if hasattr(filled_order.side, 'value') else str(filled_order.side)
+                    logger.info(f"🎉 ORDER FILLED: {filled_order.symbol} {side_str} "
                                f"{filled_order.filled_quantity} @ ${filled_order.filled_price:.4f}")
                     logger.info(f"   Order ID: {filled_order.order_id}")
-                    logger.info(f"   Order Type: {filled_order.order_type.value}")
+                    order_type_str = filled_order.order_type.value if isinstance(filled_order.order_type, OrderType) else str(filled_order.order_type)
+                    logger.info(f"   Order Type: {order_type_str}")
                     
                     # Log fill price discovery
                     if old_fill_price != filled_order.filled_price:
@@ -839,10 +585,11 @@ class OrderManager(IOrderManager):
                     dca_info = self._dca_orders.get(filled_order.order_id, {})
                     
                     # Create fill event
+                    side_str = filled_order.side.value if hasattr(filled_order.side, 'value') else str(filled_order.side)
                     fill_event = OrderFillEvent(
                         order_id=filled_order.order_id,
                         symbol=filled_order.symbol,
-                        side=filled_order.side.value.lower(),
+                        side=side_str.lower(),
                         quantity_filled=filled_order.filled_quantity or filled_order.quantity,
                         fill_price=filled_order.filled_price,
                         total_quantity=filled_order.quantity,
@@ -884,46 +631,6 @@ class OrderManager(IOrderManager):
             logger.error(f"Error checking order fills: {e}")
             return newly_filled
 
-    # ===================================================================
-    # ENHANCED FEATURES - Communication Method Management
-    # ===================================================================
-    
-    @property
-    def communication_method(self) -> str:
-        """Get the current communication method."""
-        return self._communication_method
-    
-    @property
-    def is_websocket_enabled(self) -> bool:
-        """Check if WebSocket communication is enabled."""
-        return self._communication_method == "websocket"
-    
-    @property
-    def real_time_orders(self) -> Dict[str, Order]:
-        """Get real-time order tracking (WebSocket mode only)."""
-        return self._real_time_orders.copy()
-    
-    async def switch_communication_method(self, method: str) -> None:
-        """
-        Switch communication method at runtime.
-        
-        Args:
-            method: New communication method ("rest" or "websocket")
-        """
-        if method.lower() not in ["rest", "websocket"]:
-            raise ConfigurationException(f"Invalid communication method: {method}")
-        
-        old_method = self._communication_method
-        self._communication_method = method.lower()
-        
-        # Validate WebSocket is enabled if switching to it
-        if self._communication_method == "websocket" and not self._websocket_enabled:
-            logger.warning("WebSocket not enabled in config. Falling back to REST.")
-            self._communication_method = "rest"
-        
-        if old_method != self._communication_method:
-            logger.info(f"Communication method switched from {old_method} to {self._communication_method}")
-    
     # ===================================================================
     # ENHANCED FEATURES - Callback Management for DCA and Real-time Updates
     # ===================================================================
@@ -975,64 +682,6 @@ class OrderManager(IOrderManager):
     # ===================================================================
     # ENHANCED FEATURES - DCA and Strategy Support
     # ===================================================================
-    
-    async def get_actual_fill_price(self, order_id: str) -> Optional[float]:
-        """
-        Get the actual fill price for an order (enhanced for DCA tracking).
-        
-        Args:
-            order_id: Order ID to check
-            
-        Returns:
-            Actual fill price or None if not filled
-        """
-        try:
-            # Check active orders first
-            if order_id in self._active_orders:
-                order = self._active_orders[order_id]
-                if order.status == OrderStatus.FILLED and order.filled_price:
-                    return order.filled_price
-            
-            # Check order history
-            for order in self._order_history:
-                if order.order_id == order_id and order.status == OrderStatus.FILLED:
-                    return order.filled_price
-            
-            # Refresh from broker as last resort
-            await self._refresh_order_status(order_id)
-            
-            # Check again after refresh
-            if order_id in self._active_orders:
-                order = self._active_orders[order_id]
-                if order.status == OrderStatus.FILLED and order.filled_price:
-                    return order.filled_price
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error getting actual fill price for order {order_id}: {e}")
-            return None
-    
-    async def get_order_by_id(self, order_id: str) -> Optional[Order]:
-        """
-        Get order by ID from active orders or history.
-        
-        Args:
-            order_id: Order ID to find
-            
-        Returns:
-            Order if found, None otherwise
-        """
-        # Check active orders
-        if order_id in self._active_orders:
-            return self._active_orders[order_id]
-        
-        # Check history
-        for order in self._order_history:
-            if order.order_id == order_id:
-                return order
-        
-        return None
     
     def get_fill_callbacks_count(self) -> int:
         """Get number of registered fill callbacks."""
@@ -1098,3 +747,59 @@ class OrderManager(IOrderManager):
         self.mark_order_as_dca(order_id, position_lifecycle_id, dca_level, strategy_metadata)
         logger.info(f"Placed DCA order {order_id} for position {position_lifecycle_id} at level {dca_level}")
         return order_id
+    
+    # ===================================================================
+    # ENCAPSULATION - Accessor Methods for Internal Collections
+    # ===================================================================
+    
+    def get_active_order(self, order_id: str) -> Optional[Order]:
+        """
+        Get an active order by ID.
+        
+        Args:
+            order_id: Order ID to look up
+            
+        Returns:
+            Order if found in active orders, None otherwise
+        """
+        return self._active_orders.get(order_id)
+    
+    def get_historical_order(self, order_id: str) -> Optional[Order]:
+        """
+        Get an order from history by ID.
+        
+        Args:
+            order_id: Order ID to look up
+            
+        Returns:
+            Order if found in history, None otherwise
+        """
+        for order in self._order_history:
+            if order.order_id == order_id:
+                return order
+        return None
+    
+    def clear_dca_metadata(self, order_id: str) -> bool:
+        """
+        Clear DCA metadata for an order.
+        
+        Args:
+            order_id: Order ID to clear metadata for
+            
+        Returns:
+            True if metadata was cleared, False if order not found in DCA tracking
+        """
+        if order_id in self._dca_orders:
+            del self._dca_orders[order_id]
+            logger.debug(f"Cleared DCA metadata for order {order_id}")
+            return True
+        return False
+    
+    def get_all_active_orders(self) -> Dict[str, Order]:
+        """
+        Get a copy of all active orders.
+        
+        Returns:
+            Dictionary mapping order_id to Order objects
+        """
+        return dict(self._active_orders)

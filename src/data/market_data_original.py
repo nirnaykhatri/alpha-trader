@@ -9,9 +9,9 @@ from datetime import datetime, timedelta
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
-from ..interfaces import IMarketDataProvider, IConfigurationManager
-from ..exceptions import MarketDataException
-from ..core.logging_config import get_logger
+from src.interfaces import IMarketDataProvider, IConfigurationManager
+from src.exceptions import MarketDataException
+from src.core.logging_config import get_logger
 
 
 logger = get_logger(__name__)

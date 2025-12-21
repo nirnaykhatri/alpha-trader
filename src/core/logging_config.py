@@ -20,6 +20,9 @@ def configure_windows_console():
             # Try to set environment variable for UTF-8
             os.environ["PYTHONIOENCODING"] = "utf-8"
         except Exception:
+            # Intentionally suppressed: Windows console configuration may fail in
+            # non-interactive environments (CI, services) or when console is not available.
+            # Logging is not yet initialized at this point, so we cannot log the error.
             pass
 
 

@@ -11,7 +11,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from core.config import Config
+from src.core.configuration import ConfigurationManager
 from data.market_data import AlpacaMarketDataProvider
 import structlog
 
@@ -30,7 +30,7 @@ async def test_rgti_extended_hours():
         print("=" * 60)
         
         # Load configuration
-        config = Config('config.yaml')
+        config = ConfigurationManager()  # Uses config/ TOML files
         
         # Create market data provider
         provider = AlpacaMarketDataProvider(config)

@@ -1,0 +1,371 @@
+# =============================================================================
+# Trading Bot Configuration - BASE DEFAULTS
+# =============================================================================
+# This file contains ALL default settings. Values can be overridden by:
+#   1. .secrets.toml - Credentials and sensitive data
+#   2. environments/demo.toml or environments/live.toml - Environment overrides
+#   3. profiles/*.toml - Risk profiles
+#   4. Environment variables (TRADING_BOT_*)
+#
+# Override order: settings.toml < .secrets.toml < environments/*.toml < profiles/*.toml
+# =============================================================================
+
+[default]
+
+[default.api]
+timeout = 30
+max_retries = 3
+retry_delay = 1.0
+
+# Alpaca API settings (credentials in .secrets.toml)
+[default.api.alpaca]
+base_url = "https://paper-api.alpaca.markets"
+communication_method = "rest"
+
+[default.api.alpaca.websocket]
+enabled = false
+market_data_feed = "iex"
+auto_reconnect = true
+heartbeat_interval = 30
+max_reconnect_attempts = 10
+reconnect_delay = 5
+
+# Tastytrade API settings (OAuth credentials in .secrets.toml)
+# The tastytrade SDK v11.x uses OAuth authentication:
+#   - client_secret: From your OAuth application setup
+#   - refresh_token: Generated via OAuth grant (never expires)
+# See https://tastyworks-api.readthedocs.io/en/latest/sessions.html for setup
+[default.api.tastytrade]
+is_sandbox = true
+
+# Webhook server settings (secret in .secrets.toml)
+[default.api.webhook]
+host = "0.0.0.0"
+port = 8080
+security_enabled = false
+
+[default.ngrok]
+enabled = false
+
+[default.trading]
+aggressive_order_timeout_minutes = 5
+max_price_adjustment_percent = 0.5
+order_type = "limit"
+limit_order_offset = 0.001
+market_order_slippage = 0.002
+order_timeout_minutes = 5
+max_position_size = 1000
+max_daily_trades = 50
+max_portfolio_risk = 0.10
+default_quantity = 100
+risk_per_trade = 0.02
+
+[default.trading.order_monitoring]
+check_interval = 10
+max_pending_time = 600
+log_pending_orders = true
+
+[default.trading.position_sizing]
+method = "percentage"
+initial_portfolio_percentage = 0.01
+risk_per_trade = 0.02
+min_quantity = 1
+max_quantity = 10000
+max_total_position_percentage = 0.15
+max_single_position_percent = 0.50
+max_account_risk_percent = 0.25
+daily_loss_limit_percent = 0.10
+weekly_loss_limit_percent = 0.20
+
+[default.trading.position_sizing.averaging]
+enabled = true
+multiplier = 1.5
+max_multiplier = 4.0
+max_attempts = 3
+
+[default.trading.allowed_directions]
+enabled = true
+long_only = false
+short_only = false
+
+[default.trading.position_management]
+ignore_opposing_signals = true
+
+[default.trading.risk_management]
+
+[default.trading.risk_management.stop_loss]
+enabled = false
+max_loss_percentage = 0.05
+
+[default.trading.risk_management.profit_taking]
+take_profit_percentage = 0.05
+
+[default.trading.risk_management.profit_taking.trailing_profit]
+enabled = true
+activation_threshold = 0.03
+trailing_percentage = 0.015
+min_profit_lock = 0.01
+acceleration_factor = 1.5
+
+[default.trading.risk_management.profit_taking.time_based_exit]
+enabled = false
+max_hold_hours = 24
+
+[default.trading.risk_management.advanced]
+max_positions = 10
+max_symbol_allocation = 0.20
+daily_loss_limit = 0.03
+portfolio_drawdown_limit = 0.15
+
+[default.trading.account]
+use_api_for_balance = true
+fail_safe_on_api_error = true
+
+[default.strategies]
+
+# Legacy key for backward compatibility
+[default.strategies.averaging_down]
+enabled = true
+max_attempts = 3
+
+[default.strategies.dca]
+base_threshold_percent = 1.5
+progressive_multiplier = 1.8
+max_threshold_percent = 6.0
+max_pending_orders_per_position = 1
+
+[default.strategies.long_strategy]
+enabled = true
+entry_limit_offset = 0.001
+profit_target = 0.03
+
+[default.strategies.long_strategy.trailing_profit]
+enabled = true
+trailing_percentage = 0.015
+activation_threshold = 0.03
+min_profit_lock = 0.01
+acceleration_factor = 1.5
+
+[default.strategies.long_strategy.averaging]
+enabled = true
+max_attempts = 3
+position_multiplier = 1.5
+sizing_method = "martingale"
+
+[default.strategies.short_strategy]
+enabled = true
+entry_limit_offset = 0.001
+profit_target = 0.03
+
+[default.strategies.short_strategy.trailing_profit]
+enabled = true
+trailing_percentage = 0.015
+activation_threshold = 0.03
+min_profit_lock = 0.01
+acceleration_factor = 1.5
+
+[default.strategies.short_strategy.resistance_averaging]
+enabled = true
+max_attempts = 3
+position_multiplier = 1.5
+use_original_timeframe = true
+default_timeframe = "15m"
+min_resistance_confidence = 0.70
+resistance_buffer_percent = 0.005
+
+[default.strategies.short_strategy.resistance_averaging.position_aware_filtering]
+enabled = true
+use_position_price = true
+position_buffer_percent = 0.001
+recovery_mode_enabled = true
+log_edge_cases = true
+
+[default.strategies.short_strategy.resistance_averaging.resistance_calculation]
+methods = ["pivot_points", "moving_averages", "volume_profile", "fibonacci"]
+confidence_weighting = true
+minimum_methods = 2
+
+[default.strategies.short_strategy.resistance_averaging.order_placement]
+use_limit_orders = true
+price_offset_percent = 0.002
+timeout_minutes = 5
+retry_on_fill_failure = true
+
+[default.strategies.short_strategy.resistance_averaging.fallback]
+enabled = false
+loss_threshold = 0.05
+use_fallback_warning = true
+
+[default.strategies.trailing_profit]
+enabled = true
+activation_threshold = 0.03
+trailing_percentage = 0.015
+min_profit_lock = 0.01
+take_profit_percentage = 0.05
+time_based_exit = false
+max_hold_hours = 24
+acceleration_factor = 1.5
+
+[default.technical_analysis]
+timeframes = ["1m", "5m", "15m", "1h", "4h", "1d"]
+default_timeframe = "15m"
+
+[default.technical_analysis.support]
+cache_duration_minutes = 15
+max_cache_size = 100
+lookback_periods = 50
+min_confidence = 0.7
+min_valid_price = 0.01
+min_touches = 2
+max_age_hours = 24
+price_tolerance = 0.002
+
+[default.technical_analysis.support.edge_case_recovery]
+enabled = true
+recovery_proximity_threshold = 0.02
+recent_threshold_minutes = 30
+synthetic_level_count = 5
+max_price_gap_percent = 0.5
+
+[default.technical_analysis.support.position_aware]
+enabled = true
+position_buffer_percent = 0.001
+min_position_buffer = 0.0001
+max_position_buffer = 0.01
+
+[default.technical_analysis.support.cache_management]
+trading_hours_duration_minutes = 5
+non_trading_hours_duration_minutes = 60
+auto_cleanup_enabled = true
+lru_eviction_threshold = 0.75
+
+[default.technical_analysis.support.calculation_methods]
+pivot_points = true
+moving_averages = true
+volume_profile = true
+fibonacci_retracements = true
+
+[default.technical_analysis.resistance]
+cache_duration = 15
+lookback_periods = 50
+min_confidence = 0.7
+min_touches = 2
+max_age_hours = 24
+price_tolerance = 0.002
+
+[default.technical_analysis.resistance.edge_case_recovery]
+enabled = true
+recovery_proximity_threshold = 0.10
+recent_threshold_minutes = 7200
+synthetic_level_count = 5
+max_price_gap_percent = 0.5
+
+[default.technical_analysis.resistance.position_aware]
+enabled = true
+position_buffer_percent = 0.001
+min_position_buffer = 0.0001
+max_position_buffer = 0.01
+
+[default.technical_analysis.resistance.cache_management]
+trading_hours_duration_minutes = 5
+non_trading_hours_duration_minutes = 60
+auto_cleanup_enabled = true
+lru_eviction_threshold = 0.75
+
+[default.technical_analysis.resistance.calculation_methods]
+pivot_points = true
+moving_averages = true
+volume_profile = true
+fibonacci_extensions = true
+
+[default.logging]
+level = "INFO"
+format = "json"
+file = "logs/trading_bot.log"
+max_file_size = "10MB"
+backup_count = 5
+console_logging = true
+price_precision = 2
+percentage_precision = 1
+
+[default.database]
+url = "sqlite:///trading_bot.db"
+echo = false
+pool_size = 5
+max_overflow = 10
+
+[default.monitoring]
+enabled = true
+metrics_port = 9090
+health_check_interval = 30
+position_monitoring_interval = 10
+alpaca_sync_interval = 60
+market_data_refresh_interval = 60
+order_monitoring_interval = 5
+
+[default.monitoring.alerts.email]
+enabled = false
+smtp_port = 587
+to_addresses = []
+
+[default.monitoring.alerts.slack]
+enabled = false
+channel = "#trading-alerts"
+
+[default.symbols]
+whitelist_enabled = false
+default_symbols = ["AAPL", "GOOGL", "MSFT", "TSLA", "NVDA"]
+
+[default.symbols._default]
+broker = "alpaca"
+
+[default.performance]
+max_concurrent_orders = 10
+rate_limit_requests_per_second = 5
+cache_enabled = true
+async_processing = true
+
+[default.data.alpaca]
+use_snapshot = true
+extended_hours = true
+fallback_to_bars = true
+cache_duration = 30
+snapshot_timeout = 10
+quote_timeout = 10
+bars_timeout = 15
+max_retries = 3
+
+[default.development]
+auto_shutdown_hours = 0
+enable_admin_endpoints = true
+
+[default.extended_hours]
+enabled = true
+use_limit_orders_only = false
+extended_hours_spread_buffer = 0.005
+min_volume_threshold = 1000
+
+[default.extended_hours.pre_market]
+enabled = true
+reduce_position_size = false
+position_size_multiplier = 1.0
+
+[default.extended_hours.after_hours]
+enabled = true
+reduce_position_size = false
+position_size_multiplier = 1.0
+
+[default.risk.portfolio]
+max_symbol_concentration = 0.20
+max_correlated_group_exposure = 0.40
+correlation_threshold = 0.70
+enable_scaling = true
+
+[default.resilience]
+dca_pause_states = ["critical", "fail_closed"]
+
+[default.confidence.drift]
+window_size = 50
+z_threshold = 2.0
+min_samples = 20
+max_dampening = 0.30

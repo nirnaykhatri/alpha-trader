@@ -47,7 +47,7 @@ def main():
     else:
         print("\n❌ No active ngrok tunnel found")
         print("\n💡 To start ngrok automatically:")
-        print("   1. Set 'ngrok.enabled: true' in config.yaml")
+        print("   1. Set 'enabled = true' in config/settings.toml [default.ngrok]")
         print("   2. Run: python run_bot.py")
         print("\n💡 Or start ngrok manually:")
         print("   1. Run: ngrok http 8080")

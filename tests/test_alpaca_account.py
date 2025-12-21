@@ -17,8 +17,10 @@ sys.path.insert(0, src_dir)
 import src.core.configuration as config_module
 import src.trading.alpaca_account_provider as account_module
 from alpaca.trading.client import TradingClient
+import pytest
 
 
+@pytest.mark.asyncio
 async def test_alpaca_account():
     """Test Alpaca account data retrieval."""
     print("=== Alpaca Account Data Test ===")
@@ -26,7 +28,7 @@ async def test_alpaca_account():
     
     try:
         # Load configuration
-        config = config_module.ConfigurationManager("config.yaml")
+        config = config_module.ConfigurationManager()  # Uses config/ TOML files
         
         # Get API credentials
         api_key = config.get_config("api.alpaca.api_key")
