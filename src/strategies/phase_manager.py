@@ -3,11 +3,13 @@ Phase Manager
 Manages trade phase transitions and phase-specific logic.
 Handles the state machine for different trading phases.
 NO technical analysis - simplified martingale-only logic.
+
+Configuration is driven exclusively by bot's BotConfiguration from database.
 """
 
-from src.interfaces import IConfigurationManager
 from src.core.logging_config import get_logger
 from src.strategies.position_state import PositionState, PositionDirection, TradePhase
+from src.domain.bot_models import BotConfiguration
 
 logger = get_logger(__name__)
 
@@ -16,18 +18,37 @@ class PhaseManager:
     """
     Manages trade phase state machine and transitions.
     Follows Single Responsibility Principle - only handles phase management.
+    
+    Configuration is driven exclusively by bot's BotConfiguration from database.
     """
     
-    def __init__(
-        self,
-        config: IConfigurationManager
-    ):
-        """Initialize the phase manager."""
-        self.config = config
+    def __init__(self, bot_config: BotConfiguration):
+        """
+        Initialize the phase manager.
         
-        # Load strategy configurations
-        self.long_config = config.get_config('strategies.long_strategy', {})
-        self.short_config = config.get_config('strategies.short_strategy', {})
+        Args:
+            bot_config: Bot's configuration from database (REQUIRED)
+            
+        Raises:
+            ValueError: If bot_config is None
+        """
+        if bot_config is None:
+            raise ValueError("bot_config is required - configuration must come from database")
+        self._bot_config = bot_config
+    
+    def set_bot_config(self, bot_config: BotConfiguration) -> None:
+        """
+        Update the bot's configuration at runtime.
+        
+        Args:
+            bot_config: New bot configuration from the database
+            
+        Raises:
+            ValueError: If bot_config is None
+        """
+        if bot_config is None:
+            raise ValueError("bot_config cannot be None - database configuration required")
+        self._bot_config = bot_config
     
     async def check_support_averaging_transition(self, position: PositionState) -> bool:
         """

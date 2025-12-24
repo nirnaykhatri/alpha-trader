@@ -3,20 +3,26 @@ Property-based tests for trading strategy invariants.
 
 These tests validate conditions that should ALWAYS hold true for the trading strategy,
 regardless of market conditions, position sizes, or price movements.
+
+Requires: pip install hypothesis
 """
 
 import pytest
-from hypothesis import given, assume, settings, strategies as st
-from hypothesis import HealthCheck
 from datetime import datetime, timedelta
 from decimal import Decimal
+
+# Skip all tests if hypothesis is not installed
+pytest.importorskip("hypothesis")
+
+from hypothesis import given, assume, settings, strategies as st
+from hypothesis import HealthCheck
 
 # Import strategy components
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from src.strategies.advanced_strategy import PositionState, PositionDirection, TradePhase
+from src.strategies.position_state import PositionState, PositionDirection, TradePhase
 
 
 # Custom strategies for trading domain

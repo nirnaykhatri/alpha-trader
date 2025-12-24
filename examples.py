@@ -256,17 +256,17 @@ async def example_tradingview_webhook_format():
     print("In config/settings.toml:")
     print("  [default.api.webhook]")
     print("  security_enabled = false")
-    print("\nWebhook URL: http://your-ngrok-url.ngrok.io/webhook")
+    print("\nWebhook URL: http://localhost:8080/webhook")
     print("✅ No authentication required - easy for testing!")
     
-    print("\n🔒 PRODUCTION MODE (Security Enabled):")
+    print("\n🔒 PRODUCTION MODE (Azure Deployment):")
     print("In config/settings.toml and config/.secrets.toml:")
     print("  [default.api.webhook]")
     print("  security_enabled = true")
     print("  # secret in .secrets.toml:")
     print("  # secret = \"your-secret-here\"")
-    print("\nWebhook URL: http://your-ngrok-url.ngrok.io/webhook/your-secret-here")
-    print("🛡️  Authentication required - secure for live trading!")
+    print("\nWebhook URL: https://<app-name>.<region>.azurecontainerapps.io/webhook/your-secret-here")
+    print("🛡️  HTTPS + Authentication - secure for live trading!")
     
     # The TradingView alert message template should be:
     template = '''

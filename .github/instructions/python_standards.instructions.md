@@ -110,7 +110,7 @@ class IMarketDataService(ABC):
         pass
 
 # Dependency injection with interface
-class AdvancedTradingStrategy:
+class DCAStrategy:
     def __init__(self, market_data: IMarketDataService):
         self.market_data = market_data  # Interface, not concrete class
 ```

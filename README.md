@@ -22,6 +22,7 @@
 ## 📑 Table of Contents
 
 - [🚀 Quick Start Guide](#-quick-start-guide)
+- [☁️ Azure Cloud Deployment](#️-azure-cloud-deployment)
 - [🌟 Key Features](#-key-features)
 - [🏗️ Architecture](#️-architecture)
 - [📊 How It Works](#-how-it-works)
@@ -108,25 +109,40 @@ flowchart TB
 
 ### 4️⃣ Launch 🚀
 
-For the bot to receive signals from TradingView, **ngrok must be running first**.
+#### ☁️ Production (Azure Deployment - Recommended)
+
+Deploy to Azure Container Apps for 24/7 operation with a stable HTTPS endpoint:
 
 ```mermaid
 flowchart LR
-    subgraph Launch["🚀 Launch Sequence"]
-        T1["Terminal 1<br/>start_ngrok_standalone.bat"]
-        T2["Terminal 2<br/>start_trading_bot.bat"]
+    subgraph Azure["☁️ Azure Deployment"]
+        GH["GitHub Push"] --> CI["CI/CD Pipeline"]
+        CI --> ACA["Azure Container Apps"]
     end
     
-    T1 -->|"Copy HTTPS URL"| TV["TradingView<br/>Webhook Config"]
-    T2 -->|"Receives signals"| BOT["🤖 Trading Bot"]
-    TV -->|"Sends alerts"| BOT
+    TV["TradingView"] -->|"Webhook"| ACA
+    ACA --> BOT["🤖 Trading Bot"]
+```
+
+See **[Azure Deployment Guide](docs/AZURE_DEPLOYMENT.md)** for complete instructions.
+
+#### 💻 Local Development
+
+For local testing:
+
+```mermaid
+flowchart LR
+    subgraph Launch["🚀 Local Development"]
+        T1["Terminal<br/>start_trading_bot.bat"]
+    end
+    
+    T1 -->|"Runs on localhost:8080"| BOT["🤖 Trading Bot"]
 ```
 
 | Step | Command | Description |
 |:----:|:--------|:------------|
-| 1️⃣ | `.\start_ngrok_standalone.bat` | Start tunnel (keep window open) |
-| 2️⃣ | Copy the HTTPS URL | e.g., `https://xyz.ngrok-free.app` |
-| 3️⃣ | `.\start_trading_bot.bat` | Start bot in **new terminal** |
+| 1️⃣ | `.\start_trading_bot.bat` | Start bot locally |
+| 2️⃣ | Access `http://localhost:8080/docs` | View API documentation |
 
 ---
 
@@ -135,30 +151,95 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph Scripts["🛑 Shutdown Options"]
-        S1["stop_bot_only.bat<br/><i>Bot only</i>"]
-        S2["stop_bot.bat<br/><i>Bot + ngrok</i>"]
-        S3["quick_shutdown.bat<br/><i>Emergency kill all</i>"]
+        S1["stop_bot_only.bat<br/><i>Graceful stop</i>"]
+        S2["quick_shutdown.bat<br/><i>Emergency kill</i>"]
     end
     
-    S1 --> R1["♻️ Restart with<br/>start_bot_no_ngrok.bat"]
-    S2 --> R2["🔄 Full restart needed"]
-    S3 --> R3["⚠️ Emergency only"]
+    S1 --> R1["♻️ Clean shutdown"]
+    S2 --> R2["⚠️ Emergency only"]
     
     style S1 fill:#90EE90
-    style S3 fill:#FFB6C1
+    style S2 fill:#FFB6C1
 ```
 
-| Script | Stops | Use Case |
-|:-------|:------|:---------|
-| `stop_bot_only.bat` | Bot only | ♻️ Restart without losing ngrok URL |
-| `stop_bot.bat` | Bot + ngrok | 🔄 Full shutdown |
-| `quick_shutdown.bat` | Everything | ⚠️ Emergency stop |
+| Script | Description | Use Case |
+|:-------|:------------|:---------|
+| `stop_bot_only.bat` | Graceful shutdown | ♻️ Normal stop |
+| `quick_shutdown.bat` | Force kill | ⚠️ Emergency stop |
 
 **Recommended workflow:**
 ```powershell
-.\stop_bot_only.bat        # Stop bot, keep tunnel
+.\stop_bot_only.bat        # Graceful shutdown
 .\start_bot_no_ngrok.bat   # Restart bot
 ```
+
+---
+
+## ☁️ Azure Cloud Deployment
+
+Deploy the trading bot to Azure for **24/7 operation** without ngrok hassles. Estimated cost: **~$15/month**.
+
+```mermaid
+flowchart TB
+    subgraph Azure["☁️ Azure Cloud (~$15/month)"]
+        subgraph Ingress["🌐 Entry Points"]
+            TV["📈 TradingView<br/>Webhooks"]
+            UI["🖥️ Trading Terminal<br/>Next.js + shadcn/ui"]
+        end
+        
+        subgraph Compute["⚡ Compute"]
+            CA["🐳 Container Apps<br/>Trading Bot<br/><i>Always-on</i>"]
+        end
+        
+        subgraph Data["💾 Data Layer"]
+            CDB["🌍 Cosmos DB<br/>Free Tier<br/><i>25GB + 1000 RU/s</i>"]
+            KV["🔐 Key Vault<br/>Secrets"]
+            AC["⚙️ App Config<br/>Hot-Reload"]
+        end
+        
+        subgraph RealTime["📡 Real-Time"]
+            SR["🔌 SignalR<br/>WebSocket<br/><i>20K msg/day</i>"]
+        end
+    end
+    
+    TV -->|"HTTPS"| CA
+    UI -->|"API Proxy"| CA
+    CA <-->|"Read/Write"| CDB
+    CA -->|"Secrets"| KV
+    CA -->|"Config"| AC
+    CA -->|"Push Updates"| SR
+    SR -->|"WebSocket"| UI
+    
+    style CA fill:#4CAF50,color:#fff
+    style CDB fill:#0078D4,color:#fff
+    style SR fill:#FF6B35,color:#fff
+```
+
+### Quick Deploy
+
+```powershell
+# Clone and deploy
+cd infra
+.\deploy.ps1 -Environment demo -Location westus2
+
+# Or with Bash
+./deploy.sh --environment demo --location westus2
+```
+
+### Cost Breakdown
+
+| Service | Tier | Monthly Cost |
+|:--------|:-----|-------------:|
+| Container Apps | Consumption (min=1) | ~$10 |
+| Cosmos DB | Free Tier | $0 |
+| SignalR | Free Tier | $0 |
+| Static Web Apps | Free Tier | $0 |
+| Key Vault | Standard | ~$1 |
+| App Configuration | Free Tier | $0 |
+| Container Registry | Basic | ~$5 |
+| **Total** | | **~$16** |
+
+> 📖 See **[Azure Deployment Guide](docs/AZURE_DEPLOYMENT.md)** for complete setup instructions, architecture details, and CI/CD configuration.
 
 ---
 
@@ -291,7 +372,7 @@ flowchart TB
     
     subgraph Application["⚙️ Application Layer"]
         ORCH["TradingBotOrchestrator<br/><i>~1337 lines</i>"]
-        STRAT["AdvancedTradingStrategy"]
+        STRAT["DCAStrategy"]
         EXIT["ExitPlanner"]
         TRADE["TradeService"]
     end
@@ -327,7 +408,7 @@ flowchart TB
 | **OrderManager** | `src/trading/order_manager.py` | Order lifecycle & fill tracking |
 | **PositionManager** | `src/position/position_manager.py` | Position tracking & reconciliation |
 | **RiskEnvelopeCalculator** | `src/risk/risk_envelope_calculator.py` | Risk validation & portfolio limits |
-| **AdvancedTradingStrategy** | `src/strategies/advanced_strategy.py` | DCA with progressive averaging |
+| **DCAStrategy** | `src/strategies/dca_strategy.py` | DCA with progressive averaging |
 
 ---
 
@@ -411,6 +492,8 @@ sequenceDiagram
 |:---------|:------------|
 | 📖 **[User Guide](docs/USER_GUIDE.md)** | Complete manual for configuration & usage |
 | ⚙️ **[Configuration Guide](docs/CONFIGURATION.md)** | TOML config system & CLI commands |
+| 🔌 **[Admin API Reference](docs/ADMIN_API.md)** | Admin endpoints, authentication & TypeScript client |
+| ☁️ **[Azure Deployment](docs/AZURE_DEPLOYMENT.md)** | Cloud hosting with Container Apps & Cosmos DB |
 | 🍒 **[Tastytrade Setup](docs/TASTYTRADE_SETUP.md)** | OAuth setup for Tastytrade |
 | 🧠 **[Martingale Safety](docs/MARTINGALE_SAFETY_SUMMARY.md)** | Strategy math & safety mechanisms |
 | 🔌 **[Adapters Index](docs/ADAPTERS_INDEX.md)** | External integrations reference |

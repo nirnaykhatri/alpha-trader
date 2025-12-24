@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from src.interfaces import IRiskManager, IConfigurationManager, IPositionManager, IAccountProvider
 from src.exceptions import RiskManagementException
 from src.core.logging_config import get_logger
+from src.constants import RiskManagementConstants as RiskConst
 from src import TradingSignal, Order, Position
 
 
@@ -34,11 +35,23 @@ class RiskManager(IRiskManager):
         self._position_manager = position_manager
         self._account_provider = account_provider
         
-        # Risk parameters
-        self._risk_per_trade = config.get_config("trading.risk_per_trade", 0.02)
-        self._max_portfolio_risk = config.get_config("trading.max_portfolio_risk", 0.10)
-        self._max_position_size = config.get_config("trading.max_position_size", 1000)
-        self._max_daily_trades = config.get_config("trading.max_daily_trades", 50)
+        # Risk parameters - use constants as defaults
+        self._risk_per_trade = config.get_config(
+            "trading.risk_per_trade", 
+            RiskConst.DEFAULT_RISK_PER_TRADE
+        )
+        self._max_portfolio_risk = config.get_config(
+            "trading.max_portfolio_risk", 
+            RiskConst.DEFAULT_MAX_PORTFOLIO_RISK
+        )
+        self._max_position_size = config.get_config(
+            "trading.max_position_size", 
+            RiskConst.DEFAULT_MAX_POSITION_SIZE
+        )
+        self._max_daily_trades = config.get_config(
+            "trading.max_daily_trades", 
+            RiskConst.DEFAULT_MAX_DAILY_TRADES
+        )
         
         # Tracking
         self._daily_trades: Dict[str, int] = {}  # symbol -> trade count
@@ -108,7 +121,10 @@ class RiskManager(IRiskManager):
             logger.debug(f"Validating signal: {signal.symbol} {signal.signal_type.value}")
             
             # Check if symbol is allowed (with configurable whitelist)
-            whitelist_enabled = self._config.get_config("symbols.whitelist_enabled", True)
+            whitelist_enabled = self._config.get_config(
+                "symbols.whitelist_enabled", 
+                RiskConst.DEFAULT_WHITELIST_ENABLED
+            )
             if whitelist_enabled:
                 allowed_symbols = self._config.get_config("symbols.default_symbols", [])
                 if allowed_symbols and signal.symbol not in allowed_symbols:
@@ -149,15 +165,18 @@ class RiskManager(IRiskManager):
         """
         try:
             # Get position sizing configuration
-            sizing_method = self._config.get_config("trading.position_sizing.method", "percentage")
+            sizing_method = self._config.get_config(
+                "trading.position_sizing.method", 
+                RiskConst.SIZING_METHOD_PERCENTAGE
+            )
             current_price = signal.price
             
             # Calculate position size based on method
-            if sizing_method == "fixed":
+            if sizing_method == RiskConst.SIZING_METHOD_FIXED:
                 quantity = await self._calculate_fixed_position_size(symbol, signal)
-            elif sizing_method == "percentage":
+            elif sizing_method == RiskConst.SIZING_METHOD_PERCENTAGE:
                 quantity = await self._calculate_percentage_position_size(symbol, current_price, averaging_attempt)
-            elif sizing_method == "risk_based":
+            elif sizing_method == RiskConst.SIZING_METHOD_RISK_BASED:
                 quantity = await self._calculate_risk_based_position_size(symbol, current_price)
             else:
                 logger.warning(f"Unknown position sizing method: {sizing_method}, falling back to percentage")
@@ -177,9 +196,18 @@ class RiskManager(IRiskManager):
     
     async def _calculate_fixed_position_size(self, symbol: str, signal: TradingSignal) -> float:
         """Calculate position size using fixed quantity method."""
-        default_qty = self._config.get_config("trading.position_sizing.default_quantity", 100)
-        max_qty = self._config.get_config("trading.position_sizing.max_quantity", 10000)
-        min_qty = self._config.get_config("trading.position_sizing.min_quantity", 1)
+        default_qty = self._config.get_config(
+            "trading.position_sizing.default_quantity", 
+            RiskConst.DEFAULT_FIXED_QUANTITY
+        )
+        max_qty = self._config.get_config(
+            "trading.position_sizing.max_quantity", 
+            RiskConst.MAX_FIXED_QUANTITY
+        )
+        min_qty = self._config.get_config(
+            "trading.position_sizing.min_quantity", 
+            RiskConst.MIN_FIXED_QUANTITY
+        )
         
         # Use signal quantity if provided, otherwise use default
         quantity = signal.quantity if signal.quantity else default_qty
@@ -216,13 +244,25 @@ class RiskManager(IRiskManager):
             # Get configuration - use different percentage for initial vs averaging
             if averaging_attempt == 0:
                 # Initial position - use conservative percentage of ACCOUNT VALUE
-                portfolio_percentage = self._config.get_config("trading.position_sizing.initial_portfolio_percentage", 0.01)
+                portfolio_percentage = self._config.get_config(
+                    "trading.position_sizing.initial_portfolio_percentage", 
+                    RiskConst.DEFAULT_INITIAL_PORTFOLIO_PCT
+                )
                 logger.debug(f"Initial position sizing for {symbol}: {portfolio_percentage*100:.1f}% of account value")
             else:
                 # Averaging position - use martingale approach
-                initial_percentage = self._config.get_config("trading.position_sizing.initial_portfolio_percentage", 0.01)
-                multiplier = self._config.get_config("trading.position_sizing.averaging.multiplier", 2.0)
-                max_multiplier = self._config.get_config("trading.position_sizing.averaging.max_multiplier", 4.0)
+                initial_percentage = self._config.get_config(
+                    "trading.position_sizing.initial_portfolio_percentage", 
+                    RiskConst.DEFAULT_INITIAL_PORTFOLIO_PCT
+                )
+                multiplier = self._config.get_config(
+                    "trading.position_sizing.averaging.multiplier", 
+                    RiskConst.DEFAULT_AVERAGING_MULTIPLIER
+                )
+                max_multiplier = self._config.get_config(
+                    "trading.position_sizing.averaging.max_multiplier", 
+                    RiskConst.MAX_AVERAGING_MULTIPLIER
+                )
                 
                 # Calculate martingale size: initial * (multiplier ^ averaging_attempt)
                 raw_multiplier = multiplier ** averaging_attempt
@@ -238,11 +278,20 @@ class RiskManager(IRiskManager):
                            f"{portfolio_percentage*100:.1f}% of account value "
                            f"(initial {initial_percentage*100:.1f}% × {capped_multiplier:.1f}x)")
             
-            max_qty = self._config.get_config("trading.position_sizing.max_quantity", 10000)
-            min_qty = self._config.get_config("trading.position_sizing.min_quantity", 1)
+            max_qty = self._config.get_config(
+                "trading.position_sizing.max_quantity", 
+                RiskConst.MAX_FIXED_QUANTITY
+            )
+            min_qty = self._config.get_config(
+                "trading.position_sizing.min_quantity", 
+                RiskConst.MIN_FIXED_QUANTITY
+            )
             
             # CRITICAL SAFETY: Maximum account exposure for single position
-            max_single_position_percent = self._config.get_config("trading.position_sizing.max_single_position_percent", 0.50)
+            max_single_position_percent = self._config.get_config(
+                "trading.position_sizing.max_single_position_percent", 
+                RiskConst.MAX_SINGLE_POSITION_PCT
+            )
             
             # Get account info from provider
             # CHANGED: Now using account_value instead of buying_power for sizing
@@ -254,7 +303,7 @@ class RiskManager(IRiskManager):
             else:
                 # Fallback: use percentage of fallback account value
                 account_value = await self._get_account_value()
-                cash_available = account_value * 0.5  # Assume 50% in cash
+                cash_available = account_value * RiskConst.DEFAULT_CASH_RESERVE_PCT
                 logger.debug(f"No account provider - using estimated account value: ${account_value:,.2f}")
             
             # Calculate quantity based on current price
@@ -285,11 +334,14 @@ class RiskManager(IRiskManager):
             # CRITICAL SAFETY CHECK 2: If we can't afford to double, revert to base size
             if averaging_attempt > 0 and safety_capped:
                 # Calculate what base (non-martingale) size would be
-                base_percentage = self._config.get_config("trading.position_sizing.initial_portfolio_percentage", 0.01)
+                base_percentage = self._config.get_config(
+                    "trading.position_sizing.initial_portfolio_percentage", 
+                    RiskConst.DEFAULT_INITIAL_PORTFOLIO_PCT
+                )
                 base_funds = account_value * base_percentage
                 base_quantity = int(base_funds / current_price)
                 
-                if quantity < base_quantity * 1.5:  # Can't even do 1.5x
+                if quantity < base_quantity * RiskConst.MIN_MARTINGALE_RATIO:  # Can't even do 1.5x
                     logger.warning(f"🛡️ MARTINGALE SAFETY FALLBACK: Cannot safely double position for {symbol}. "
                                  f"Reverting to base size of {base_quantity} shares instead of {quantity}")
                     quantity = base_quantity
@@ -332,9 +384,18 @@ class RiskManager(IRiskManager):
         """Calculate position size based on risk percentage."""
         try:
             # Get configuration
-            risk_per_trade = self._config.get_config("trading.position_sizing.risk_per_trade", 0.02)
-            max_qty = self._config.get_config("trading.position_sizing.max_quantity", 10000)
-            min_qty = self._config.get_config("trading.position_sizing.min_quantity", 1)
+            risk_per_trade = self._config.get_config(
+                "trading.position_sizing.risk_per_trade", 
+                RiskConst.DEFAULT_RISK_PER_TRADE
+            )
+            max_qty = self._config.get_config(
+                "trading.position_sizing.max_quantity", 
+                RiskConst.MAX_FIXED_QUANTITY
+            )
+            min_qty = self._config.get_config(
+                "trading.position_sizing.min_quantity", 
+                RiskConst.MIN_FIXED_QUANTITY
+            )
             
             # Get symbol-specific risk settings
             symbol_settings = self._config.get_config(f"symbols.symbol_settings.{symbol}", {})

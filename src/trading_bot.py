@@ -1,6 +1,13 @@
 """
 Trading Bot Integration Layer
+
 This module brings together all components to create a complete trading system.
+The TradingBotOrchestrator serves as a thin facade delegating to specialized components:
+- ComponentInitializer: Handles component creation and initialization
+- ShutdownCoordinator: Manages graceful shutdown sequence
+- SignalProcessor: Routes and processes trading signals
+
+This refactoring follows the Single Responsibility Principle (SRP).
 """
 
 import asyncio
@@ -17,20 +24,25 @@ from src.signals import TradingViewSignalListener
 from src.trading import OrderManager
 from src.broker.subsystem import BrokerSubsystem
 from src.broker.interfaces import BrokerType
-from src.strategies import ConfigurableTrailingProfitManager
-from src.strategies.advanced_strategy import AdvancedTradingStrategy
+from src.strategies import DCAStrategy, TrailingManager
 from src.risk import RiskManager
 from src.position import PositionManager
 from src.database import DatabaseManager
 
 # Utility imports
-from src.utils import NgrokManager, run_blocking, BoundedFetcher
+from src.utils import run_blocking, BoundedFetcher
 
 # Data models
 from src import TradingSignal, Order, Position, OrderType, OrderSide, OrderStatus, SignalType
 from src.interfaces import IAsyncContextManager
 from src.exceptions import TradingBotException, ConfigurationException, OrderExecutionException
 from src.trading import OrderManager, ExitPlanner, TradeService, PositionMonitor
+from src.services.fill_processor import FillProcessor
+
+# Extracted components (SRP refactoring)
+from src.bot_engine.component_initializer import ComponentInitializer, InitializedComponents
+from src.bot_engine.shutdown_coordinator import ShutdownCoordinator
+from src.bot_engine.signal_processor import SignalProcessor
 
 
 logger = get_logger(__name__)
@@ -39,7 +51,13 @@ logger = get_logger(__name__)
 class TradingBotOrchestrator(IAsyncContextManager):
     """
     Main orchestrator class that coordinates all trading bot components.
-    This is the central hub that users interact with to run the trading bot.
+    
+    This is a thin facade that delegates to specialized components:
+    - ComponentInitializer: Creates and initializes all subsystems
+    - ShutdownCoordinator: Handles graceful shutdown sequence
+    - SignalProcessor: Routes trading signals to handlers
+    
+    This design follows the Single Responsibility Principle (SRP).
     """
     
     def __init__(self, config_file: str = None):
@@ -60,9 +78,13 @@ class TradingBotOrchestrator(IAsyncContextManager):
                 stacklevel=2
             )
         
+        # Extracted components (SRP)
+        self._component_initializer: Optional[ComponentInitializer] = None
+        self._shutdown_coordinator: ShutdownCoordinator = ShutdownCoordinator()
+        self._signal_processor: Optional[SignalProcessor] = None
+        
         self.config: Optional[ConfigurationManager] = None
         self.is_running = False
-        self.shutdown_event = asyncio.Event()
         
         # Track background tasks for proper cleanup
         self.background_tasks: List[asyncio.Task] = []
@@ -75,8 +97,8 @@ class TradingBotOrchestrator(IAsyncContextManager):
         self.order_manager: Optional[OrderManager] = None
         self.position_manager: Optional[PositionManager] = None
         self.risk_manager: Optional[RiskManager] = None
-        self.trailing_manager: Optional[ConfigurableTrailingProfitManager] = None
-        self.advanced_strategy: Optional[AdvancedTradingStrategy] = None
+        self.trailing_manager: Optional[TrailingManager] = None
+        self.dca_strategy: Optional[DCAStrategy] = None
         self.database: Optional[DatabaseManager] = None
         
         # Bounded concurrency utilities
@@ -84,19 +106,28 @@ class TradingBotOrchestrator(IAsyncContextManager):
         self._exit_planner: Optional[ExitPlanner] = None
         self._trade_service: Optional[TradeService] = None
         self._position_monitor: Optional[PositionMonitor] = None
-        
-        # Ngrok manager for local development
-        self.ngrok_manager: Optional[NgrokManager] = None
+        self._fill_processor: Optional[FillProcessor] = None
         
         # State tracking
         self.active_positions: Dict[str, Position] = {}
-        self.processed_signals: Dict[str, TradingSignal] = {}
         
         # Rate limiting for error handling
         self.last_error_time: Dict[str, float] = {}  # Track last error time per symbol
         self.error_cooldown = 60  # 60 seconds cooldown between repeated errors
         
         logger.info("TradingBotOrchestrator initialized")
+    
+    @property
+    def shutdown_event(self) -> asyncio.Event:
+        """Get the shutdown event from ShutdownCoordinator."""
+        return self._shutdown_coordinator.shutdown_event
+    
+    @property
+    def processed_signals(self) -> Dict[str, TradingSignal]:
+        """Get processed signals from SignalProcessor."""
+        if self._signal_processor:
+            return self._signal_processor.processed_signals
+        return {}
     
     async def start(self) -> None:
         """
@@ -109,7 +140,7 @@ class TradingBotOrchestrator(IAsyncContextManager):
             # Setup signal handlers FIRST (before any components start)
             self._setup_signal_handlers()
             
-            # Initialize all components
+            # Initialize all components using ComponentInitializer
             await self._initialize_components()
             
             # Validate configuration
@@ -130,149 +161,62 @@ class TradingBotOrchestrator(IAsyncContextManager):
             raise
     
     async def stop(self) -> None:
-        """Stop the trading bot system gracefully."""
+        """Stop the trading bot system gracefully using ShutdownCoordinator."""
         if not self.is_running:
             logger.debug("Trading bot is already stopped")
             return
         
-        logger.info("Shutting down Trading Bot System...")
         self.is_running = False
         
-        try:
-            # Force stop the signal listener first
-            if self.signal_listener:
-                logger.info("Stopping signal listener...")
-                if self.signal_listener._server:
-                    self.signal_listener._server.should_exit = True
-                    if hasattr(self.signal_listener._server, 'force_exit'):
-                        self.signal_listener._server.force_exit = True
-                await self.signal_listener.stop()
-            
-            # Stop Broker Subsystem
-            if self.broker_subsystem:
-                await self.broker_subsystem.stop()
-
-            # Cancel all background tasks
-            logger.info("Cancelling background tasks...")
-            for task in self.background_tasks:
-                if not task.done():
-                    task.cancel()
-            
-            # Wait for tasks to cancel (with timeout)
-            if self.background_tasks:
-                try:
-                    await asyncio.wait_for(
-                        asyncio.gather(*self.background_tasks, return_exceptions=True),
-                        timeout=3.0
-                    )
-                    logger.info("All background tasks stopped")
-                except asyncio.TimeoutError:
-                    logger.warning("Some background tasks did not cancel within timeout")
-            
-            # Stop ngrok tunnel
-            if self.ngrok_manager:
-                logger.info("Stopping ngrok tunnel...")
-                self.ngrok_manager.stop_tunnel()
-            
-            # Cancel all open orders
-            logger.info("Canceling open orders...")
-            await self._cancel_all_orders()
-            
-            # Close database connections
-            if self.database:
-                logger.info("Closing database connections...")
-                await self.database.close()
-            
-            # Signal shutdown completion
-            if not self.shutdown_event.is_set():
-                self.shutdown_event.set()
-            
-            logger.info("Trading Bot System stopped successfully")
-            
-        except Exception as e:
-            logger.error(f"Error during shutdown: {str(e)}")
-            # Even if there's an error, mark as shutdown
-            if not self.shutdown_event.is_set():
-                self.shutdown_event.set()
+        # Update shutdown coordinator with current component references
+        self._shutdown_coordinator.update_components(
+            signal_listener=self.signal_listener,
+            broker_subsystem=self.broker_subsystem,
+            database=self.database,
+            order_manager=self.order_manager,
+            background_tasks=self.background_tasks
+        )
+        
+        # Delegate shutdown to coordinator
+        await self._shutdown_coordinator.shutdown()
     
     async def _initialize_components(self) -> None:
-        """Initialize all trading bot components."""
+        """Initialize all trading bot components using ComponentInitializer."""
         logger.info("Initializing components...")
         
-        # Load configuration (singleton - no file path needed)
-        self.config = ConfigurationManager()
+        # Use ComponentInitializer for component creation
+        self._component_initializer = ComponentInitializer()
         
-        # Setup logging
-        setup_logging(
-            level=self.config.get_config("logging.level", "INFO"),
-            format_type=self.config.get_config("logging.format", "json"),
-            log_file=self.config.get_config("logging.file")
+        # Initialize all components
+        components = await self._component_initializer.initialize_all(
+            signal_callback=self._handle_trading_signal,
+            bot_instance=self
         )
         
-        # Initialize database
-        self.database = DatabaseManager(self.config)
-        await self.database.initialize()
+        # Assign component references for compatibility
+        self.config = components.config
+        self.database = components.database
+        self.broker_subsystem = components.broker_subsystem
+        self.position_manager = components.position_manager
+        self.risk_manager = components.risk_manager
+        self.order_manager = components.order_manager
+        self.trailing_manager = components.trailing_manager
+        self.dca_strategy = components.dca_strategy
+        self.signal_listener = components.signal_listener
+        self._price_fetcher = components.price_fetcher
+        self._exit_planner = components.exit_planner
+        self._trade_service = components.trade_service
+        self._position_monitor = components.position_monitor
+        self._fill_processor = components.fill_processor
         
-        # Initialize Broker Subsystem
-        self.broker_subsystem = BrokerSubsystem(self.config)
-        await self.broker_subsystem.initialize()
-        
-        # Initialize position manager with broker router for multi-broker sync
-        self.position_manager = PositionManager(self.config, self.database, self.broker_subsystem.router)
-        
-        # Initialize risk manager with account provider
-        self.risk_manager = RiskManager(self.config, self.position_manager, self.broker_subsystem.primary_account_provider)
-        
-        # Initialize order manager with broker router
-        self.order_manager = OrderManager(self.config, self.broker_subsystem.router)
-        
-        # Initialize strategy components
-        self.trailing_manager = ConfigurableTrailingProfitManager(self.config)
-        
-        # Initialize advanced strategy (main strategy handler)
-        self.advanced_strategy = AdvancedTradingStrategy(
-            self.config, 
-            self.order_manager, 
-            self.broker_subsystem.market_data,
-            self.risk_manager,
-            self.position_manager  # Add position manager for database persistence
-        )
-        
-        # Initialize signal listener with market data provider for accurate pricing
-        self.signal_listener = TradingViewSignalListener(
-            self.config, 
-            self._handle_trading_signal,
-            self.broker_subsystem.market_data,  # Pass market data provider for current price fetching
-            bot_instance=self  # Pass bot instance for status endpoints
-        )
-        
-        # Initialize bounded concurrency utilities
-        max_concurrent_price_fetches = self.config.get_config("performance.max_concurrent_orders", 5)
-        self._price_fetcher = BoundedFetcher(max_concurrency=max_concurrent_price_fetches)
-        
-        # Initialize exit planner service
-        self._exit_planner = ExitPlanner(self.config, self.broker_subsystem.market_data)
-        
-        # Initialize trade service for trade lifecycle management
-        self._trade_service = TradeService(self.database, self.order_manager)
-        
-        # Initialize position monitor service
-        self._position_monitor = PositionMonitor(
-            config=self.config,
+        # Initialize SignalProcessor for signal handling
+        self._signal_processor = SignalProcessor(
+            risk_manager=self.risk_manager,
             position_manager=self.position_manager,
-            broker_subsystem=self.broker_subsystem,
-            trailing_manager=self.trailing_manager,
-            price_fetcher=self._price_fetcher,
-            advanced_strategy=self.advanced_strategy
+            order_manager=self.order_manager,
+            exit_planner=self._exit_planner,
+            dca_strategy=self.dca_strategy
         )
-        
-        # Initialize ngrok manager for local development
-        # Check for environment variable override
-        no_ngrok_env = os.getenv("TRADING_BOT_NO_NGROK", "").lower() in ("1", "true", "yes")
-        ngrok_enabled = self.config.get_config("ngrok.enabled", False) and not no_ngrok_env
-        
-        if ngrok_enabled:
-            self.ngrok_manager = NgrokManager(self.config)
         
         logger.info("All components initialized successfully")
     
@@ -292,58 +236,32 @@ class TradingBotOrchestrator(IAsyncContextManager):
         """Start all components that need to run continuously."""
         logger.info("Starting components...")
         
-        # Check for external ngrok first, then start internal if needed
+        # Get webhook configuration
+        webhook_host = self.config.get_config("api.webhook.host", "0.0.0.0")
         webhook_port = self.config.get_config("api.webhook.port", 8080)
-        external_ngrok = self._check_external_ngrok()
         
-        if external_ngrok['running']:
+        # Display Azure deployment info
+        azure_endpoint = os.getenv("AZURE_CONTAINER_APP_URL", "")
+        if azure_endpoint:
             print("\n" + "="*60)
-            print("🔍 DETECTED EXTERNAL NGROK TUNNEL")
+            print("☁️  AZURE CONTAINER APPS DEPLOYMENT")
             print("="*60)
-            if external_ngrok['tunnel_url']:
-                print(f"🌐 Public URL: {external_ngrok['tunnel_url']}")
-                print(f"🎯 Webhook URL: {external_ngrok['webhook_url']}")
-                print(f"📊 Monitor traffic: {external_ngrok['monitor_url']}")
-                print()
-                print("✅ Using external ngrok tunnel (better for shutdown!)")
-                print("📋 COPY THIS TO TRADINGVIEW:")
-                print(f"   {external_ngrok['webhook_url']}")
-                print("="*60)
-                logger.info(f"Using external ngrok tunnel: {external_ngrok['tunnel_url']}")
-            else:
-                print("⚠️  External ngrok detected but no suitable tunnel found")
-                print("="*60)
-        elif self.ngrok_manager:
-            print("\n" + "="*60)
-            print("🚇 STARTING INTERNAL NGROK TUNNEL")
+            print(f"🌐 Public URL: {azure_endpoint}")
+            print(f"🎯 Webhook URL: {azure_endpoint}/webhook")
+            print()
+            print("📋 COPY THIS TO TRADINGVIEW:")
+            print(f"   {azure_endpoint}/webhook")
             print("="*60)
-            
-            tunnel_url = await self.ngrok_manager.start_tunnel(webhook_port)
-            if tunnel_url:
-                logger.info(f"Internal ngrok tunnel established: {tunnel_url}")
-                # The ngrok manager already displays the tunnel info, so no need to duplicate
-            else:
-                logger.warning("Failed to start internal ngrok tunnel - continuing without it")
-                print("⚠️  WARNING: No ngrok tunnel available.")
-                print("   Your bot will run locally only.")
-                print("   TradingView webhooks will not reach your bot.")
-                print("   To fix this:")
-                print("   1. Check ngrok auth token in config/.secrets.toml")
-                print("   2. Ensure your firewall allows outbound connections")
-                print("   3. Try running: start_ngrok_standalone.bat")
-                print("   4. Or restart the bot")
-                print("="*60)
+            logger.info(f"Running on Azure Container Apps: {azure_endpoint}")
         else:
             print("\n" + "="*60)
-            print("ℹ️  NO NGROK CONFIGURED")
+            print("🏠 LOCAL DEVELOPMENT MODE")
             print("="*60)
-            print("⚠️  No ngrok tunnel available.")
-            print("   Your bot will run locally only.")
-            print("   TradingView webhooks will not reach your bot.")
-            print("   To enable ngrok:")
-            print("   1. Set 'enabled = true' in config/settings.toml [default.ngrok]")
-            print("   2. Add your ngrok auth token to config/.secrets.toml")
-            print("   3. Or run: start_ngrok_standalone.bat")
+            print(f"🔗 Local URL: http://{webhook_host}:{webhook_port}")
+            print(f"📚 API Docs: http://{webhook_host}:{webhook_port}/docs")
+            print()
+            print("💡 For production, deploy to Azure Container Apps")
+            print("   See: docs/AZURE_DEPLOYMENT.md")
             print("="*60)
         
         # Start signal listener
@@ -352,11 +270,6 @@ class TradingBotOrchestrator(IAsyncContextManager):
         
         # Start Broker Subsystem (handles market data, TT session, etc.)
         await self.broker_subsystem.start()
-        
-        # Start background monitoring tasks (only if ngrok is enabled)
-        if self.ngrok_manager:
-            ngrok_task = asyncio.create_task(self._monitor_ngrok_tunnel())
-            self.background_tasks.append(ngrok_task)
         
         # Start position monitoring via PositionMonitor service
         position_task = asyncio.create_task(
@@ -385,116 +298,27 @@ class TradingBotOrchestrator(IAsyncContextManager):
     async def _handle_trading_signal(self, signal: TradingSignal) -> None:
         """
         Handle incoming trading signals from TradingView.
-        This is the main signal processing pipeline using the advanced strategy.
+        Delegates to SignalProcessor for actual processing.
         """
-        try:
-            logger.info(f"Processing signal: {signal.symbol} {signal.signal_type.value} @ {signal.price}")
-            
-            # Store signal for tracking
-            self.processed_signals[signal.signal_id] = signal
-            
-            # Risk validation
-            if not await self.risk_manager.validate_signal(signal):
-                logger.warning(f"Signal rejected by risk manager: {signal.signal_id}")
-                return
-            
-            # Use advanced strategy to handle the signal
-            await self.advanced_strategy.process_signal(signal)
-            
-            logger.info(f"Signal processed successfully: {signal.signal_id}")
-            
-        except Exception as e:
-            logger.error(f"Error processing signal {signal.signal_id}: {str(e)}")
+        if self._signal_processor:
+            await self._signal_processor.process_signal(signal)
+        else:
+            logger.warning(f"SignalProcessor not initialized - signal {signal.signal_id} not processed")
     
     async def _handle_buy_signal(self, signal: TradingSignal) -> None:
-        """Handle buy signals - DCA is now handled by AdvancedTradingStrategy."""
-        try:
-            symbol = signal.symbol
-            
-            # Check if we already have a position
-            existing_position = await self.position_manager.get_position(symbol)
-            
-            if existing_position and existing_position.quantity > 0:
-                # We already have a long position - DCA is handled by AdvancedTradingStrategy
-                # The martingale DCA logic monitors positions and places DCA orders automatically
-                logger.info(f"Position exists for {symbol} - DCA handled by AdvancedTradingStrategy")
-                return
-            
-            # Calculate position size
-            position_size = await self.risk_manager.calculate_position_size(symbol, signal)
-            
-            # Create buy order
-            order = Order(
-                order_id=None,
-                symbol=symbol,
-                quantity=position_size,
-                order_type=OrderType.MARKET if signal.price == 0 else OrderType.LIMIT,
-                side=OrderSide.BUY,
-                price=signal.price if signal.price > 0 else None
-            )
-            
-            # Place order
-            order_id = await self.order_manager.place_order(order)
-            logger.info(f"Buy order placed: {order_id}")
-            
-        except Exception as e:
-            logger.error(f"Error handling buy signal: {str(e)}")
+        """Handle buy signals - delegates to SignalProcessor."""
+        if self._signal_processor:
+            await self._signal_processor._handle_buy_signal(signal)
     
     async def _handle_sell_signal(self, signal: TradingSignal) -> None:
-        """Handle sell signals."""
-        try:
-            symbol = signal.symbol
-            
-            # Check if we have a position to sell
-            position = await self.position_manager.get_position(symbol)
-            
-            if not position or position.quantity <= 0:
-                logger.warning(f"No position to sell for {symbol}")
-                return
-            
-            # Calculate quantity to sell
-            sell_quantity = signal.quantity or position.quantity
-            
-            # Create sell order
-            order = Order(
-                order_id=None,
-                symbol=symbol,
-                quantity=sell_quantity,
-                order_type=OrderType.MARKET if signal.price == 0 else OrderType.LIMIT,
-                side=OrderSide.SELL,
-                price=signal.price if signal.price > 0 else None
-            )
-            
-            # Place order
-            order_id = await self.order_manager.place_order(order)
-            logger.info(f"Sell order placed: {order_id}")
-            
-        except Exception as e:
-            logger.error(f"Error handling sell signal: {str(e)}")
+        """Handle sell signals - delegates to SignalProcessor."""
+        if self._signal_processor:
+            await self._signal_processor._handle_sell_signal(signal)
     
     async def _handle_close_signal(self, signal: TradingSignal) -> None:
-        """Handle close signals - close all positions for the symbol."""
-        try:
-            symbol = signal.symbol
-            position = await self.position_manager.get_position(symbol)
-            
-            if not position:
-                logger.warning(f"No position to close for {symbol}")
-                return
-            
-            # Use ExitPlanner to build exit order
-            exit_plan = await self._exit_planner.plan_exit(
-                position,
-                reason="signal_close"
-            )
-            
-            # Submit the exit order
-            order = exit_plan.to_order()
-            order_id = await self.order_manager.place_order(order)
-            logger.info(f"Close order placed: {order_id}")
-            
-        except Exception as e:
-            logger.error(f"Error handling close signal: {str(e)}")
+        """Handle close signals - delegates to SignalProcessor."""
+        if self._signal_processor:
+            await self._signal_processor._handle_close_signal(signal)
     
     async def _monitor_unfilled_orders_aggressively(self) -> None:
         """
@@ -763,176 +587,13 @@ class TradingBotOrchestrator(IAsyncContextManager):
             raise
     
     async def _handle_order_fill(self, order: Order) -> None:
-        """Handle order fill events with enhanced fill price validation."""
-        try:
-            logger.info(f"🔄 Processing order fill: {order.order_id}")
-            
-            # CRITICAL: Always get the actual fill price from broker
-            actual_fill_price = await self.order_manager.get_actual_fill_price(order.order_id)
-            
-            if actual_fill_price is not None:
-                # Update order with actual fill price
-                original_price = order.price
-                order.filled_price = actual_fill_price
-                order.filled_at = datetime.utcnow()
-                
-                logger.info(f"✅ ACTUAL FILL PRICE CAPTURED: {order.symbol} {order.side.value} "
-                           f"@ ${actual_fill_price:.4f}")
-                
-                if original_price and abs(actual_fill_price - original_price) > 0.01:
-                    price_diff = actual_fill_price - original_price
-                    logger.info(f"📊 PRICE SLIPPAGE: Order: ${original_price:.4f}, "
-                               f"Fill: ${actual_fill_price:.4f}, "
-                               f"Difference: ${price_diff:+.4f}")
-            else:
-                logger.error(f"❌ CRITICAL: Cannot get actual fill price for {order.order_id}!")
-                
-                # Force refresh one more time
-                logger.info("🔄 Forcing order refresh to capture fill price...")
-                await self.order_manager._refresh_order_status(order.order_id)
-                
-                # Try to get the fill price again
-                updated_order = await self.order_manager.get_order_by_id(order.order_id)
-                if updated_order and updated_order.filled_price:
-                    order.filled_price = updated_order.filled_price
-                    order.filled_at = updated_order.filled_at
-                    logger.info(f"✅ Fill price recovered: ${order.filled_price:.4f}")
-                else:
-                    # Last resort: use order price with warning
-                    logger.warning(f"⚠️ Using order price ${order.price:.4f} as fallback for fill price")
-                    order.filled_price = order.price
-                    order.filled_at = datetime.utcnow()
-            
-            # Validate we have a fill price
-            fill_price = order.filled_price
-            if fill_price is None:
-                raise OrderExecutionException(f"Cannot process fill without fill price for order {order.order_id}")
-            
-            logger.info(f"📈 PROCESSING FILL: {order.symbol} {order.side.value} "
-                       f"{order.quantity} @ ${fill_price:.4f}")
-            
-            # Update position with actual fill price (this is critical for trailing stops)
-            quantity_change = order.quantity if order.side == OrderSide.BUY else -order.quantity
-            await self.position_manager.update_position(
-                order.symbol, 
-                quantity_change, 
-                fill_price  # Use actual fill price for position calculations
-            )
-            
-            # CRITICAL: Update strategy position with actual fill price
-            if self.advanced_strategy and order.symbol in self.advanced_strategy.positions:
-                strategy_position = self.advanced_strategy.positions[order.symbol]
-                
-                # Check if this is a DCA order that needs fill price update
-                is_dca_order = self.order_manager.is_dca_order(order.order_id)
-                
-                # Recalculate average price with actual fill price
-                if strategy_position.quantity != 0:
-                    old_total_cost = strategy_position.quantity * strategy_position.average_price
-                    old_avg_price = strategy_position.average_price
-                    
-                    # Add this order's contribution with actual fill price
-                    new_total_cost = old_total_cost + (quantity_change * fill_price)
-                    new_total_quantity = strategy_position.quantity + quantity_change
-                    
-                    if new_total_quantity != 0:
-                        strategy_position.average_price = abs(new_total_cost / new_total_quantity)
-                        strategy_position.quantity = new_total_quantity
-                        
-                        logger.info(f"🔄 STRATEGY POSITION UPDATED: {order.symbol}")
-                        logger.info(f"   Old avg: ${old_avg_price:.4f}, New avg: ${strategy_position.average_price:.4f}")
-                        logger.info(f"   Quantity: {strategy_position.quantity}")
-                
-                # CRITICAL FIX: Update DCA tracking with ACTUAL FILL PRICE instead of order price
-                if is_dca_order:
-                    # CRITICAL: Increment DCA attempt counter only on successful fill (not placement)
-                    strategy_position.averaging_attempts += 1
-                    logger.info(f"🔢 DCA ATTEMPT COMPLETED: {order.symbol} attempt #{strategy_position.averaging_attempts}")
-                    
-                    # Get the actual order price that was originally tracked
-                    original_order_price = order.price
-                    
-                    # Update DCA tracking to use FILL price instead of ORDER price
-                    if strategy_position.last_dca_price == original_order_price:
-                        logger.info(f"🔧 FIXING DCA PRICE TRACKING: {order.symbol}")
-                        logger.info(f"   Replacing ORDER price ${original_order_price:.4f} with FILL price ${fill_price:.4f}")
-                        
-                        # Update the last DCA price to the actual fill price
-                        strategy_position.last_dca_price = fill_price
-                        
-                        # Update the DCA price history as well
-                        if strategy_position.dca_order_prices and strategy_position.dca_order_prices[-1] == original_order_price:
-                            strategy_position.dca_order_prices[-1] = fill_price
-                            logger.info(f"   Updated DCA history: {[f'${p:.2f}' for p in strategy_position.dca_order_prices]}")
-                        
-                        # Save the corrected DCA metadata to database
-                        try:
-                            await self.advanced_strategy._save_position_dca_metadata(
-                                symbol=order.symbol,
-                                attempts=strategy_position.averaging_attempts,
-                                prices=strategy_position.dca_order_prices,
-                                last_price=strategy_position.last_dca_price
-                            )
-                            logger.info(f"✅ DCA metadata updated with actual fill price: ${fill_price:.4f}")
-                        except Exception as dca_save_error:
-                            logger.error(f"❌ Failed to save corrected DCA metadata: {dca_save_error}")
-                    
-                    logger.info(f"🎯 DCA ORDER FILL PROCESSED: {order.symbol}")
-                    logger.info(f"   Order Price: ${original_order_price:.4f}")
-                    logger.info(f"   Fill Price: ${fill_price:.4f}")
-                    logger.info(f"   Price Diff: ${fill_price - original_order_price:+.4f}")
-                    logger.info(f"   DCA Level: {strategy_position.averaging_attempts}")
-                    logger.info(f"   Next DCA will use: ${fill_price:.4f} as reference price")
-            
-            # Log position update for transparency
-            logger.info(f"📊 Position updated: {order.symbol} {quantity_change:+.2f} @ ${fill_price:.4f}")
-            
-            # Create trade records for better tracking
-            await self._handle_trade_tracking(order)
-            
-            # Save order to database
-            await self.database.save_order(order)
-            
-        except Exception as e:
-            logger.error(f"Error handling order fill: {str(e)}")
-    
-    async def _handle_trade_tracking(self, order: Order) -> None:
-        """Handle trade tracking when orders are filled."""
-        try:
-            # Convert OrderSide enum to string for comparison
-            side_str = order.side.value if hasattr(order.side, 'value') else str(order.side)
-            
-            if side_str.lower() == "buy":
-                # Entry order - create new trade record
-                await self.database.create_trade_entry(
-                    symbol=order.symbol,
-                    entry_order=order,
-                    strategy_used="signal_based"  # You can enhance this based on actual strategy
-                )
-                logger.info(f"Trade entry recorded: {order.symbol} LONG {order.filled_quantity} @ ${order.filled_price:.4f}")
-                
-            else:
-                # Exit order - complete existing trade
-                # Find the corresponding open trade
-                open_trades = await self.database.get_open_trades(order.symbol)
-                
-                if open_trades:
-                    # Complete the most recent open trade
-                    latest_trade = open_trades[-1]  # Get the last opened trade
-                    trade_summary = await self.database.complete_trade(
-                        trade_id=latest_trade['trade_id'],
-                        exit_order=order,
-                        exit_reason="profit_taking"  # You can determine this based on context
-                    )
-                    
-                    logger.info(f"Trade completed: {order.symbol} - "
-                               f"P&L: ${trade_summary['realized_pnl']:.2f} "
-                               f"({trade_summary['profit_percentage']:.2f}%)")
-                else:
-                    logger.warning(f"Exit order {order.order_id} filled but no open trade found for {order.symbol}")
-                    
-        except Exception as e:
-            logger.error(f"Error in trade tracking: {str(e)}")
+        """
+        Handle order fill events with enhanced fill price validation.
+        
+        Delegates to FillProcessor service for actual processing.
+        This method is kept thin to maintain orchestrator focus on coordination.
+        """
+        await self._fill_processor.process_fill(order)
     
     async def _handle_order_cancel(self, order: Order) -> None:
         """Handle order cancellation events."""
@@ -943,8 +604,8 @@ class TradingBotOrchestrator(IAsyncContextManager):
             logger.info(f"🧹 CLEANING UP CANCELLED DCA ORDER: {order.symbol}")
             
             # Remove from strategy position's active orders
-            if self.advanced_strategy and order.symbol in self.advanced_strategy.positions:
-                strategy_position = self.advanced_strategy.positions[order.symbol]
+            if self.dca_strategy and order.symbol in self.dca_strategy.positions:
+                strategy_position = self.dca_strategy.positions[order.symbol]
                 if order.order_id in strategy_position.active_orders:
                     strategy_position.active_orders.remove(order.order_id)
                     logger.info(f"   Removed {order.order_id} from active orders list")
@@ -1117,122 +778,6 @@ class TradingBotOrchestrator(IAsyncContextManager):
         except Exception as e:
             # This is not critical - we can rely on KeyboardInterrupt in the main loop
             logger.debug(f"Could not set signal handlers: {e}")
-    
-    async def _monitor_ngrok_tunnel(self) -> None:
-        """Monitor ngrok tunnel health and display status periodically."""
-        if not self.ngrok_manager:
-            return
-        
-        try:
-            # Initial delay to let the bot settle
-            await asyncio.sleep(30)
-            
-            while self.is_running and not self.shutdown_event.is_set():
-                try:
-                    if self.ngrok_manager.is_tunnel_active():
-                        tunnel_url = self.ngrok_manager.get_tunnel_url()
-                        if tunnel_url:
-                            logger.info(f"🌐 ngrok tunnel active: {tunnel_url}")
-                        else:
-                            logger.warning("🔍 ngrok process running but no tunnel URL available")
-                    else:
-                        logger.warning("⚠️  ngrok tunnel is not active - webhooks will not work")
-                        print("\n" + "="*60)
-                        print("⚠️  NGROK TUNNEL DOWN")
-                        print("="*60)
-                        print("   Your ngrok tunnel has stopped working.")
-                        print("   TradingView webhooks will not reach your bot.")
-                        print("   The bot will continue running but won't receive signals.")
-                        print("   Consider restarting the bot to restore the tunnel.")
-                        print("="*60)
-                    
-                    # Check every 5 minutes or until shutdown
-                    try:
-                        await asyncio.wait_for(self.shutdown_event.wait(), timeout=300)
-                        break  # Shutdown signal received
-                    except asyncio.TimeoutError:
-                        continue  # Continue monitoring
-                        
-                except Exception as e:
-                    logger.error(f"Error monitoring ngrok tunnel: {e}")
-                    try:
-                        await asyncio.wait_for(self.shutdown_event.wait(), timeout=60)
-                        break  # Shutdown signal received
-                    except asyncio.TimeoutError:
-                        continue  # Continue monitoring
-        except asyncio.CancelledError:
-            logger.debug("ngrok monitor task cancelled")
-            raise
-    
-    def _check_external_ngrok(self) -> Dict[str, Any]:
-        """
-        Check if ngrok is running externally and return tunnel information.
-        
-        Returns:
-            Dict with keys: 'running', 'tunnel_url', 'webhook_url', 'monitor_url', 'error'
-        """
-        import json
-        import urllib.request
-        
-        result = {
-            'running': False,
-            'tunnel_url': None,
-            'webhook_url': None,
-            'monitor_url': 'http://localhost:4040',
-            'error': None
-        }
-        
-        try:
-            # Try to connect to ngrok API
-            api_endpoints = [
-                "http://localhost:4040/api/tunnels",
-                "http://127.0.0.1:4040/api/tunnels"
-            ]
-            
-            data = None
-            for api_url in api_endpoints:
-                try:
-                    with urllib.request.urlopen(api_url, timeout=3) as response:
-                        data = json.loads(response.read().decode())
-                        break
-                except Exception:
-                    continue
-            
-            if not data:
-                return result
-            
-            result['running'] = True
-            tunnels = data.get("tunnels", [])
-            
-            # Find the best tunnel (prefer HTTPS)
-            best_tunnel = None
-            for tunnel in tunnels:
-                if tunnel.get("proto") == "https":
-                    best_tunnel = tunnel
-                    break
-            
-            # Fallback to HTTP tunnel
-            if not best_tunnel:
-                for tunnel in tunnels:
-                    if tunnel.get("proto") == "http":
-                        best_tunnel = tunnel
-                        break
-            
-            if best_tunnel:
-                tunnel_url = best_tunnel.get("public_url")
-                if tunnel_url:
-                    # Ensure HTTPS for TradingView compatibility
-                    if tunnel_url.startswith("http://"):
-                        tunnel_url = tunnel_url.replace("http://", "https://")
-                    
-                    result['tunnel_url'] = tunnel_url
-                    result['webhook_url'] = f"{tunnel_url}/webhook"
-            
-            return result
-            
-        except Exception as e:
-            result['error'] = f"Error checking ngrok: {str(e)}"
-            return result
 
     # Public API methods for users
     async def get_status(self) -> Dict[str, Any]:
@@ -1327,10 +872,19 @@ if __name__ == "__main__":
         os.environ["TRADING_BOT_ENV"] = args.env
     
     if args.validate:
-        # Validate configuration using centralized startup validation
-        from src.config.settings import validate_and_exit_on_error
-        config = validate_and_exit_on_error()
-        print(f"✅ Configuration for '{args.env}' environment is valid!")
+        # Validate configuration using ConfigurationManager
+        from src.core import ConfigurationManager
+        config = ConfigurationManager()
+        # Basic validation: check if essential configs are available
+        db_config = config.get_database_config()
+        if db_config.url:
+            print(f"✅ Configuration for '{args.env}' environment is valid!")
+            print(f"  - Database URL configured: {'Yes' if db_config.url else 'No'}")
+            print(f"  - Alpaca configured: {'Yes' if config.get_alpaca_config().is_configured else 'No'}")
+            print(f"  - Azure deployment: {'Yes' if config.is_azure_deployment() else 'No'}")
+        else:
+            print(f"❌ Configuration validation failed - DATABASE_URL not set")
+            sys.exit(1)
     else:
         # Run the bot
         asyncio.run(run_trading_bot())

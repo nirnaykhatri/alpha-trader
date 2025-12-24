@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
     AsyncEngine
 )
-from sqlalchemy import Column, String, Float, Integer, DateTime, Text, select, delete
+from sqlalchemy import select, delete
 import json
 
 from src.interfaces import IConfigurationManager
@@ -25,121 +25,23 @@ from src import Position, Order, OrderStatus, OrderType
 from src.constants import DatabaseConstants
 from src.database.base import Base
 
+# Import models from dedicated models module
+from src.database.models import (
+    PositionRecord,
+    OrderRecord,
+    TradeRecord,
+    PositionTrackingRecord,
+    TradingSignalRecord,
+)
+
 # Import other schema modules to register their models with the shared Base
 # This ensures all tables are created when Base.metadata.create_all() is called
 import src.database.enhanced_schema  # noqa: F401
 import src.database.dca_metadata_manager  # noqa: F401
+import src.database.bot_repository  # noqa: F401 - Bot persistence tables
 
 
 logger = get_logger(__name__)
-
-
-class PositionRecord(Base):
-    """Database model for positions."""
-    __tablename__ = 'positions'
-    
-    symbol = Column(String(10), primary_key=True)
-    broker = Column(String(20), primary_key=True, default='alpaca')  # Added broker to PK
-    quantity = Column(Float, nullable=False)
-    avg_price = Column(Float, nullable=False)
-    current_price = Column(Float, nullable=False)
-    unrealized_pnl = Column(Float, nullable=False, default=0)
-    realized_pnl = Column(Float, nullable=False, default=0)
-    created_at = Column(DateTime, nullable=False)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-
-
-class OrderRecord(Base):
-    """Database model for orders."""
-    __tablename__ = 'orders'
-    
-    order_id = Column(String(50), primary_key=True)
-    broker = Column(String(20), nullable=True, default='alpaca')  # Added broker
-    symbol = Column(String(10), nullable=False)
-    quantity = Column(Float, nullable=False)
-    order_type = Column(String(20), nullable=False)
-    side = Column(String(10), nullable=False)
-    price = Column(Float, nullable=True)
-    stop_price = Column(Float, nullable=True)
-    status = Column(String(20), nullable=False)
-    created_at = Column(DateTime, nullable=False)
-    filled_at = Column(DateTime, nullable=True)
-    filled_price = Column(Float, nullable=True)
-    filled_quantity = Column(Float, nullable=True)
-
-
-class TradeRecord(Base):
-    """Database model for completed trades (pairs of buy/sell orders)."""
-    __tablename__ = 'trades'
-    
-    trade_id = Column(String(50), primary_key=True)
-    broker = Column(String(20), nullable=True, default='alpaca')  # Added broker
-    symbol = Column(String(10), nullable=False)
-    
-    # Entry details
-    entry_order_id = Column(String(50), nullable=False)
-    entry_price = Column(Float, nullable=False)
-    entry_quantity = Column(Float, nullable=False)
-    entry_time = Column(DateTime, nullable=False)
-    entry_side = Column(String(10), nullable=False)  # 'buy' or 'sell'
-    
-    # Exit details
-    exit_order_id = Column(String(50), nullable=True)
-    exit_price = Column(Float, nullable=True)
-    exit_quantity = Column(Float, nullable=True)
-    exit_time = Column(DateTime, nullable=True)
-    exit_side = Column(String(10), nullable=True)  # 'sell' or 'buy'
-    exit_reason = Column(String(50), nullable=True)  # 'profit_taking', 'stop_loss', 'trailing_stop', 'manual'
-    
-    # P&L details
-    realized_pnl = Column(Float, nullable=True)
-    profit_percentage = Column(Float, nullable=True)
-    
-    # Strategy details
-    strategy_used = Column(String(50), nullable=True)
-    trailing_started_at = Column(Float, nullable=True)  # Price at which trailing started
-    trailing_peak_price = Column(Float, nullable=True)  # Peak price during trailing
-    
-    # Timestamps
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    completed_at = Column(DateTime, nullable=True)
-
-
-class PositionTrackingRecord(Base):
-    """Enhanced position tracking with detailed fill history."""
-    __tablename__ = 'position_tracking'
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    symbol = Column(String(10), nullable=False)
-    
-    # Current position summary
-    total_quantity = Column(Float, nullable=False, default=0)
-    avg_entry_price = Column(Float, nullable=False, default=0)
-    total_cost_basis = Column(Float, nullable=False, default=0)
-    
-    # Trailing information
-    is_trailing = Column(String(10), nullable=False, default='false')  # 'true'/'false'
-    trailing_activation_price = Column(Float, nullable=True)
-    trailing_peak_price = Column(Float, nullable=True)
-    trailing_stop_price = Column(Float, nullable=True)
-    
-    # Timestamps
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-
-
-class TradingSignalRecord(Base):
-    """Database model for trading signals."""
-    __tablename__ = 'trading_signals'
-    
-    signal_id = Column(String(50), primary_key=True)
-    symbol = Column(String(10), nullable=False)
-    signal_type = Column(String(10), nullable=False)
-    price = Column(Float, nullable=False)
-    quantity = Column(Float, nullable=True)
-    timestamp = Column(DateTime, nullable=False)
-    signal_metadata = Column(Text, nullable=True)
-    processed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
 class DatabaseManager:
@@ -378,21 +280,45 @@ class DatabaseManager:
             logger.error(f"Error getting position {symbol}: {str(e)}")
             return None
     
-    async def get_all_positions(self, broker: str = None) -> List[Position]:
+    async def get_all_positions(
+        self, 
+        broker: str = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        exclude_zero_quantity: bool = False
+    ) -> List[Position]:
         """
-        Get all positions from the database.
+        Get all positions from the database with optional pagination.
+        
+        Pagination is applied at the database query level for efficiency,
+        avoiding loading all records into memory.
         
         Args:
             broker: Optional broker filter
+            limit: Maximum number of positions to return. None for all.
+            offset: Number of positions to skip (for pagination).
+            exclude_zero_quantity: If True, excludes positions with zero quantity.
             
         Returns:
-            List of all positions
+            List of positions matching the criteria
         """
         try:
             async with self.get_session() as session:
                 stmt = select(PositionRecord)
+                
+                # Apply broker filter
                 if broker:
                     stmt = stmt.where(PositionRecord.broker == broker)
+                
+                # Exclude zero quantity positions (performance optimization)
+                if exclude_zero_quantity:
+                    stmt = stmt.where(PositionRecord.quantity != 0)
+                
+                # Apply database-level pagination for efficiency
+                if offset > 0:
+                    stmt = stmt.offset(offset)
+                if limit is not None:
+                    stmt = stmt.limit(limit)
                     
                 result = await session.execute(stmt)
                 records = result.scalars().all()
@@ -1064,7 +990,7 @@ class DatabaseManager:
                     tracking.total_quantity = quantity
                     tracking.avg_entry_price = avg_price
                     tracking.total_cost_basis = cost_basis
-                    tracking.is_trailing = 'true' if is_trailing else 'false'
+                    tracking.is_trailing = is_trailing
                     tracking.trailing_activation_price = activation_price
                     tracking.trailing_peak_price = peak_price
                     tracking.trailing_stop_price = stop_price
@@ -1076,7 +1002,7 @@ class DatabaseManager:
                         total_quantity=quantity,
                         avg_entry_price=avg_price,
                         total_cost_basis=cost_basis,
-                        is_trailing='true' if is_trailing else 'false',
+                        is_trailing=is_trailing,
                         trailing_activation_price=activation_price,
                         trailing_peak_price=peak_price,
                         trailing_stop_price=stop_price
@@ -1109,7 +1035,7 @@ class DatabaseManager:
                         'total_quantity': tracking.total_quantity,
                         'avg_entry_price': tracking.avg_entry_price,
                         'total_cost_basis': tracking.total_cost_basis,
-                        'is_trailing': tracking.is_trailing == 'true',
+                        'is_trailing': tracking.is_trailing,
                         'trailing_activation_price': tracking.trailing_activation_price,
                         'trailing_peak_price': tracking.trailing_peak_price,
                         'trailing_stop_price': tracking.trailing_stop_price,

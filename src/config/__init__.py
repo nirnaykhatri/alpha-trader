@@ -1,70 +1,65 @@
 """
 Configuration management module.
 
-This module provides configuration access via Dynaconf with Pydantic validation.
+This module provides configuration access via Azure services:
+- Azure Key Vault: Secrets (API keys, connection strings)
+- Azure App Configuration: Runtime settings (hot-reload support)
+- Managed Identity: Authentication (no connection strings in code)
 
 Quick Usage:
-    from src.config.settings import ConfigurationManager, get_config
+    # Async (preferred for Azure-native)
+    from src.config.azure_config_provider import config_provider, get_config, get_secret
+    
+    await config_provider.initialize()
+    api_key = await get_secret("alpaca-api-key")
+    db_url = await get_config("database.url")
+    
+    # Sync (backward compatibility, uses environment variables)
+    from src.core import ConfigurationManager
     
     config = ConfigurationManager()
-    value = config.get_config("trading.order_type")
-    
-    # Or use the convenience function
-    value = get_config("trading.order_type")
+    value = config.get_config("database.url")
 
-For backward compatibility, you can also import from src.core:
-    from src.core import ConfigurationManager
+Environment Variables (local development fallback):
+    AZURE_KEYVAULT_URL: Key Vault URL
+    AZURE_APP_CONFIGURATION_ENDPOINT: App Config URL
+    DATABASE_URL, LOG_LEVEL, ALPACA_API_KEY, etc.
 """
 
-from src.config.settings import (
-    ConfigurationManager,
+from src.config.azure_config_provider import (
+    AzureConfigProvider,
+    config_provider,
     get_config,
-    get_settings,
-    reload_settings,
-    validate_startup,
-    validate_and_exit_on_error,
+    get_secret,
+    ConfigKeys,
+    SecretKeys,
+    DEFAULT_CONFIG,
     AlpacaBrokerConfig,
     TastytradeBrokerConfig,
-    SymbolConfig,
     WebhookConfig,
-    PositionSizingConfig,
-    ConfigValidationError,
-    BrokerNotConfiguredError,
-    MissingConfigFileError,
-    ValidationIssue,
-    VALID_ENVIRONMENTS,
-    VALID_BROKERS,
-    VALID_RISK_PROFILES,
+    DatabaseConfig,
+    LoggingConfig,
 )
 
+from src.core.configuration import ConfigurationManager
+
 __all__ = [
-    # Main classes
+    # Azure-native async configuration
+    "AzureConfigProvider",
+    "config_provider",
+    "get_config",
+    "get_secret",
+    "ConfigKeys",
+    "SecretKeys",
+    "DEFAULT_CONFIG",
+    
+    # Sync wrapper (backward compatibility)
     "ConfigurationManager",
     
-    # Convenience functions
-    "get_config",
-    "get_settings",
-    "reload_settings",
-    
-    # Validation
-    "validate_startup",
-    "validate_and_exit_on_error",
-    
-    # Pydantic models
+    # Configuration data classes
     "AlpacaBrokerConfig",
     "TastytradeBrokerConfig",
-    "SymbolConfig",
     "WebhookConfig",
-    "PositionSizingConfig",
-    
-    # Exceptions
-    "ConfigValidationError",
-    "BrokerNotConfiguredError",
-    "MissingConfigFileError",
-    "ValidationIssue",
-    
-    # Constants
-    "VALID_ENVIRONMENTS",
-    "VALID_BROKERS",
-    "VALID_RISK_PROFILES",
+    "DatabaseConfig",
+    "LoggingConfig",
 ]

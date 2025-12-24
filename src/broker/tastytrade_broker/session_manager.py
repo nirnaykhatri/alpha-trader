@@ -7,7 +7,7 @@ Requires client_secret and refresh_token instead of username/password.
 To set up OAuth:
 1. Create an OAuth application at https://my.tastytrade.com/app.html#/manage/api-access/oauth-applications
 2. Generate a refresh token from the same page (OAuth Applications > Manage > Create Grant)
-3. Configure the client_secret and refresh_token in settings.toml
+3. Store client_secret and refresh_token in Azure Key Vault or environment variables
 
 For sandbox accounts, use https://developer.tastytrade.com/sandbox/ to create an account,
 then run: from tastytrade.oauth import login; login(is_test=True)

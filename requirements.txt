@@ -63,6 +63,12 @@ isort==5.12.0
 
 # Security
 cryptography==41.0.7
+PyJWT>=2.8.0
+
+# Azure SDK (for cloud deployment)
+azure-appconfiguration>=1.5.0
+azure-identity>=1.15.0
+azure-cosmos>=4.7.0
 
 # Documentation
 mkdocs==1.5.3

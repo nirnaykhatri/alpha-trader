@@ -31,8 +31,7 @@ from src.position import PositionManager
 from src.risk import RiskManager
 from src.signals import TradingViewSignalListener
 from src.data import AlpacaMarketDataProvider
-from src.strategies import ConfigurableTrailingProfitManager
-from src.trading_bot import TradingBotOrchestrator
+from src.strategies import DCAStrategy, TrailingManager, PositionState, PositionDirection, TradePhase
 from src.interfaces import TradingSignal, Position, Order, OrderType, OrderStatus, OrderSide, SignalType
 from src.exceptions import *
 
@@ -323,7 +322,7 @@ def mock_market_data(mock_alpaca_data_client):
 @pytest.fixture
 def mock_trailing_profit_manager():
     """Mock trailing profit manager."""
-    mock_manager = Mock(spec=ConfigurableTrailingProfitManager)
+    mock_manager = Mock(spec=TrailingManager)
     mock_manager.should_take_profit = AsyncMock(return_value=False)
     mock_manager.update_trailing_stop = AsyncMock()
     mock_manager.get_trailing_stop_price = AsyncMock(return_value=148.0)

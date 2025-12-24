@@ -1,185 +1,170 @@
 """
 Trading Bot Configuration CLI.
 
-Commands:
-    init        Copy template files to get started
+Commands for managing Azure-native configuration:
     status      Show current configuration status
-    validate    Validate configuration files
-    switch      Switch between demo and live environments
+    validate    Validate configuration (Azure or environment variables)
     show-brokers Show configured brokers and their status
+    check-azure  Check Azure connectivity and configuration
 
 Usage:
-    python -m src.config.cli init
     python -m src.config.cli status
     python -m src.config.cli validate
-    python -m src.config.cli switch demo
-    python -m src.config.cli switch live
     python -m src.config.cli show-brokers
+    python -m src.config.cli check-azure
 """
 
 import argparse
-import shutil
+import asyncio
+import os
 import sys
-from pathlib import Path
+from typing import List, Tuple
 
-from src.config.settings import (
-    CONFIG_DIR,
-    SETTINGS_FILE,
-    SECRETS_FILE,
-    ENVIRONMENTS_DIR,
-    PROFILES_DIR,
-    VALID_ENVIRONMENTS,
-    VALID_RISK_PROFILES,
-    ConfigurationManager,
-    validate_startup,
-    _get_environment,
+from src.core import ConfigurationManager
+from src.config.azure_config_provider import (
+    AzureConfigProvider,
+    ConfigKeys,
+    SecretKeys,
 )
 
 
-def cmd_init(args: argparse.Namespace) -> int:
-    """Initialize configuration by copying template files."""
-    print("Initializing configuration...\n")
-    
-    # Create directories
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    ENVIRONMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-    
-    # Check what already exists
-    existing = []
-    missing = []
-    
-    files_to_check = [
-        (SETTINGS_FILE, "settings.toml"),
-        (SECRETS_FILE, ".secrets.toml"),
-        (ENVIRONMENTS_DIR / "demo.toml", "environments/demo.toml"),
-        (ENVIRONMENTS_DIR / "live.toml", "environments/live.toml"),
-        (PROFILES_DIR / "conservative.toml", "profiles/conservative.toml"),
-        (PROFILES_DIR / "moderate.toml", "profiles/moderate.toml"),
-        (PROFILES_DIR / "aggressive.toml", "profiles/aggressive.toml"),
-    ]
-    
-    for path, name in files_to_check:
-        if path.exists():
-            existing.append(name)
-        else:
-            missing.append((path, name))
-    
-    if existing:
-        print("✓ Already exist:")
-        for name in existing:
-            print(f"    {name}")
-    
-    # Copy secrets template if secrets file doesn't exist
-    secrets_template = CONFIG_DIR / ".secrets.toml.example"
-    if not SECRETS_FILE.exists() and secrets_template.exists():
-        shutil.copy(secrets_template, SECRETS_FILE)
-        print(f"\n✓ Created {SECRETS_FILE.relative_to(CONFIG_DIR.parent)}")
-        print("  → Edit this file to add your API credentials")
-    elif not SECRETS_FILE.exists():
-        print(f"\n⚠ Missing secrets template: {secrets_template}")
-        print("  Run configuration setup to create template files")
-    
-    # Summary
-    print("\n" + "="*50)
-    print("Configuration Status")
-    print("="*50)
-    
-    if SECRETS_FILE.exists():
-        print(f"✓ Secrets file: {SECRETS_FILE.relative_to(CONFIG_DIR.parent)}")
-    else:
-        print(f"✗ Secrets file missing")
-    
-    print(f"\nNext steps:")
-    print(f"  1. Edit config/.secrets.toml with your API credentials")
-    print(f"  2. Run: trading-config validate")
-    print(f"  3. Run: python run_bot.py")
-    
-    return 0
+# Valid environments for the trading bot
+VALID_ENVIRONMENTS = ("demo", "live")
+
+
+def _get_environment() -> str:
+    """Get current environment from ENVIRONMENT variable."""
+    return os.environ.get("ENVIRONMENT", "demo").lower()
 
 
 def cmd_status(args: argparse.Namespace) -> int:
     """Show current configuration status."""
-    print("="*60)
+    print("=" * 60)
     print("Trading Bot Configuration Status")
-    print("="*60)
+    print("=" * 60)
     
     # Environment
     env = _get_environment()
     print(f"\n📌 Environment: {env.upper()}")
-    print(f"   Set TRADING_BOT_ENV to change (demo|live)")
+    print(f"   Set ENVIRONMENT to change (demo|live)")
     
-    # Files
-    print(f"\n📁 Configuration Files:")
-    files = [
-        (SETTINGS_FILE, "settings.toml", True),
-        (SECRETS_FILE, ".secrets.toml", True),
-        (ENVIRONMENTS_DIR / f"{env}.toml", f"environments/{env}.toml", False),
-    ]
+    # Configuration Source
+    config = ConfigurationManager()
+    is_azure = config.is_azure_deployment()
     
-    for path, name, required in files:
-        status = "✓" if path.exists() else ("✗ MISSING" if required else "○ optional")
-        print(f"   {status} config/{name}")
+    print(f"\n📁 Configuration Source:")
+    if is_azure:
+        print("   ✓ Azure Key Vault + App Configuration")
+        keyvault_url = os.environ.get("AZURE_KEYVAULT_URL", "Not set")
+        appconfig_url = os.environ.get("AZURE_APP_CONFIGURATION_ENDPOINT", "Not set")
+        print(f"   Key Vault: {keyvault_url[:50]}..." if len(keyvault_url) > 50 else f"   Key Vault: {keyvault_url}")
+        print(f"   App Config: {appconfig_url[:50]}..." if len(appconfig_url) > 50 else f"   App Config: {appconfig_url}")
+    else:
+        print("   ○ Environment Variables (local development)")
+        print("   Set AZURE_KEYVAULT_URL or AZURE_APP_CONFIGURATION_ENDPOINT to use Azure")
     
-    # Risk profiles
-    print(f"\n📊 Risk Profiles:")
-    for profile in VALID_RISK_PROFILES:
-        path = PROFILES_DIR / f"{profile}.toml"
-        status = "✓" if path.exists() else "○"
-        print(f"   {status} {profile}")
+    # Database
+    print(f"\n💾 Database:")
+    db_config = config.get_database_config()
+    if db_config.url:
+        # Mask sensitive parts of connection string
+        masked_url = db_config.url
+        if "@" in masked_url:
+            parts = masked_url.split("@")
+            masked_url = parts[0].rsplit(":", 1)[0] + ":***@" + parts[-1]
+        print(f"   ✓ Configured: {masked_url[:60]}...")
+    else:
+        print("   ○ Not configured (using default SQLite)")
     
-    # Brokers (only if config is valid)
-    try:
-        config = ConfigurationManager()
-        
-        print(f"\n🏦 Brokers:")
-        
-        alpaca = config.get_alpaca_config()
-        if alpaca.is_configured:
-            mode = "PAPER" if alpaca.is_paper else "LIVE"
-            print(f"   ✓ Alpaca ({mode})")
-        else:
-            print(f"   ○ Alpaca (not configured)")
-        
-        tastytrade = config.get_tastytrade_config()
-        if tastytrade.is_configured:
-            mode = "SANDBOX" if tastytrade.is_sandbox else "LIVE"
-            print(f"   ✓ Tastytrade ({mode})")
-        else:
-            print(f"   ○ Tastytrade (not configured)")
-        
-        # Default broker
-        configured = config.get_configured_brokers()
-        if configured:
-            default_broker = config.get_broker_for_symbol("_default")
-            print(f"\n   Default broker: {default_broker}")
-        
-    except Exception as e:
-        print(f"\n⚠ Could not load configuration: {e}")
+    # Logging
+    print(f"\n📝 Logging:")
+    log_config = config.get_logging_config()
+    print(f"   Level: {log_config.level}")
+    print(f"   Format: {log_config.format}")
+    
+    # Brokers summary
+    print(f"\n🏦 Brokers:")
+    configured = config.get_configured_brokers()
+    if configured:
+        for broker in configured:
+            print(f"   ✓ {broker}")
+        default_broker = config.get_broker_for_symbol("_default")
+        print(f"\n   Default broker: {default_broker}")
+    else:
+        print("   ○ No brokers configured")
     
     print()
     return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    """Validate configuration files."""
+    """Validate configuration."""
     print("Validating configuration...\n")
     
-    issues = validate_startup()
+    issues: List[Tuple[str, str]] = []  # (severity, message)
     
-    errors = [i for i in issues if i.severity == "ERROR"]
-    warnings = [i for i in issues if i.severity == "WARN"]
-    infos = [i for i in issues if i.severity == "INFO"]
+    config = ConfigurationManager()
+    
+    # Check database
+    db_config = config.get_database_config()
+    if not db_config.url:
+        issues.append(("WARN", "DATABASE_URL not set, using default SQLite"))
+    
+    # Check brokers
+    alpaca = config.get_alpaca_config()
+    tastytrade = config.get_tastytrade_config()
+    
+    if not alpaca.is_configured and not tastytrade.is_configured:
+        issues.append(("ERROR", "No broker configured - at least one broker is required"))
+    
+    if alpaca.api_key and not alpaca.secret_key:
+        issues.append(("ERROR", "Alpaca API key set but secret key missing"))
+    elif alpaca.secret_key and not alpaca.api_key:
+        issues.append(("ERROR", "Alpaca secret key set but API key missing"))
+    
+    if alpaca.is_configured:
+        if alpaca.is_paper:
+            issues.append(("INFO", "Alpaca configured in PAPER mode"))
+        else:
+            issues.append(("WARN", "Alpaca configured in LIVE mode - real money trades!"))
+    
+    if tastytrade.username and not tastytrade.password:
+        issues.append(("ERROR", "Tastytrade username set but password missing"))
+    
+    if tastytrade.is_configured:
+        if tastytrade.is_sandbox:
+            issues.append(("INFO", "Tastytrade configured in SANDBOX mode"))
+        else:
+            issues.append(("WARN", "Tastytrade configured in LIVE mode - real money trades!"))
+    
+    # Check webhook security
+    webhook = config.get_webhook_config()
+    if webhook.security_enabled and not webhook.secret:
+        issues.append(("WARN", "Webhook security enabled but no secret set"))
+    
+    # Check Azure configuration if Azure deployment
+    if config.is_azure_deployment():
+        keyvault_url = os.environ.get("AZURE_KEYVAULT_URL")
+        appconfig_url = os.environ.get("AZURE_APP_CONFIGURATION_ENDPOINT")
+        
+        if not keyvault_url:
+            issues.append(("WARN", "AZURE_KEYVAULT_URL not set - secrets from environment variables"))
+        if not appconfig_url:
+            issues.append(("WARN", "AZURE_APP_CONFIGURATION_ENDPOINT not set - config from environment variables"))
     
     # Display issues
-    for issue in infos:
-        print(f"ℹ️  {issue}")
+    errors = [i for i in issues if i[0] == "ERROR"]
+    warnings = [i for i in issues if i[0] == "WARN"]
+    infos = [i for i in issues if i[0] == "INFO"]
     
-    for issue in warnings:
-        print(f"⚠️  {issue}")
+    for severity, message in infos:
+        print(f"ℹ️  {message}")
     
-    for issue in errors:
-        print(f"❌ {issue}")
+    for severity, message in warnings:
+        print(f"⚠️  {message}")
+    
+    for severity, message in errors:
+        print(f"❌ {message}")
     
     # Summary
     print()
@@ -212,13 +197,16 @@ def cmd_switch(args: argparse.Namespace) -> int:
     print(f"To switch from {current_env} to {target_env}:")
     print()
     print("  PowerShell:")
-    print(f'    $env:TRADING_BOT_ENV = "{target_env}"')
+    print(f'    $env:ENVIRONMENT = "{target_env}"')
     print()
     print("  Command Prompt:")
-    print(f'    set TRADING_BOT_ENV={target_env}')
+    print(f'    set ENVIRONMENT={target_env}')
     print()
     print("  Bash/Zsh:")
-    print(f'    export TRADING_BOT_ENV={target_env}')
+    print(f'    export ENVIRONMENT={target_env}')
+    print()
+    print("  Azure App Service (in Azure Portal):")
+    print(f'    Configuration → Application settings → ENVIRONMENT = {target_env}')
     print()
     
     if target_env == "live":
@@ -230,68 +218,141 @@ def cmd_switch(args: argparse.Namespace) -> int:
 
 def cmd_show_brokers(args: argparse.Namespace) -> int:
     """Show broker configuration status."""
-    print("="*60)
+    print("=" * 60)
     print("Broker Configuration")
-    print("="*60)
+    print("=" * 60)
+    
+    config = ConfigurationManager()
+    
+    # Alpaca
+    print("\n🔸 Alpaca")
+    alpaca = config.get_alpaca_config()
+    if alpaca.is_configured:
+        print(f"   Status: ✓ Configured")
+        print(f"   Mode: {'PAPER' if alpaca.is_paper else 'LIVE'}")
+        masked_key = alpaca.api_key[:8] + "..." if len(alpaca.api_key) > 8 else alpaca.api_key
+        print(f"   API Key: {masked_key}")
+        print(f"   Base URL: {alpaca.base_url}")
+    else:
+        print(f"   Status: ○ Not configured")
+        if alpaca.api_key or alpaca.secret_key:
+            print(f"   ⚠ Partially configured - missing fields")
+        print(f"   Set ALPACA_API_KEY and ALPACA_SECRET_KEY environment variables")
+    
+    # Tastytrade
+    print("\n🔸 Tastytrade")
+    tastytrade = config.get_tastytrade_config()
+    if tastytrade.is_configured:
+        print(f"   Status: ✓ Configured")
+        print(f"   Mode: {'SANDBOX' if tastytrade.is_sandbox else 'LIVE'}")
+        print(f"   Username: {tastytrade.username}")
+        print(f"   Account ID: {tastytrade.account_id}")
+    else:
+        print(f"   Status: ○ Not configured")
+        if tastytrade.username or tastytrade.password or tastytrade.account_id:
+            print(f"   ⚠ Partially configured - missing fields")
+        print(f"   Set TASTYTRADE_USERNAME, TASTYTRADE_PASSWORD, TASTYTRADE_ACCOUNT_ID")
+    
+    # Symbol routing
+    configured = config.get_configured_brokers()
+    if configured:
+        print("\n🔸 Symbol Routing")
+        default_broker = config.get_broker_for_symbol("_default")
+        print(f"   Default: {default_broker}")
+    
+    print()
+    return 0
+
+
+async def _check_azure_connectivity() -> List[Tuple[str, str]]:
+    """Check Azure connectivity asynchronously."""
+    issues: List[Tuple[str, str]] = []
+    
+    keyvault_url = os.environ.get("AZURE_KEYVAULT_URL")
+    appconfig_url = os.environ.get("AZURE_APP_CONFIGURATION_ENDPOINT")
+    
+    if not keyvault_url and not appconfig_url:
+        issues.append(("INFO", "No Azure configuration set - using environment variables"))
+        return issues
     
     try:
-        config = ConfigurationManager()
+        provider = AzureConfigProvider()
+        await provider.initialize()
         
-        # Alpaca
-        print("\n🔸 Alpaca")
-        alpaca = config.get_alpaca_config()
-        if alpaca.is_configured:
-            print(f"   Status: ✓ Configured")
-            print(f"   Mode: {'PAPER' if alpaca.is_paper else 'LIVE'}")
-            print(f"   API Key: {alpaca.api_key[:8]}..." if len(alpaca.api_key) > 8 else f"   API Key: {alpaca.api_key}")
-            print(f"   Base URL: {alpaca.base_url}")
-        else:
-            print(f"   Status: ○ Not configured")
-            if alpaca.api_key or alpaca.secret_key:
-                print(f"   ⚠ Partially configured - missing fields")
+        # Try to read a test value
+        if keyvault_url:
+            issues.append(("OK", f"Connected to Key Vault: {keyvault_url}"))
         
-        # Tastytrade
-        print("\n🔸 Tastytrade")
-        tastytrade = config.get_tastytrade_config()
-        if tastytrade.is_configured:
-            print(f"   Status: ✓ Configured")
-            print(f"   Mode: {'SANDBOX' if tastytrade.is_sandbox else 'LIVE'}")
-            print(f"   Username: {tastytrade.username}")
-            print(f"   Account ID: {tastytrade.account_id}")
-        else:
-            print(f"   Status: ○ Not configured")
-            if tastytrade.username or tastytrade.password or tastytrade.account_id:
-                print(f"   ⚠ Partially configured - missing fields")
-        
-        # Symbol routing
-        configured = config.get_configured_brokers()
-        if configured:
-            print("\n🔸 Symbol Routing")
-            default_broker = config.get_broker_for_symbol("_default")
-            print(f"   Default: {default_broker}")
-            
-            # Check for symbol-specific routing
-            symbols_config = config.get_config("symbols", {})
-            custom_routing = []
-            if isinstance(symbols_config, dict):
-                for symbol, sym_config in symbols_config.items():
-                    if symbol in ("_default", "whitelist_enabled", "default_symbols"):
-                        continue
-                    broker = (
-                        sym_config.get("broker")
-                        if isinstance(sym_config, dict)
-                        else getattr(sym_config, "broker", None)
-                    )
-                    if broker:
-                        custom_routing.append((symbol, broker))
-            
-            if custom_routing:
-                print("   Custom routing:")
-                for symbol, broker in custom_routing:
-                    print(f"     {symbol} → {broker}")
+        if appconfig_url:
+            issues.append(("OK", f"Connected to App Configuration: {appconfig_url}"))
         
     except Exception as e:
-        print(f"\n❌ Error loading configuration: {e}")
+        issues.append(("ERROR", f"Azure connectivity failed: {str(e)}"))
+    
+    return issues
+
+
+def cmd_check_azure(args: argparse.Namespace) -> int:
+    """Check Azure connectivity and configuration."""
+    print("=" * 60)
+    print("Azure Configuration Check")
+    print("=" * 60)
+    
+    # Environment variables
+    print("\n📋 Environment Variables:")
+    azure_vars = [
+        "AZURE_KEYVAULT_URL",
+        "AZURE_APP_CONFIGURATION_ENDPOINT",
+        "AZURE_CLIENT_ID",
+        "AZURE_TENANT_ID",
+        "MSI_ENDPOINT",  # Managed Identity indicator
+        "IDENTITY_ENDPOINT",  # Managed Identity indicator
+    ]
+    
+    for var in azure_vars:
+        value = os.environ.get(var)
+        if value:
+            masked = value[:30] + "..." if len(value) > 30 else value
+            print(f"   ✓ {var}: {masked}")
+        else:
+            print(f"   ○ {var}: Not set")
+    
+    # Authentication method detection
+    print("\n🔐 Authentication:")
+    if os.environ.get("MSI_ENDPOINT") or os.environ.get("IDENTITY_ENDPOINT"):
+        print("   ✓ Managed Identity detected")
+    elif os.environ.get("AZURE_CLIENT_ID") and os.environ.get("AZURE_TENANT_ID"):
+        print("   ✓ Service Principal credentials detected")
+    elif os.environ.get("AZURE_CLIENT_ID"):
+        print("   ○ Only AZURE_CLIENT_ID set - may need AZURE_TENANT_ID")
+    else:
+        print("   ○ No explicit credentials - DefaultAzureCredential will try multiple methods")
+    
+    # Connectivity check
+    print("\n🔗 Connectivity Test:")
+    
+    config = ConfigurationManager()
+    if not config.is_azure_deployment():
+        print("   ℹ️ Not an Azure deployment - skipping connectivity test")
+        print("   Set AZURE_KEYVAULT_URL or AZURE_APP_CONFIGURATION_ENDPOINT to enable")
+        return 0
+    
+    try:
+        issues = asyncio.run(_check_azure_connectivity())
+        
+        for severity, message in issues:
+            if severity == "OK":
+                print(f"   ✓ {message}")
+            elif severity == "ERROR":
+                print(f"   ❌ {message}")
+            else:
+                print(f"   ℹ️ {message}")
+        
+        if any(i[0] == "ERROR" for i in issues):
+            return 1
+        
+    except Exception as e:
+        print(f"   ❌ Connectivity test failed: {e}")
         return 1
     
     print()
@@ -302,13 +363,10 @@ def main() -> int:
     """Main entry point for CLI."""
     parser = argparse.ArgumentParser(
         prog="trading-config",
-        description="Trading Bot Configuration Management",
+        description="Trading Bot Configuration Management (Azure-native)",
     )
     
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
-    
-    # init command
-    subparsers.add_parser("init", help="Initialize configuration files")
     
     # status command
     subparsers.add_parser("status", help="Show configuration status")
@@ -327,6 +385,9 @@ def main() -> int:
     # show-brokers command
     subparsers.add_parser("show-brokers", help="Show broker configuration")
     
+    # check-azure command
+    subparsers.add_parser("check-azure", help="Check Azure connectivity")
+    
     args = parser.parse_args()
     
     if args.command is None:
@@ -334,11 +395,11 @@ def main() -> int:
         return 0
     
     commands = {
-        "init": cmd_init,
         "status": cmd_status,
         "validate": cmd_validate,
         "switch": cmd_switch,
         "show-brokers": cmd_show_brokers,
+        "check-azure": cmd_check_azure,
     }
     
     return commands[args.command](args)

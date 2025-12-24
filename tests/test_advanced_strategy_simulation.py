@@ -13,7 +13,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from src.strategies.advanced_strategy import AdvancedTradingStrategy, PositionState, PositionDirection, TradePhase
+from src.strategies.dca_strategy import DCAStrategy
+from src.strategies.position_state import PositionState, PositionDirection, TradePhase
 from src.interfaces import TradingSignal, SignalType, Order, OrderType, OrderSide, OrderStatus
 from src.core import ConfigurationManager
 
@@ -174,12 +175,45 @@ def mock_risk_manager():
 
 @pytest.fixture
 def advanced_strategy(mock_config, mock_order_manager, mock_market_data, mock_risk_manager):
-    """Create advanced strategy instance.
+    """Create DCA strategy instance.
     
     Note: The strategy now uses martingale-only DCA (no support/resistance).
     DCA triggers are based purely on loss percentage thresholds.
     """
-    strategy = AdvancedTradingStrategy(mock_config, mock_order_manager, mock_market_data, mock_risk_manager)
+    from decimal import Decimal
+    from src.domain.bot_models import (
+        BotConfiguration, DCAConfig, BotType, PositionMode,
+        AveragingOrdersConfig, TakeProfitConfig, StopLossConfig,
+        QuickSetupPreset
+    )
+    
+    bot_config = BotConfiguration(
+        symbol="TEST",
+        exchange="alpaca",
+        bot_type=BotType.DCA,
+        position_mode=PositionMode.LONG,
+        dca_config=DCAConfig(
+            quick_setup=QuickSetupPreset.MID_TERM,
+            averaging_orders=AveragingOrdersConfig(
+                orders_count=5,
+                step_percent=Decimal("2.0"),
+                amount_multiplier=Decimal("1.5"),
+            ),
+            take_profit=TakeProfitConfig(
+                enabled=True,
+                price_change_percent=Decimal("3.0"),  # 3% profit activation
+                trailing_deviation=Decimal("2.0"),  # 2% trailing
+            ),
+            stop_loss=StopLossConfig(enabled=True, percent=Decimal("10.0")),
+        ),
+    )
+    
+    strategy = DCAStrategy(
+        order_manager=mock_order_manager,
+        market_data=mock_market_data,
+        risk_manager=mock_risk_manager,
+        bot_config=bot_config
+    )
     return strategy
 
 

@@ -9,6 +9,8 @@ Architecture:
 - MartingaleSafetyPolicy: Immutable rules and thresholds from config
 - MartingaleSafetyState: Mutable runtime tracking (losses, counters)
 - MartingaleSafetyManager: Orchestrates policy + state for safety checks
+
+Configuration is driven exclusively by bot's DCAConfig from database.
 """
 
 import sys
@@ -17,7 +19,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, UTC
 from dataclasses import dataclass, field
 import structlog
-from src.interfaces import IConfigurationManager
+from src.domain.bot_models import DCAConfig, RiskManagementConfig
 from src.exceptions import RiskLimitException
 
 logger = structlog.get_logger(__name__)
@@ -135,47 +137,48 @@ class MartingaleConfigValidator:
         return warnings, is_critical
     
     @staticmethod
-    def validate_and_confirm(config_manager: IConfigurationManager) -> bool:
+    def validate_and_confirm_dca_config(dca_config: Optional['DCAConfig']) -> bool:
         """
-        Validate martingale configuration and require user confirmation if risky.
+        Validate DCA configuration from database and require user confirmation if risky.
         
         Args:
-            config_manager: Configuration manager instance
+            dca_config: DCA configuration from bot's database record
             
         Returns:
             True if safe or user confirms, False if user rejects
             
         Raises:
             RiskLimitException: If configuration is critically dangerous and should not proceed
+            ValueError: If dca_config is None
         """
+        if dca_config is None:
+            raise ValueError("dca_config is required - configuration must come from database")
+        
         all_warnings = []
         has_critical = False
         
-        # Check long strategy
-        long_martingale = config_manager.get_config("strategies.long_strategy.martingale", {})
-        if long_martingale:
+        # Convert DCAConfig to dict for validation
+        # Check risk_management settings
+        if dca_config.risk_management:
+            risk_config = {
+                'enabled': True,
+                'max_account_risk_percent': dca_config.risk_management.max_account_risk_percent,
+                'daily_loss_limit_percent': dca_config.risk_management.daily_loss_limit_percent,
+                'max_consecutive_losses': dca_config.averaging_orders.orders_count if dca_config.averaging_orders else 3
+            }
             warnings, is_crit = MartingaleConfigValidator.validate_martingale_config(
-                long_martingale, "LONG"
-            )
-            all_warnings.extend(warnings)
-            has_critical = has_critical or is_crit
-        
-        # Check short strategy
-        short_martingale = config_manager.get_config("strategies.short_strategy.martingale", {})
-        if short_martingale:
-            warnings, is_crit = MartingaleConfigValidator.validate_martingale_config(
-                short_martingale, "SHORT"
+                risk_config, "DCA"
             )
             all_warnings.extend(warnings)
             has_critical = has_critical or is_crit
         
         if not all_warnings:
-            logger.info("✅ Martingale configuration validated - no risks detected")
+            logger.info("✅ DCA configuration validated - no risks detected")
             return True
         
         # Display warnings
         print("\n" + "=" * 80)
-        print("⚠️  MARTINGALE STRATEGY RISK WARNINGS ⚠️")
+        print("⚠️  DCA STRATEGY RISK WARNINGS ⚠️")
         print("=" * 80)
         for warning in all_warnings:
             print(f"  {warning}")
@@ -183,38 +186,34 @@ class MartingaleConfigValidator:
         
         if has_critical:
             print("\n🚨 CRITICAL RISK DETECTED 🚨")
-            print("The current martingale configuration poses EXTREME risk of total account loss.")
+            print("The current DCA configuration poses EXTREME risk of total account loss.")
             print("\nRECOMMENDED ACTIONS:")
-            print("  1. Set enabled: false to disable martingale")
-            print("  2. Reduce base_multiplier to 1.5 or lower")
-            print("  3. Reduce max_multiplier to 4.0 or lower")
-            print("  4. Reduce max_consecutive_losses to 3 or lower")
-            print("  5. Add max_account_risk_percent: 25.0")
-            print("  6. Add daily_loss_limit_percent: 10.0")
-            print("\nFor safer alternatives, use technical DCA (support_averaging) instead.")
+            print("  1. Reduce orders_count to 3 or lower")
+            print("  2. Add reasonable max_account_risk_percent")
+            print("  3. Add daily_loss_limit_percent")
             print("=" * 80)
             
             # Require explicit confirmation for critical risks
             response = input("\nDo you REALLY want to proceed with this configuration? (type 'YES I ACCEPT THE RISK'): ")
             if response != 'YES I ACCEPT THE RISK':
-                logger.error("User rejected risky martingale configuration")
+                logger.error("User rejected risky DCA configuration")
                 raise RiskLimitException(
-                    "Martingale configuration rejected due to critical risk. "
-                    "Please adjust settings in config/settings.toml"
+                    "DCA configuration rejected due to critical risk. "
+                    "Please adjust settings in the database."
                 )
             
-            logger.warning("User accepted critical martingale risk - proceeding with extreme caution")
+            logger.warning("User accepted critical DCA risk - proceeding with extreme caution")
             return True
         else:
             # Non-critical warnings - simple confirmation
             response = input("\nDo you acknowledge these risks and want to continue? (yes/NO): ")
             if response.lower() != 'yes':
-                logger.info("User rejected martingale configuration")
+                logger.info("User rejected DCA configuration")
                 print("\n✅ Exiting to allow configuration adjustments.")
-                print("   Please review and update martingale settings in config/settings.toml")
+                print("   Please review and update DCA settings in the database.")
                 return False
             
-            logger.info("User acknowledged martingale risks and confirmed")
+            logger.info("User acknowledged DCA risks and confirmed")
             return True
 
 
@@ -242,35 +241,54 @@ class MartingaleSafetyPolicy:
     default_account_value: float = 100000.0
     
     @classmethod
-    def from_config(cls, config_manager: IConfigurationManager) -> 'MartingaleSafetyPolicy':
+    def from_dca_config(cls, dca_config: Optional[DCAConfig]) -> 'MartingaleSafetyPolicy':
         """
-        Create a policy from configuration manager.
+        Create a policy from DCAConfig (database configuration).
         
         Args:
-            config_manager: Configuration manager instance
+            dca_config: DCA configuration from bot's database record
             
         Returns:
             MartingaleSafetyPolicy: Immutable policy object
+            
+        Raises:
+            ValueError: If dca_config is None or missing risk_management
         """
+        if dca_config is None:
+            raise ValueError("dca_config is required - configuration must come from database")
+        
+        risk_config = dca_config.risk_management
+        if risk_config is None:
+            raise ValueError("dca_config.risk_management is required in database")
+        
+        # Helper to safely get percentage values with fallback
+        def get_risk_percent(config, field_name: str, fallback: float) -> float:
+            """Get a percentage field from config, returning fallback if missing."""
+            if hasattr(config, field_name):
+                value = getattr(config, field_name)
+                if value is not None:
+                    return float(value) / 100.0
+            return fallback
+        
+        # Convert percentages to decimals with graceful fallbacks for legacy/incompatible configs
+        # This handles both old-style and Bitsgap-style RiskManagementConfig
+        max_account_risk = get_risk_percent(risk_config, 'max_account_risk_percent', 0.25)
+        if max_account_risk == 0.25 and hasattr(risk_config, 'allowed_total_loss_percent'):
+            # Try Bitsgap-style field as fallback
+            if risk_config.allowed_total_loss_percent:
+                max_account_risk = float(risk_config.allowed_total_loss_percent) / 100.0
+        
+        daily_loss = get_risk_percent(risk_config, 'daily_loss_limit_percent', 0.10)
+        weekly_loss = get_risk_percent(risk_config, 'weekly_loss_limit_percent', 0.20)
+        max_single = get_risk_percent(risk_config, 'max_single_loss_percent', 0.10)
+        
         return cls(
-            max_account_risk=config_manager.get_config(
-                "strategies.long_strategy.martingale.max_account_risk_percent", 25.0
-            ) / 100.0,
-            daily_loss_limit=config_manager.get_config(
-                "strategies.long_strategy.martingale.daily_loss_limit_percent", 10.0
-            ) / 100.0,
-            weekly_loss_limit=config_manager.get_config(
-                "strategies.long_strategy.martingale.weekly_loss_limit_percent", 20.0
-            ) / 100.0,
-            max_single_loss=config_manager.get_config(
-                "strategies.long_strategy.martingale.max_single_loss_percent", 10.0
-            ) / 100.0,
-            default_max_consecutive_losses=config_manager.get_config(
-                "strategies.long_strategy.martingale.max_consecutive_losses", 3
-            ),
-            default_account_value=config_manager.get_config(
-                "trading.account_value", 100000.0
-            )
+            max_account_risk=max_account_risk,
+            daily_loss_limit=daily_loss,
+            weekly_loss_limit=weekly_loss,
+            max_single_loss=max_single,
+            default_max_consecutive_losses=dca_config.averaging_orders.orders_count if dca_config.averaging_orders else 3,
+            default_account_value=100000.0  # Default, should be provided at runtime
         )
     
     def check_consecutive_losses(self, current: int, max_allowed: int) -> Tuple[bool, Optional[str]]:
@@ -419,20 +437,28 @@ class MartingaleSafetyManager:
     to provide real-time safety checks and prevent catastrophic losses.
     
     Architecture:
-        - Policy: Immutable rules/thresholds from config
+        - Policy: Immutable rules/thresholds from database config
         - State: Mutable runtime tracking (losses, counters)
         - Manager: Orchestrates checks using both
+        
+    Configuration is driven exclusively by bot's DCAConfig from database.
     """
     
-    def __init__(self, config_manager: IConfigurationManager):
+    def __init__(self, dca_config: Optional[DCAConfig]):
         """
         Initialize safety manager with policy and state.
         
         Args:
-            config_manager: Configuration manager instance
+            dca_config: DCA configuration from bot's database record (REQUIRED)
+            
+        Raises:
+            ValueError: If dca_config is None
         """
-        self.config_manager = config_manager
-        self.policy = MartingaleSafetyPolicy.from_config(config_manager)
+        if dca_config is None:
+            raise ValueError("dca_config is required - configuration must come from database")
+        
+        self._dca_config = dca_config
+        self.policy = MartingaleSafetyPolicy.from_dca_config(dca_config)
         self.state = MartingaleSafetyState()
         
         logger.info(
@@ -441,6 +467,22 @@ class MartingaleSafetyManager:
             daily_limit_pct=self.policy.daily_loss_limit * 100,
             weekly_limit_pct=self.policy.weekly_loss_limit * 100
         )
+    
+    def set_dca_config(self, dca_config: Optional[DCAConfig]) -> None:
+        """
+        Update the DCA configuration at runtime.
+        
+        Args:
+            dca_config: New DCA configuration from the database
+            
+        Raises:
+            ValueError: If dca_config is None
+        """
+        if dca_config is None:
+            raise ValueError("dca_config cannot be None - database configuration required")
+        self._dca_config = dca_config
+        self.policy = MartingaleSafetyPolicy.from_dca_config(dca_config)
+        logger.info("MartingaleSafetyManager configuration updated")
     
     async def check_safety(
         self, 

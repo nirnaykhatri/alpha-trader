@@ -69,7 +69,7 @@ def generate_webhook_secret():
     
     secret = secrets.token_hex(32)
     print(f"   🔑 Generated secret: {secret}")
-    print(f"   💡 Add this to your config.yaml under api.webhook.secret")
+    print(f"   💡 Add this to config/settings.toml under api.webhook.secret")
     
     return secret
 
@@ -113,11 +113,11 @@ def validate_config():
     """Validate the configuration file."""
     print("\n⚙️  Validating configuration...")
     
-    config_file = Path("config.yaml")
+    config_file = Path("config/settings.toml")
     
     if not config_file.exists():
-        print("   ❌ config.yaml not found")
-        print("   💡 Make sure config.yaml exists in the current directory")
+        print("   ❌ config/settings.toml not found")
+        print("   💡 Make sure config/settings.toml exists")
         return False
     
     try:
@@ -166,11 +166,11 @@ def show_next_steps():
     print("1. 🔑 Get Alpaca API credentials:")
     print("   • Sign up at https://alpaca.markets/")
     print("   • Generate paper trading API keys")
-    print("   • Add them to config.yaml")
+    print("   • Add them to config/settings.toml or .env")
     
     print("\n2. 🔐 Set webhook secret:")
     print("   • Use the generated secret above")
-    print("   • Add it to config.yaml under api.webhook.secret")
+    print("   • Add it to config/settings.toml under api.webhook.secret")
     
     print("\n3. 📊 Configure TradingView:")
     print("   • Create alerts with webhook notifications")

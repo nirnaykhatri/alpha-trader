@@ -1,0 +1,122 @@
+# Docker Ignore File
+# ====================
+# Excludes files from Docker build context to reduce image size and build time
+
+# Git
+.git/
+.gitignore
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# Testing
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+.hypothesis/
+coverage.xml
+test_results.txt
+tests/
+
+# Documentation (not needed in container)
+docs/
+*.md
+!README.md
+
+# Local configuration and logs
+*.log
+logs/
+*.sqlite
+*.db
+data/*.db
+
+# IDE specific
+*.sublime-project
+*.sublime-workspace
+
+# MacOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# Environment files (use Azure Key Vault instead)
+.env
+.env.*
+*.env
+
+# Ngrok (not used in Azure)
+*ngrok*
+ngrok.exe
+ngrok.yml
+
+# Local scripts not needed in container
+*.bat
+*.ps1
+*.sh
+!docker-entrypoint.sh
+
+# Infrastructure as Code
+infra/
+*.bicep
+*.bicepparam
+
+# GitHub workflows (not needed in container)
+.github/
+
+# Trading terminal (separate deployment)
+trading-terminal/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Coverage and test artifacts
+coverage.xml
+.coverage
+htmlcov/
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Scripts directory (deployment scripts)
+scripts/
+
+# Examples and samples
+examples.py
+tradingview_webhook_example.json

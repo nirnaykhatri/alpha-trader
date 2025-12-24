@@ -3,12 +3,18 @@ Property-based tests for risk management invariants.
 
 These tests validate that risk management rules are NEVER violated,
 regardless of market conditions, position sizes, or loss amounts.
+
+Requires: pip install hypothesis
 """
 
 import pytest
+from decimal import Decimal
+
+# Skip all tests if hypothesis is not installed
+pytest.importorskip("hypothesis")
+
 from hypothesis import given, assume, settings, strategies as st
 from hypothesis import HealthCheck
-from decimal import Decimal
 
 # Import risk management components
 import sys

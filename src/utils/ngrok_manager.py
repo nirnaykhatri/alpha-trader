@@ -143,7 +143,7 @@ class NgrokManager:
         if not token:
             print("⚠️  No ngrok auth token configured")
             print("   You can set NGROK_AUTH_TOKEN environment variable")
-            print("   or add 'ngrok.auth_token' to your config.yaml")
+            print("   or store 'ngrok-auth-token' in Azure Key Vault")
             print("   Get a free token from: https://ngrok.com/")
             print("   Note: Free tier has limitations but works for testing")
             print("   ℹ️  Bot will continue with ngrok free tier limitations")

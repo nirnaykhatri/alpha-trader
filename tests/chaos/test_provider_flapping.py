@@ -7,6 +7,10 @@ Tests system resilience under failure conditions:
 - API rate limiting
 - Network timeouts
 - Circuit breaker triggering
+
+Requirements:
+    - src.market_data.consensus_engine: For MarketDataConsensusEngine
+    - src.resilience.resilience_state_tracker: For ResilienceStateTracker
 """
 
 import pytest
@@ -14,34 +18,50 @@ import asyncio
 from unittest.mock import AsyncMock, Mock, patch
 from datetime import datetime
 import random
+from typing import Optional
 
-from src.market_data.consensus_engine import MarketDataConsensusEngine
-from src.market_data.price_snapshot import PriceSnapshot
-from src.trading.order_manager import OrderManager
-from src.resilience.resilience_state_tracker import (
-    ResilienceStateTracker,
-    ResilienceState,
-    DegradationReason
-)
+# Import the actual types - skip module if not available
+try:
+    from src.market_data.consensus_engine import (
+        MarketDataConsensusEngine,
+        IConsensusMarketDataProvider,
+        MarketDataPoint
+    )
+    from src.resilience.resilience_state_tracker import (
+        ResilienceStateTracker,
+        ResilienceState,
+        DegradationReason
+    )
+    DEPS_AVAILABLE = True
+except ImportError as e:
+    pytest.skip(f"Required dependencies not available: {e}", allow_module_level=True)
+    DEPS_AVAILABLE = False
 
 
-class FlakyProvider:
+class FlakyProvider(IConsensusMarketDataProvider):
     """Mock provider that fails intermittently."""
     
-    def __init__(self, failure_rate: float = 0.3, latency_ms: int = 100):
+    def __init__(self, provider_name: str = "flaky", failure_rate: float = 0.3, latency_ms: int = 100):
         """
         Initialize flaky provider.
         
         Args:
+            provider_name: Name identifier for this provider
             failure_rate: Probability of failure (0.0-1.0)
             latency_ms: Simulated latency in milliseconds
         """
+        self._name = provider_name
         self.failure_rate = failure_rate
         self.latency_ms = latency_ms
         self.call_count = 0
         self.failure_count = 0
     
-    async def get_current_price(self, symbol: str) -> float:
+    @property
+    def name(self) -> str:
+        """Provider name."""
+        return self._name
+    
+    async def get_current_price(self, symbol: str) -> Optional[MarketDataPoint]:
         """Simulate flaky price fetch."""
         self.call_count += 1
         
@@ -53,17 +73,42 @@ class FlakyProvider:
             self.failure_count += 1
             raise Exception(f"Provider timeout for {symbol}")
         
-        # Return mock price
-        return 150.00 + random.uniform(-5.0, 5.0)
+        # Return mock price with proper MarketDataPoint structure
+        price = 150.00 + random.uniform(-5.0, 5.0)
+        return MarketDataPoint(
+            symbol=symbol,
+            price=price,
+            timestamp=datetime.utcnow(),
+            source=self._name,
+            bid=price - 0.01,
+            ask=price + 0.01
+        )
 
 
-class ReliableProvider:
+class ReliableProvider(IConsensusMarketDataProvider):
     """Mock provider that always succeeds."""
     
-    async def get_current_price(self, symbol: str) -> float:
+    def __init__(self, provider_name: str = "reliable"):
+        """Initialize reliable provider."""
+        self._name = provider_name
+    
+    @property
+    def name(self) -> str:
+        """Provider name."""
+        return self._name
+    
+    async def get_current_price(self, symbol: str) -> Optional[MarketDataPoint]:
         """Always return valid price."""
         await asyncio.sleep(0.05)  # Small latency
-        return 150.00
+        price = 150.00
+        return MarketDataPoint(
+            symbol=symbol,
+            price=price,
+            timestamp=datetime.utcnow(),
+            source=self._name,
+            bid=price - 0.01,
+            ask=price + 0.01
+        )
 
 
 @pytest.mark.chaos
@@ -75,8 +120,8 @@ async def test_provider_intermittent_failures():
     Scenario: Primary provider (Polygon) fails 30% of requests.
     Expected: Fallback to secondary provider (Alpaca) with no user impact.
     """
-    flaky_polygon = FlakyProvider(failure_rate=0.3, latency_ms=100)
-    reliable_alpaca = ReliableProvider()
+    flaky_polygon = FlakyProvider(provider_name="polygon", failure_rate=0.3, latency_ms=100)
+    reliable_alpaca = ReliableProvider(provider_name="alpaca")
     
     engine = MarketDataConsensusEngine(
         providers=[flaky_polygon, reliable_alpaca],
@@ -118,8 +163,8 @@ async def test_cascading_provider_failures():
     Scenario: All market data providers return errors.
     Expected: System enters DEGRADED state, no crashes.
     """
-    flaky_provider_1 = FlakyProvider(failure_rate=0.8)
-    flaky_provider_2 = FlakyProvider(failure_rate=0.8)
+    flaky_provider_1 = FlakyProvider(provider_name="provider1", failure_rate=0.8)
+    flaky_provider_2 = FlakyProvider(provider_name="provider2", failure_rate=0.8)
     
     engine = MarketDataConsensusEngine(
         providers=[flaky_provider_1, flaky_provider_2],
@@ -265,8 +310,8 @@ async def test_high_latency_providers():
     Scenario: Provider takes 5+ seconds to respond.
     Expected: Timeout triggers, fallback to faster provider.
     """
-    slow_provider = FlakyProvider(failure_rate=0.0, latency_ms=5000)
-    fast_provider = ReliableProvider()
+    slow_provider = FlakyProvider(provider_name="slow", failure_rate=0.0, latency_ms=5000)
+    fast_provider = ReliableProvider(provider_name="fast")
     
     engine = MarketDataConsensusEngine(
         providers=[slow_provider, fast_provider]

@@ -203,8 +203,14 @@ class ConsensusResult:
         return self.reliability == DataReliability.HIGH
 
 
-class IMarketDataProvider(ABC):
-    """Interface for market data providers."""
+class IConsensusMarketDataProvider(ABC):
+    """
+    Interface for market data providers used by the consensus engine.
+    
+    Note: This is distinct from IMarketDataProvider in src.interfaces which returns
+    simple float prices. This interface returns rich MarketDataPoint objects with
+    metadata for consensus calculations.
+    """
     
     @property
     @abstractmethod
@@ -215,7 +221,7 @@ class IMarketDataProvider(ABC):
     @abstractmethod
     async def get_current_price(self, symbol: str) -> Optional[MarketDataPoint]:
         """
-        Fetch current market price.
+        Fetch current market price with metadata.
         
         Returns:
             MarketDataPoint or None if fetch failed
@@ -243,7 +249,7 @@ class MarketDataConsensusEngine:
     
     def __init__(
         self,
-        providers: List[IMarketDataProvider],
+        providers: List[IConsensusMarketDataProvider],
         spread_threshold: float = 0.01,  # 1% max spread
         staleness_threshold: float = 60.0,  # 60 seconds max age
         circuit_breaker_enabled: bool = True,
@@ -379,7 +385,7 @@ class MarketDataConsensusEngine:
     
     async def _fetch_with_tracking(
         self,
-        provider: IMarketDataProvider,
+        provider: IConsensusMarketDataProvider,
         symbol: str
     ) -> Optional[MarketDataPoint]:
         """

@@ -133,7 +133,7 @@ class StartupValidationService:
                             level=ValidationLevel.ERROR,
                             message=warning,
                             component="schema",
-                            suggestion="Fix schema validation error in config/settings.toml"
+                            suggestion="Fix schema validation error in Azure App Configuration or environment variables"
                         ))
                     elif ValidationSeverity.WARN.value in warning:
                         self.issues.append(ValidationIssue(
@@ -153,7 +153,7 @@ class StartupValidationService:
                 level=ValidationLevel.ERROR,
                 message=f"Configuration schema validation failed: {e}",
                 component="schema",
-                suggestion="Check config/settings.toml for syntax errors"
+                suggestion="Check Azure App Configuration or environment variables"
             ))
     
     def _validate_configuration(self) -> None:
@@ -293,7 +293,7 @@ class StartupValidationService:
                     print(f"      💡 {issue.suggestion}")
             print("=" * 60)
             print("\n❌ Startup blocked due to critical configuration errors.")
-            print("💡 Fix these issues in config/settings.toml and try again.")
+            print("💡 Fix these issues in Azure App Configuration or environment variables.")
             return
         
         # Print warnings

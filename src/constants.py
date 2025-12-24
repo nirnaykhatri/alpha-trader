@@ -89,6 +89,43 @@ class TradingConstants:
     ORDER_TYPE_STOP_LIMIT: Final[str] = "stop_limit"
 
 
+class RiskManagementConstants:
+    """Constants related to risk management and position sizing."""
+    
+    # Default risk parameters
+    DEFAULT_RISK_PER_TRADE: Final[float] = 0.02  # 2% risk per trade
+    DEFAULT_MAX_PORTFOLIO_RISK: Final[float] = 0.10  # 10% max portfolio risk
+    DEFAULT_MAX_POSITION_SIZE: Final[int] = 1000  # Max shares per position
+    DEFAULT_MAX_DAILY_TRADES: Final[int] = 50  # Max trades per day
+    
+    # Position sizing methods
+    SIZING_METHOD_FIXED: Final[str] = "fixed"
+    SIZING_METHOD_PERCENTAGE: Final[str] = "percentage"
+    SIZING_METHOD_RISK_BASED: Final[str] = "risk_based"
+    
+    # Fixed sizing defaults
+    DEFAULT_FIXED_QUANTITY: Final[int] = 100
+    MAX_FIXED_QUANTITY: Final[int] = 10000
+    MIN_FIXED_QUANTITY: Final[int] = 1
+    
+    # Percentage sizing defaults
+    DEFAULT_INITIAL_PORTFOLIO_PCT: Final[float] = 0.01  # 1% of account value
+    DEFAULT_CASH_RESERVE_PCT: Final[float] = 0.50  # Assume 50% in cash as fallback
+    
+    # Martingale/Averaging safety limits
+    DEFAULT_AVERAGING_MULTIPLIER: Final[float] = 2.0
+    MAX_AVERAGING_MULTIPLIER: Final[float] = 4.0
+    MAX_SINGLE_POSITION_PCT: Final[float] = 0.50  # 50% max of cash for single position
+    MIN_MARTINGALE_RATIO: Final[float] = 1.5  # If can't achieve 1.5x, revert to base
+    
+    # Price validation
+    MIN_VALID_PRICE: Final[float] = 0.0
+    MAX_REASONABLE_PRICE: Final[float] = 1_000_000.0  # $1M per share is unreasonable
+    
+    # Symbol whitelist defaults
+    DEFAULT_WHITELIST_ENABLED: Final[bool] = True
+
+
 class DatabaseConstants:
     """Constants related to database operations."""
     
@@ -255,3 +292,43 @@ class TunnelConstants:
     # Timeout values
     CLOUDFLARE_MAX_WAIT_SECONDS: Final[int] = 30
     LOCALTUNNEL_MAX_WAIT_SECONDS: Final[int] = 20
+
+
+class AssetClassificationConstants:
+    """
+    Constants for inferring asset class from trading symbols.
+    
+    These sets define patterns used to classify trading symbols into
+    asset classes (crypto, forex, etf, index, commodity, stock).
+    
+    Centralizing these allows easy configuration updates without code changes.
+    """
+    
+    # Cryptocurrency base symbols
+    CRYPTO_BASES: Final[frozenset] = frozenset({
+        "BTC", "ETH", "SOL", "ADA", "DOT", "AVAX", "MATIC", "LINK", 
+        "UNI", "ATOM", "XRP", "DOGE", "LTC", "BCH", "ETC", "XLM"
+    })
+    
+    # Major forex currency codes (ISO 4217)
+    FOREX_CURRENCIES: Final[frozenset] = frozenset({
+        "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD", "USD"
+    })
+    
+    # Common ETF symbols (non-exhaustive, for heuristics)
+    ETF_SYMBOLS: Final[frozenset] = frozenset({
+        "SPY", "QQQ", "IWM", "DIA", "VTI", "VOO", "VEA", "VWO", 
+        "GLD", "SLV", "USO", "XLF", "XLE", "XLK", "XLV", "XLI",
+        "ARKK", "ARKG", "ARKF", "ARKW", "ARKQ", "TLT", "HYG", "LQD"
+    })
+    
+    # Major index symbols
+    INDEX_PATTERNS: Final[frozenset] = frozenset({
+        "SPX", "NDX", "DJI", "VIX", "RUT", "DJIA"
+    })
+    
+    # Commodity futures base symbols
+    COMMODITY_SYMBOLS: Final[frozenset] = frozenset({
+        "CL", "GC", "SI", "NG", "ZC", "ZS", "ZW", "KC", "CT",
+        "HG", "PL", "PA", "RB", "HO", "LE", "HE", "ZM", "ZL"
+    })

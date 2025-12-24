@@ -9,15 +9,15 @@ import os
 import asyncio
 from datetime import datetime
 
-# Add the src directory to the path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+# Add the project root to the path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.configuration import ConfigurationManager
-from trading.alpaca_account_provider import AlpacaAccountProvider
-from risk.risk_manager import RiskManager
-from position.position_manager import PositionManager
-from database.database_manager import DatabaseManager
-from interfaces import TradingSignal, SignalType
+from src.config.configuration import ConfigurationManager
+from src.trading.alpaca_account_provider import AlpacaAccountProvider
+from src.risk.risk_manager import RiskManager
+from src.position.position_manager import PositionManager
+from src.database.database_manager import DatabaseManager
+from src.interfaces import TradingSignal, SignalType
 from alpaca.trading import TradingClient
 
 

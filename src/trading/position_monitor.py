@@ -19,24 +19,13 @@ Date: 2025
 
 import asyncio
 import logging
-from typing import Dict, Any, List, Optional, Callable, TYPE_CHECKING, Protocol
+from typing import Dict, Any, List, Optional, Callable, TYPE_CHECKING
 from datetime import datetime
 
 from src import Position
-from src.interfaces import IPositionManager, IConfigurationManager
+from src.interfaces import IPositionManager, IConfigurationManager, ITrailingProfitManager
 from src.utils import BoundedFetcher
 
-
-class ITrailingProfitManager(Protocol):
-    """Protocol for trailing profit managers used by PositionMonitor."""
-    
-    def check_profit_condition(self, position: Position, current_price: float) -> bool:
-        """Check if profit-taking condition is met."""
-        ...
-    
-    def update_trailing_state(self, position: Position, current_price: float) -> None:
-        """Update trailing stop state for a position."""
-        ...
 
 # Use TYPE_CHECKING to avoid circular import
 # BrokerSubsystem imports from src/trading which imports PositionMonitor

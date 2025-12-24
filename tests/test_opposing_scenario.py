@@ -16,7 +16,8 @@ from unittest.mock import AsyncMock, Mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from src.core.configuration import ConfigurationManager
-from src.strategies.advanced_strategy import AdvancedTradingStrategy, PositionState, PositionDirection, TradePhase
+from src.strategies.dca_strategy import DCAStrategy
+from src.strategies.position_state import PositionState, PositionDirection, TradePhase
 from src.interfaces import TradingSignal, SignalType
 
 
@@ -38,13 +39,41 @@ async def test_opposing_signals_scenario():
     mock_risk_manager.calculate_position_size.return_value = 100
     mock_order_manager.place_order.return_value = "order_123"
     
+    # Create BotConfiguration for DCAStrategy
+    from decimal import Decimal
+    from src.domain.bot_models import (
+        BotConfiguration, DCAConfig, BotType, PositionMode,
+        AveragingOrdersConfig, TakeProfitConfig, StopLossConfig,
+        QuickSetupPreset
+    )
+    
+    bot_config = BotConfiguration(
+        symbol="AAPL",
+        exchange="alpaca",
+        bot_type=BotType.DCA,
+        position_mode=PositionMode.LONG,
+        dca_config=DCAConfig(
+            quick_setup=QuickSetupPreset.MID_TERM,
+            averaging_orders=AveragingOrdersConfig(
+                orders_count=5,
+                step_percent=Decimal("2.0"),
+                amount_multiplier=Decimal("1.5"),
+            ),
+            take_profit=TakeProfitConfig(
+                enabled=True,
+                price_change_percent=Decimal("5.0"),
+                trailing_deviation=Decimal("2.0"),
+            ),
+            stop_loss=StopLossConfig(enabled=True, percent=Decimal("10.0")),
+        ),
+    )
+    
     # Create strategy instance
-    strategy = AdvancedTradingStrategy(
-        config=config,
+    strategy = DCAStrategy(
         order_manager=mock_order_manager,
         market_data=mock_market_data,
-        support_calculator=mock_support_calculator,
-        risk_manager=mock_risk_manager
+        risk_manager=mock_risk_manager,
+        bot_config=bot_config
     )
     
     symbol = "AAPL"

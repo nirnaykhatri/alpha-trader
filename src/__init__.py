@@ -12,7 +12,11 @@ from src.interfaces import (
     SignalType, OrderType, OrderSide, OrderStatus,
     ISignalListener, IOrderManager, IPositionManager,
     ISupportCalculator, ITrailingProfitManager, IRiskManager,
-    IMarketDataProvider, IConfigurationManager
+    IMarketDataProvider, IConfigurationManager,
+    # Callback type aliases
+    EventData, SignalCallback, ConfigChangeCallback, OrderCallback, PositionCallback,
+    AsyncEventCallback, AsyncSignalCallback, AsyncOrderCallback, 
+    AsyncPositionCallback, AsyncErrorCallback
 )
 
 from src.exceptions import (
@@ -34,6 +38,11 @@ __all__ = [
     "ISignalListener", "IOrderManager", "IPositionManager",
     "ISupportCalculator", "ITrailingProfitManager", "IRiskManager",
     "IMarketDataProvider", "IConfigurationManager",
+    
+    # Callback type aliases
+    "EventData", "SignalCallback", "ConfigChangeCallback", "OrderCallback", "PositionCallback",
+    "AsyncEventCallback", "AsyncSignalCallback", "AsyncOrderCallback", 
+    "AsyncPositionCallback", "AsyncErrorCallback",
     
     # Exceptions
     "TradingBotException", "SignalProcessingException",

@@ -27,9 +27,16 @@ Get up and running in **3 simple steps**:
     Run `python configure_bot.py` or edit `config/settings.toml` with your **Alpaca Keys**.
 3.  **Launch**:
     ```powershell
-    .\start_ngrok_standalone.bat  # Window 1: Start Tunnel
-    .\start_trading_bot.bat       # Window 2: Start Bot
+    # Local Development
+    .\start_trading_bot.bat
+    
+    # Or deploy to Azure (recommended for production)
+    # See docs/AZURE_DEPLOYMENT.md for details
     ```
+
+> **💡 Production Deployment**: For 24/7 operation, deploy to Azure Container Apps. 
+> The bot will automatically use the `AZURE_CONTAINER_APP_URL` environment variable 
+> for webhook endpoints. See [Azure Deployment Guide](./AZURE_DEPLOYMENT.md).
 
 ---
 
@@ -217,7 +224,7 @@ We don't rely on a single data point. The bot aggregates data from **5 sources**
 
 | Issue | Solution |
 | :--- | :--- |
-| **Webhook not received** | 1. Check if `ngrok` is running.<br>2. Verify the URL in TradingView matches the one in the ngrok window. |
+| **Webhook not received** | 1. Verify the webhook URL in TradingView matches your Azure Container App URL.<br>2. Check the `/health` endpoint is responding.<br>3. Ensure webhook secret matches in both TradingView and `settings.toml`. |
 | **"Insufficient Buying Power"** | 1. Check your Alpaca account balance.<br>2. Reduce `position_sizing.percentage` in `settings.toml`. |
 | **Orders not filling** | 1. Switch `order_type` to `market` in config (for testing).<br>2. If using `limit`, increase `limit_order_offset`. |
 | **Database Locked** | 1. Ensure no other bot instances are running.<br>2. Restart the bot to clear stale connections. |

@@ -1,0 +1,275 @@
+# CI/CD Pipeline for Trading Bot Deployment to Azure Container Apps
+#
+# Triggers:
+#   - Push to main branch (trading-bot code changes)
+#   - Manual workflow dispatch
+#
+# What it does:
+#   1. Runs tests and linting
+#   2. Builds Docker image
+#   3. Pushes to Azure Container Registry
+#   4. Deploys to Azure Container Apps
+#
+# Required secrets:
+#   - AZURE_CREDENTIALS: Service principal JSON for Azure login
+#   - AZURE_SUBSCRIPTION_ID: Azure subscription ID
+#
+# Required variables:
+#   - AZURE_RESOURCE_GROUP: Resource group name
+#   - AZURE_CONTAINER_REGISTRY: ACR name (e.g., 'cralphatrader')
+#   - AZURE_CONTAINER_APP_NAME: Container App name (e.g., 'ca-trading-bot')
+#   - AZURE_ENVIRONMENT: Deployment environment ('demo' or 'live')
+
+name: Deploy Trading Bot
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'config/**'
+      - 'Dockerfile'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/deploy-bot.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'demo'
+        type: choice
+        options:
+          - demo
+          - live
+      skip_tests:
+        description: 'Skip tests (emergency deployment)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ${{ vars.AZURE_CONTAINER_REGISTRY }}.azurecr.io
+  IMAGE_NAME: trading-bot
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # ============================================================================
+  # Test Job - Run tests and linting
+  # ============================================================================
+  test:
+    name: Test & Lint
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_tests != 'true' }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio ruff
+      
+      - name: Run linting with Ruff
+        run: |
+          ruff check src/ --output-format=github
+          ruff format src/ --check
+      
+      - name: Run tests
+        run: |
+          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+      
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  # ============================================================================
+  # Build Job - Build and push Docker image
+  # ============================================================================
+  build:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: always() && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+      - name: Log in to Azure Container Registry
+        run: |
+          az acr login --name ${{ vars.AZURE_CONTAINER_REGISTRY }}
+      
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+      
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+      
+      - name: Output image info
+        run: |
+          echo "### Docker Image Built :package:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Registry:** ${{ env.REGISTRY }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** ${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag:** ${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Digest:** ${{ steps.build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================================
+  # Deploy Job - Deploy to Azure Container Apps
+  # ============================================================================
+  deploy:
+    name: Deploy to Azure
+    runs-on: ubuntu-latest
+    needs: [build]
+    environment: 
+      name: ${{ github.event.inputs.environment || 'demo' }}
+      url: ${{ steps.deploy.outputs.app_url }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+      - name: Set environment variables
+        id: env
+        run: |
+          ENV="${{ github.event.inputs.environment || 'demo' }}"
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+          
+          # Set environment-specific configuration
+          if [ "$ENV" = "live" ]; then
+            echo "min_replicas=1" >> $GITHUB_OUTPUT
+            echo "max_replicas=3" >> $GITHUB_OUTPUT
+          else
+            echo "min_replicas=0" >> $GITHUB_OUTPUT
+            echo "max_replicas=1" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Deploy to Container Apps
+        id: deploy
+        run: |
+          # Update Container App with new image
+          az containerapp update \
+            --name ${{ vars.AZURE_CONTAINER_APP_NAME }} \
+            --resource-group ${{ vars.AZURE_RESOURCE_GROUP }} \
+            --image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image_tag }} \
+            --min-replicas ${{ steps.env.outputs.min_replicas }} \
+            --max-replicas ${{ steps.env.outputs.max_replicas }} \
+            --set-env-vars "ENVIRONMENT=${{ steps.env.outputs.environment }}"
+          
+          # Get the app URL
+          APP_URL=$(az containerapp show \
+            --name ${{ vars.AZURE_CONTAINER_APP_NAME }} \
+            --resource-group ${{ vars.AZURE_RESOURCE_GROUP }} \
+            --query 'properties.configuration.ingress.fqdn' \
+            --output tsv)
+          
+          echo "app_url=https://$APP_URL" >> $GITHUB_OUTPUT
+      
+      - name: Wait for deployment to stabilize
+        run: |
+          echo "Waiting for deployment to stabilize..."
+          sleep 30
+          
+          # Check health endpoint
+          APP_URL="${{ steps.deploy.outputs.app_url }}"
+          for i in {1..10}; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${APP_URL}/health" || echo "000")
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "✅ Health check passed!"
+              break
+            fi
+            echo "Attempt $i: Health check returned $HTTP_CODE, retrying..."
+            sleep 10
+          done
+          
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ Health check failed after 10 attempts"
+            exit 1
+          fi
+      
+      - name: Deployment Summary
+        run: |
+          echo "### Deployment Complete :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ steps.env.outputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**App URL:** ${{ steps.deploy.outputs.app_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Tag:** ${{ needs.build.outputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### Endpoints" >> $GITHUB_STEP_SUMMARY
+          echo "- Health: ${{ steps.deploy.outputs.app_url }}/health" >> $GITHUB_STEP_SUMMARY
+          echo "- Ready: ${{ steps.deploy.outputs.app_url }}/ready" >> $GITHUB_STEP_SUMMARY
+          echo "- Webhook: ${{ steps.deploy.outputs.app_url }}/webhook" >> $GITHUB_STEP_SUMMARY
+          echo "- API Docs: ${{ steps.deploy.outputs.app_url }}/docs" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================================
+  # Notify Job - Send deployment notification
+  # ============================================================================
+  notify:
+    name: Notify
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: always()
+    
+    steps:
+      - name: Send notification on success
+        if: needs.deploy.result == 'success'
+        run: |
+          echo "Deployment successful! 🎉"
+          # Add Slack/Teams notification here if needed
+      
+      - name: Send notification on failure
+        if: needs.deploy.result == 'failure'
+        run: |
+          echo "Deployment failed! ❌"
+          # Add Slack/Teams notification here if needed
+          exit 1

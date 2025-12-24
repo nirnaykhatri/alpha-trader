@@ -16,29 +16,14 @@ Thread-Safety: This service is stateless and safe for concurrent use.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Optional
 from decimal import Decimal, ROUND_HALF_UP
 
 from src import Order, OrderType, OrderSide, Position
 from src.core import get_logger
+from src.interfaces import IConfigurationManager, IMarketDataProvider
 
 logger = get_logger(__name__)
-
-
-class IConfigProvider(Protocol):
-    """Protocol for configuration access."""
-    
-    def get_config(self, key: str, default: any = None) -> any:
-        """Get configuration value by key."""
-        ...
-
-
-class IMarketDataProvider(Protocol):
-    """Protocol for market data access."""
-    
-    async def get_current_price(self, symbol: str) -> float:
-        """Get current market price for symbol."""
-        ...
 
 
 @dataclass(frozen=True)
@@ -91,7 +76,7 @@ class ExitPlanner:
     
     def __init__(
         self,
-        config: IConfigProvider,
+        config: IConfigurationManager,
         market_data: IMarketDataProvider
     ) -> None:
         """

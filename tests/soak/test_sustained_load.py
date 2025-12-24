@@ -7,23 +7,43 @@ Tests system behavior under sustained load:
 - Connection pool exhaustion
 - Task accumulation
 - Database connection leaks
+
+Requirements:
+    - psutil: For memory profiling
+    - prometheus_client: For metrics (imported from src.utils.metrics)
 """
 
 import pytest
 import asyncio
-import psutil
 import os
 from datetime import datetime, timedelta
 from typing import List, Dict
 import json
 
-from src.signals.signal_processor import SignalProcessor
-from src.database.database_manager import DatabaseManager
-from src.utils.metrics import (
-    webhook_processing_latency,
-    active_positions_gauge,
-    signal_processing_errors_total
-)
+# Skip entire module if psutil not available
+psutil = pytest.importorskip("psutil", reason="psutil required for soak tests")
+
+# Optional metrics imports - tests work without them
+try:
+    from src.utils.metrics import (
+        webhook_latency_seconds as webhook_processing_latency,
+        active_positions_gauge,
+        signals_rejected_total as signal_processing_errors_total
+    )
+    METRICS_AVAILABLE = True
+except ImportError:
+    METRICS_AVAILABLE = False
+    webhook_processing_latency = None
+    active_positions_gauge = None
+    signal_processing_errors_total = None
+
+# Optional imports - tests mock these anyway
+try:
+    from src.signals.signal_processor import SignalProcessor
+    from src.database.database_manager import DatabaseManager
+except ImportError:
+    SignalProcessor = None
+    DatabaseManager = None
 
 
 class MemoryProfiler:

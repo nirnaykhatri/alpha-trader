@@ -86,8 +86,8 @@ def run_quick_validation():
     print("\n🔍 Quick Strategy Validation...")
     
     try:
-        from src.strategies.advanced_strategy import AdvancedTradingStrategy
-        print("✅ Advanced strategy module loads correctly")
+        from src.strategies.dca_strategy import DCAStrategy
+        print("✅ DCA strategy module loads correctly")
         
         from src.interfaces import TradingSignal, SignalType, OrderType, OrderSide
         print("✅ Trading interfaces load correctly")

@@ -83,6 +83,10 @@ graph TB
 | 5 | ⚡ **Redis Caching Layer** | ~80% reduction in API calls | ✅ |
 | 6 | 🧪 **Property-Based Testing** | 2,000+ invariant validations with Hypothesis | ✅ |
 | 7 | 🏦 **Multi-Broker Architecture** | Alpaca + Tastytrade with unified routing | ✅ |
+| 8 | 🔀 **Admin Router Decomposition** | Split 2,943-line monolith → 10 focused routers | ✅ |
+| 9 | 🎯 **Strategy Interface Abstraction** | ITradingStrategy ABC with evaluate_* methods | ✅ |
+| 10 | 📦 **Pydantic Domain Models** | Validated models with v2 syntax | ✅ |
+| 11 | 🏷️ **Callback Type Aliases** | Type-safe callback definitions | ✅ |
 
 ### 📈 Impact Metrics
 
@@ -447,7 +451,235 @@ mindmap
 
 ---
 
-## 🔄 Command Pattern Infrastructure
+## � Admin Router Decomposition
+
+> **Status**: ✅ COMPLETED (Latest Refactoring)  
+> **Impact**: 2,943-line monolith → 10 focused router modules
+
+### 🏗️ Router Architecture
+
+```mermaid
+flowchart TB
+    subgraph Composite["🔀 AdminRouterComposite"]
+        direction TB
+        CREATE["create_admin_router()"]
+    end
+    
+    subgraph Routers["📦 Focused Routers"]
+        BASE["BaseAdminRouter<br/>~285 lines"]
+        ORDER["OrderRouter<br/>~241 lines"]
+        POS["PositionRouter<br/>~258 lines"]
+        LIFE["BotLifecycleRouter<br/>~238 lines"]
+        BOT["BotManagementRouter<br/>~610 lines"]
+        CFG["ConfigRouter<br/>~316 lines"]
+        FUND["FundRouter<br/>~340 lines"]
+        ANALYTICS["AnalyticsRouter<br/>~231 lines"]
+    end
+    
+    CREATE --> BASE
+    BASE --> ORDER
+    BASE --> POS
+    BASE --> LIFE
+    BASE --> BOT
+    BASE --> CFG
+    BASE --> FUND
+    BASE --> ANALYTICS
+```
+
+### 📁 Module Responsibilities
+
+| Module | Lines | Endpoints | Responsibility |
+|:-------|:-----:|:---------:|:---------------|
+| `base_router.py` | 285 | — | Base class, auth, shared DTOs |
+| `order_router.py` | 241 | 3 | Create, cancel, list orders |
+| `position_router.py` | 258 | 3 | Close positions, list positions |
+| `bot_lifecycle_router.py` | 238 | 4 | Start, stop, pause, resume bots |
+| `bot_management_router.py` | 610 | 5 | Bot CRUD, configuration |
+| `config_router.py` | 316 | 4 | Config CRUD, bulk update |
+| `fund_router.py` | 340 | 3 | Fund allocation, rebalancing |
+| `analytics_router.py` | 231 | 4 | Performance, P&L, analytics |
+| `admin_router_composite.py` | 299 | — | Combines all routers |
+
+### 🎯 Key Patterns Used
+
+```mermaid
+classDiagram
+    class BaseAdminRouter {
+        <<abstract>>
+        #auth_service: IAuthService
+        #router: APIRouter
+        +validate_auth(token) TokenClaims
+        #_infer_asset_class(symbol) AssetClass
+    }
+    
+    class OrderRouter {
+        +create_order(request) OrderResponse
+        +cancel_order(order_id) Response
+        +get_pending_orders() List~Order~
+    }
+    
+    class AdminRouterComposite {
+        -routers: List~BaseAdminRouter~
+        +combined_router: APIRouter
+    }
+    
+    BaseAdminRouter <|-- OrderRouter
+    BaseAdminRouter <|-- PositionRouter
+    BaseAdminRouter <|-- BotLifecycleRouter
+    AdminRouterComposite o-- BaseAdminRouter
+```
+
+### ✅ Benefits
+
+| Benefit | Before | After |
+|:--------|:------:|:-----:|
+| **File Size** | 2,943 lines | ~300 lines/module |
+| **SRP Compliance** | ❌ Mixed responsibilities | ✅ Single responsibility |
+| **Testability** | Hard to isolate | Easy to mock |
+| **Maintainability** | High cognitive load | Focused modules |
+
+---
+
+## 🎯 ITradingStrategy Interface
+
+> **Status**: ✅ COMPLETED (Latest Refactoring)  
+> **File**: `src/interfaces.py`
+
+### 📐 Interface Design
+
+```mermaid
+classDiagram
+    class ITradingStrategy {
+        <<interface>>
+        +name: str
+        +is_active: bool
+        +initialize() None
+        +close() None
+        +evaluate_entry(signal, context) StrategyEvaluation
+        +evaluate_exit(position, context) StrategyEvaluation
+        +evaluate_dca(position, context) StrategyEvaluation
+        +get_state() Dict
+    }
+    
+    class StrategyEvaluation {
+        +should_act: bool
+        +action_type: Optional~str~
+        +reason: str
+        +confidence: float
+        +recommended_size: Optional~float~
+        +metadata: Dict
+    }
+    
+    ITradingStrategy --> StrategyEvaluation : returns
+```
+
+### 🔑 Key Methods
+
+| Method | Purpose | Returns |
+|:-------|:--------|:--------|
+| `evaluate_entry()` | Assess if signal should open position | `StrategyEvaluation` |
+| `evaluate_exit()` | Assess if position should be closed | `StrategyEvaluation` |
+| `evaluate_dca()` | Assess if DCA should be executed | `StrategyEvaluation` |
+| `get_state()` | Return current strategy state for monitoring | `Dict[str, Any]` |
+
+---
+
+## 📦 Pydantic Domain Models
+
+> **Status**: ✅ COMPLETED (Latest Refactoring)  
+> **File**: `src/domain/pydantic_models.py`
+
+### 🏗️ Model Hierarchy
+
+```mermaid
+classDiagram
+    class TradingSignalModel {
+        +signal_id: str
+        +symbol: str
+        +signal_type: SignalType
+        +price: float
+        +quantity: Optional~float~
+        +timestamp: datetime
+        +to_dataclass() TradingSignal
+    }
+    
+    class OrderModel {
+        +order_id: str
+        +symbol: str
+        +quantity: float
+        +order_type: OrderType
+        +side: OrderSide
+        +price: Optional~float~
+        +to_dataclass() Order
+    }
+    
+    class PositionModel {
+        +symbol: str
+        +quantity: float
+        +avg_price: float
+        +current_price: float
+        +pnl_percent: float
+        +market_value: float
+        +to_dataclass() Position
+    }
+```
+
+### 🎯 Validation Features
+
+| Model | Validators |
+|:------|:-----------|
+| `TradingSignalModel` | Symbol uppercase, price > 0, price < 1M |
+| `OrderModel` | Limit orders require price, filled orders require filled_* |
+| `PositionModel` | Auto-calculate unrealized PnL |
+
+### 💡 Usage Pattern
+
+```python
+# API boundary: use Pydantic for validation
+signal_model = TradingSignalModel(symbol="aapl", signal_type="buy", price=150.0)
+# symbol is auto-uppercased to "AAPL"
+
+# Internal processing: convert to dataclass
+signal = signal_model.to_dataclass()
+await strategy.evaluate_entry(signal, context)
+```
+
+---
+
+## 🏷️ Callback Type Aliases
+
+> **Status**: ✅ COMPLETED (Latest Refactoring)  
+> **File**: `src/interfaces.py`
+
+### 📋 Type Aliases
+
+| Alias | Definition | Use Case |
+|:------|:-----------|:---------|
+| `EventData` | `Dict[str, Any]` | Generic event payload |
+| `SignalCallback` | `Callable[[TradingSignal], None]` | Sync signal handlers |
+| `ConfigChangeCallback` | `Callable[[str, Any, Any], None]` | Config change notifications |
+| `AsyncEventCallback` | `Callable[[EventData], Awaitable[None]]` | Async event handlers |
+| `AsyncSignalCallback` | `Callable[[TradingSignal], Awaitable[None]]` | Async signal handlers |
+| `AsyncErrorCallback` | `Callable[[Exception], Awaitable[None]]` | Error handlers |
+
+### 💡 Usage
+
+```python
+from src import AsyncEventCallback, SignalCallback
+
+class MyService:
+    def __init__(
+        self, 
+        on_signal: SignalCallback,
+        on_event: AsyncEventCallback
+    ):
+        self._on_signal = on_signal
+        self._on_event = on_event
+```
+
+---
+
+## �🔄 Command Pattern Infrastructure
 
 > **Status**: ✅ COMPLETED  
 > **Files**: 3 modules in `src/commands/`

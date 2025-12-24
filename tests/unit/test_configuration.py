@@ -1,41 +1,53 @@
 """
-Unit tests for ConfigurationManager with TOML-based configuration.
+Unit tests for ConfigurationManager with Azure-native configuration.
 
-Tests the new Dynaconf-based configuration system that loads from:
-- config/settings.toml (base defaults)
-- config/.secrets.toml (credentials)
-- config/environments/{demo|live}.toml (environment overrides)
-- config/profiles/*.toml (risk profiles)
+Tests the configuration system that:
+- Uses Azure Key Vault for secrets
+- Uses Azure App Configuration for runtime settings
+- Falls back to environment variables for local development
 """
 
 import pytest
 import os
 import threading
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from src.core import ConfigurationManager
-from src.config.settings import ConfigurationManager as DynaconfConfigManager
-from src.exceptions import ConfigurationException
+from src.config.azure_config_provider import (
+    AzureConfigProvider,
+    ConfigKeys,
+    SecretKeys,
+    DEFAULT_CONFIG,
+)
 
 
 @pytest.fixture(autouse=True)
 def reset_config_singleton():
     """Reset the ConfigurationManager singleton before each test."""
     ConfigurationManager.reset_instance()
+    AzureConfigProvider.reset_instance()
     yield
     ConfigurationManager.reset_instance()
+    AzureConfigProvider.reset_instance()
+
+
+@pytest.fixture
+def env_config():
+    """Set up environment variables for testing."""
+    test_env = {
+        "DATABASE_URL": "sqlite:///test.db",
+        "LOG_LEVEL": "DEBUG",
+        "ALPACA_API_KEY": "test-api-key",
+        "ALPACA_SECRET_KEY": "test-secret-key",
+        "WEBHOOK_PORT": "9090",
+        "TRADING_ORDER_TYPE": "market",
+    }
+    with patch.dict(os.environ, test_env, clear=False):
+        yield test_env
 
 
 class TestConfigurationManager:
     """Test cases for ConfigurationManager class."""
-    
-    def test_init_loads_from_toml(self):
-        """Test initialization loads configuration from TOML files."""
-        config = ConfigurationManager()
-        # These values come from config/settings.toml
-        assert config.get_config("api.alpaca.base_url") == "https://paper-api.alpaca.markets"
-        assert config.get_config("trading.order_type") == "limit"
-        assert config.get_config("trading.default_quantity") == 100
     
     def test_singleton_pattern(self):
         """Test that ConfigurationManager is a singleton."""
@@ -43,18 +55,18 @@ class TestConfigurationManager:
         config2 = ConfigurationManager()
         assert config1 is config2
     
-    def test_get_config_with_dot_notation(self):
-        """Test getting configuration with dot notation."""
+    def test_get_config_from_environment(self, env_config):
+        """Test getting configuration from environment variables."""
+        ConfigurationManager.reset_instance()
         config = ConfigurationManager()
-        # Test various nested config paths
-        assert config.get_config("api.timeout") == 30
-        assert config.get_config("trading.order_timeout_minutes") == 5
-        assert config.get_config("strategies.averaging_down.max_attempts") == 3
-        assert config.get_config("trading.position_sizing.method") == "percentage"
+        
+        assert config.get_config("database.url") == "sqlite:///test.db"
+        assert config.get_config("logging.level") == "DEBUG"
     
     def test_get_config_with_default(self):
         """Test getting configuration with default value."""
         config = ConfigurationManager()
+        
         assert config.get_config("nonexistent.key", "default_value") == "default_value"
         assert config.get_config("api.nonexistent", None) is None
         assert config.get_config("completely.missing.path", 42) == 42
@@ -67,142 +79,37 @@ class TestConfigurationManager:
         config.set_config("api.timeout", 60)
         assert config.get_config("api.timeout") == 60
         
-        # Set a deeply nested new key
-        config.set_config("new.nested.key", "new_value")
-        assert config.get_config("new.nested.key") == "new_value"
+        # Set another value
+        config.set_config("new.key", "new_value")
+        assert config.get_config("new.key") == "new_value"
     
-    def test_set_config_overwrites_existing(self):
-        """Test that set_config overwrites existing values."""
+    def test_get_secret_from_environment(self, env_config):
+        """Test getting secrets from environment variables."""
+        ConfigurationManager.reset_instance()
         config = ConfigurationManager()
         
-        original = config.get_config("trading.order_type")
-        assert original == "limit"
-        
-        config.set_config("trading.order_type", "market")
-        assert config.get_config("trading.order_type") == "market"
+        assert config.get_secret("alpaca-api-key") == "test-api-key"
+        assert config.get_secret("alpaca-secret-key") == "test-secret-key"
     
-    def test_get_config_empty_key_raises(self):
-        """Test that empty key raises ConfigurationException."""
+    def test_get_secret_with_default(self):
+        """Test getting secrets with default value."""
         config = ConfigurationManager()
         
-        with pytest.raises(ConfigurationException):
-            config.get_config("")
-        
-        with pytest.raises(ConfigurationException):
-            config.get_config(None)
+        assert config.get_secret("nonexistent-secret", "default") == "default"
+        assert config.get_secret("missing-secret") == ""
     
-    def test_trading_configuration_values(self):
-        """Test trading configuration values from settings.toml (with .secrets.toml overrides)."""
-        config = ConfigurationManager()
-        
-        # Trading settings (note: .secrets.toml overrides some values)
-        assert config.get_config("trading.max_position_size") == 1000
-        assert config.get_config("trading.max_daily_trades") == 100  # Overridden in .secrets.toml
-        assert config.get_config("trading.risk_per_trade") == 0.02
-        assert config.get_config("trading.limit_order_offset") == 0.001
-    
-    def test_strategy_configuration_values(self):
-        """Test strategy configuration values from settings.toml."""
-        config = ConfigurationManager()
-        
-        # Strategy settings
-        assert config.get_config("strategies.averaging_down.enabled") is True
-        assert config.get_config("strategies.dca.base_threshold_percent") == 1.5
-        assert config.get_config("strategies.long_strategy.enabled") is True
-        assert config.get_config("strategies.trailing_profit.enabled") is True
-    
-    def test_api_configuration_values(self):
-        """Test API configuration values from settings.toml."""
-        config = ConfigurationManager()
-        
-        # API settings
-        assert config.get_config("api.max_retries") == 3
-        assert config.get_config("api.retry_delay") == 1.0
-        assert config.get_config("api.alpaca.communication_method") == "rest"
-    
-    def test_webhook_configuration_values(self):
-        """Test webhook configuration values from settings.toml."""
-        config = ConfigurationManager()
-        
-        assert config.get_config("api.webhook.host") == "0.0.0.0"
-        assert config.get_config("api.webhook.port") == 8080
-        assert config.get_config("api.webhook.security_enabled") is False
-    
-    def test_logging_configuration_values(self):
-        """Test logging configuration values from settings.toml (with .secrets.toml overrides)."""
-        config = ConfigurationManager()
-        
-        assert config.get_config("logging.level") == "DEBUG"  # Overridden in .secrets.toml
-        assert config.get_config("logging.format") == "json"
-        assert config.get_config("logging.console_logging") is True
-    
-    def test_position_sizing_configuration(self):
-        """Test position sizing configuration from settings.toml."""
-        config = ConfigurationManager()
-        
-        sizing = config.get_config("trading.position_sizing")
-        assert sizing is not None
-        assert config.get_config("trading.position_sizing.method") == "percentage"
-        assert config.get_config("trading.position_sizing.initial_portfolio_percentage") == 0.01
-        assert config.get_config("trading.position_sizing.max_quantity") == 10000
-    
-    def test_technical_analysis_configuration(self):
-        """Test technical analysis configuration from settings.toml."""
-        config = ConfigurationManager()
-        
-        assert config.get_config("technical_analysis.default_timeframe") == "15m"
-        assert config.get_config("technical_analysis.support.min_confidence") == 0.7
-        assert config.get_config("technical_analysis.resistance.lookback_periods") == 50
-    
-    def test_risk_management_configuration(self):
-        """Test risk management configuration from settings.toml."""
-        config = ConfigurationManager()
-        
-        assert config.get_config("trading.risk_management.stop_loss.enabled") is False
-        assert config.get_config("trading.risk_management.profit_taking.take_profit_percentage") == 0.05
-        assert config.get_config("trading.risk_management.advanced.max_positions") == 10
-    
-    def test_config_file_parameter_ignored(self):
-        """Test that config_file parameter is ignored (backward compatibility)."""
-        # Passing a config file should be ignored - we always load from TOML
-        config = ConfigurationManager("nonexistent.yaml")
-        
-        # Should still load from settings.toml
-        assert config.get_config("api.alpaca.base_url") == "https://paper-api.alpaca.markets"
-    
-    def test_reload_config(self):
+    def test_reload_config(self, env_config):
         """Test configuration reload."""
+        ConfigurationManager.reset_instance()
         config = ConfigurationManager()
         
-        # Change a value
-        original = config.get_config("trading.order_type")
-        config.set_config("trading.order_type", "market")
-        assert config.get_config("trading.order_type") == "market"
+        # Change a value in cache
+        config.set_config("database.url", "modified_value")
+        assert config.get_config("database.url") == "modified_value"
         
-        # Reload should restore original from file
+        # Reload should restore from environment
         config.reload_config()
-        assert config.get_config("trading.order_type") == original
-    
-    def test_get_all_config(self):
-        """Test getting all configuration as dictionary."""
-        config = ConfigurationManager()
-        all_config = config.get_all_config()
-        
-        assert isinstance(all_config, dict)
-        assert len(all_config) > 0
-        # Dynaconf returns uppercase keys in as_dict()
-        assert "API" in all_config or "TRADING" in all_config
-    
-    def test_config_with_none_values(self):
-        """Test configuration with None values."""
-        config = ConfigurationManager()
-        
-        # Set None value
-        config.set_config("test.none_value", None)
-        assert config.get_config("test.none_value") is None
-        
-        # Getting None with default should return None (not the default)
-        assert config.get_config("test.none_value", "default") is None
+        assert config.get_config("database.url") == "sqlite:///test.db"
     
     def test_config_thread_safety(self):
         """Test basic thread safety of configuration operations."""
@@ -236,96 +143,112 @@ class TestConfigurationManager:
         assert all(results), "Some thread operations failed"
         assert len(results) == 50  # 5 threads * 10 operations each
     
-    def test_set_nested_value_creates_path(self):
-        """Test that setting nested values creates intermediate paths."""
+    def test_current_environment_default(self):
+        """Test default environment is demo."""
         config = ConfigurationManager()
-        
-        # Set a deeply nested value
-        config.set_config("a.b.c.d.e", "deep_value")
-        assert config.get_config("a.b.c.d.e") == "deep_value"
+        assert config.current_environment == "demo"
     
-    def test_environment_based_loading(self):
-        """Test that configuration respects TRADING_BOT_ENV."""
-        # This test verifies that the demo environment is loaded by default
-        config = ConfigurationManager()
-        
-        # Demo environment should use paper trading URL
-        base_url = config.get_config("api.alpaca.base_url")
-        assert "paper" in base_url.lower()
+    def test_current_environment_from_env_var(self):
+        """Test environment from ENVIRONMENT variable."""
+        with patch.dict(os.environ, {"ENVIRONMENT": "live"}):
+            ConfigurationManager.reset_instance()
+            config = ConfigurationManager()
+            assert config.current_environment == "live"
     
-    def test_validate_required_config_with_valid_config(self):
-        """Test validation passes with valid configuration."""
-        config = ConfigurationManager()
+    def test_is_azure_deployment_false_by_default(self):
+        """Test Azure deployment detection when not in Azure."""
+        # Ensure Azure env vars are not set
+        env_vars_to_remove = ["AZURE_KEYVAULT_URL", "AZURE_APP_CONFIGURATION_ENDPOINT"]
+        filtered_env = {k: v for k, v in os.environ.items() if k not in env_vars_to_remove}
         
-        # Should not raise with the default valid config
-        # (assuming .secrets.toml has valid API keys)
-        try:
-            config.validate_required_config()
-        except ConfigurationException:
-            # If secrets are not configured, validation may fail
-            # This is expected behavior - skip in that case
-            pytest.skip("API credentials not configured in .secrets.toml")
+        with patch.dict(os.environ, filtered_env, clear=True):
+            ConfigurationManager.reset_instance()
+            config = ConfigurationManager()
+            assert config.is_azure_deployment() is False
     
-    def test_database_configuration(self):
-        """Test database configuration from settings.toml."""
-        config = ConfigurationManager()
-        
-        assert config.get_config("database.url") == "sqlite:///trading_bot.db"
-        assert config.get_config("database.echo") is False
-        assert config.get_config("database.pool_size") == 5
+    def test_is_azure_deployment_with_keyvault(self):
+        """Test Azure deployment detection with Key Vault configured."""
+        with patch.dict(os.environ, {"AZURE_KEYVAULT_URL": "https://test.vault.azure.net"}):
+            ConfigurationManager.reset_instance()
+            config = ConfigurationManager()
+            assert config.is_azure_deployment() is True
     
-    def test_monitoring_configuration(self):
-        """Test monitoring configuration from settings.toml."""
-        config = ConfigurationManager()
-        
-        assert config.get_config("monitoring.enabled") is True
-        assert config.get_config("monitoring.health_check_interval") == 30
-        assert config.get_config("monitoring.position_monitoring_interval") == 10
-    
-    def test_extended_hours_configuration(self):
-        """Test extended hours configuration from settings.toml."""
-        config = ConfigurationManager()
-        
-        assert config.get_config("extended_hours.enabled") is True
-        assert config.get_config("extended_hours.pre_market.enabled") is True
-        assert config.get_config("extended_hours.after_hours.enabled") is True
-    
-    def test_performance_configuration(self):
-        """Test performance configuration from settings.toml."""
-        config = ConfigurationManager()
-        
-        assert config.get_config("performance.max_concurrent_orders") == 10
-        assert config.get_config("performance.rate_limit_requests_per_second") == 5
-        assert config.get_config("performance.cache_enabled") is True
+    def test_is_azure_deployment_with_app_config(self):
+        """Test Azure deployment detection with App Config configured."""
+        with patch.dict(os.environ, {"AZURE_APP_CONFIGURATION_ENDPOINT": "https://test.azconfig.io"}):
+            ConfigurationManager.reset_instance()
+            config = ConfigurationManager()
+            assert config.is_azure_deployment() is True
 
 
 class TestConfigurationManagerTypedAccess:
     """Test typed configuration access methods."""
     
-    def test_get_alpaca_config(self):
+    def test_get_alpaca_config(self, env_config):
         """Test getting typed Alpaca configuration."""
+        ConfigurationManager.reset_instance()
         config = ConfigurationManager()
         
-        try:
-            alpaca_config = config.get_alpaca_config()
-            assert alpaca_config is not None
-            assert alpaca_config.base_url == "https://paper-api.alpaca.markets"
-            assert alpaca_config.is_paper is True
-        except Exception:
-            # If credentials not configured, this may fail
-            pytest.skip("Alpaca configuration may require credentials")
+        alpaca_config = config.get_alpaca_config()
+        assert alpaca_config is not None
+        assert alpaca_config.api_key == "test-api-key"
+        assert alpaca_config.secret_key == "test-secret-key"
+        assert alpaca_config.is_configured is True
+        assert alpaca_config.is_paper is True  # Default URL is paper
     
-    def test_get_webhook_config(self):
-        """Test getting typed webhook configuration."""
+    def test_get_alpaca_config_not_configured(self):
+        """Test Alpaca config when credentials not set."""
         config = ConfigurationManager()
         
-        try:
-            webhook_config = config.get_webhook_config()
-            assert webhook_config is not None
-            assert webhook_config.host == "0.0.0.0"
-            assert webhook_config.port == 8080
-        except Exception:
-            pytest.skip("Webhook configuration access failed")
+        alpaca_config = config.get_alpaca_config()
+        assert alpaca_config.is_configured is False
+    
+    def test_get_webhook_config(self, env_config):
+        """Test getting typed webhook configuration."""
+        ConfigurationManager.reset_instance()
+        config = ConfigurationManager()
+        
+        webhook_config = config.get_webhook_config()
+        assert webhook_config is not None
+        assert webhook_config.port == 9090  # From env var
+        assert webhook_config.host == "0.0.0.0"  # Default
+        assert webhook_config.security_enabled is True  # Default
+    
+    def test_get_database_config(self, env_config):
+        """Test getting typed database configuration."""
+        ConfigurationManager.reset_instance()
+        config = ConfigurationManager()
+        
+        db_config = config.get_database_config()
+        assert db_config is not None
+        assert db_config.url == "sqlite:///test.db"
+        assert db_config.echo is False
+        assert db_config.pool_size == 5
+    
+    def test_get_logging_config(self, env_config):
+        """Test getting typed logging configuration."""
+        ConfigurationManager.reset_instance()
+        config = ConfigurationManager()
+        
+        log_config = config.get_logging_config()
+        assert log_config is not None
+        assert log_config.level == "DEBUG"
+        assert log_config.format == "json"
+    
+    def test_get_configured_brokers_with_alpaca(self, env_config):
+        """Test getting configured brokers when Alpaca is configured."""
+        ConfigurationManager.reset_instance()
+        config = ConfigurationManager()
+        
+        brokers = config.get_configured_brokers()
+        assert "alpaca" in brokers
+    
+    def test_get_configured_brokers_empty(self):
+        """Test getting configured brokers when none configured."""
+        config = ConfigurationManager()
+        
+        brokers = config.get_configured_brokers()
+        assert isinstance(brokers, list)
     
     def test_get_broker_for_symbol_default(self):
         """Test getting default broker for a symbol."""
@@ -334,11 +257,32 @@ class TestConfigurationManagerTypedAccess:
         # Default broker should be alpaca
         broker = config.get_broker_for_symbol("AAPL")
         assert broker == "alpaca"
+
+
+class TestDefaultConfiguration:
+    """Test default configuration values."""
     
-    def test_current_environment(self):
-        """Test getting current environment."""
-        config = ConfigurationManager()
-        
-        # Default environment should be demo
-        env = config.current_environment
-        assert env in ["demo", "live"]
+    def test_default_config_keys_exist(self):
+        """Test that all default config keys are defined."""
+        assert ConfigKeys.DATABASE_URL in DEFAULT_CONFIG
+        assert ConfigKeys.LOG_LEVEL in DEFAULT_CONFIG
+        assert ConfigKeys.WEBHOOK_PORT in DEFAULT_CONFIG
+        assert ConfigKeys.TRADING_ORDER_TYPE in DEFAULT_CONFIG
+    
+    def test_default_config_values(self):
+        """Test default configuration values."""
+        assert DEFAULT_CONFIG[ConfigKeys.DATABASE_URL] == "sqlite:///trading_bot.db"
+        assert DEFAULT_CONFIG[ConfigKeys.LOG_LEVEL] == "INFO"
+        assert DEFAULT_CONFIG[ConfigKeys.WEBHOOK_PORT] == 8080
+        assert DEFAULT_CONFIG[ConfigKeys.TRADING_ORDER_TYPE] == "limit"
+
+
+class TestSecretKeys:
+    """Test secret key constants."""
+    
+    def test_secret_keys_defined(self):
+        """Test that all secret keys are defined."""
+        assert SecretKeys.ALPACA_API_KEY == "alpaca-api-key"
+        assert SecretKeys.ALPACA_SECRET_KEY == "alpaca-secret-key"
+        assert SecretKeys.WEBHOOK_SECRET == "webhook-secret"
+        assert SecretKeys.NGROK_AUTH_TOKEN == "ngrok-auth-token"

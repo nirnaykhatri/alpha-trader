@@ -1,7 +1,7 @@
 """
 Position Bootstrapper
 
-Extracts position restoration and hydration logic from AdvancedTradingStrategy
+Extracts position restoration and hydration logic from DCAStrategy
 to maintain Single Responsibility Principle.
 """
 
@@ -11,7 +11,8 @@ import uuid
 from typing import Dict, List, Optional
 from datetime import datetime
 
-from src.strategies.advanced_strategy import PositionState, PositionDirection, TradePhase
+# Import from original source to avoid circular imports
+from src.strategies.position_state import PositionState, PositionDirection, TradePhase
 
 logger = logging.getLogger(__name__)
 

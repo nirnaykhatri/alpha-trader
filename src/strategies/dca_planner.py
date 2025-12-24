@@ -2,42 +2,145 @@
 DCA (Dollar-Cost Averaging) Planner
 Handles martingale-based DCA planning and execution with progressive validation.
 Uses unrealized loss percentage as DCA trigger (NO technical analysis).
+
+Configuration is driven by bot's DCAConfig from database, NOT from config files.
 """
 
-from typing import Dict, Optional
-from src.interfaces import IConfigurationManager, IOrderManager
+from typing import Dict, Optional, Any, Callable
+from decimal import Decimal
+from src.interfaces import IOrderManager, IDCAPlanner, PositionStateType
 from src.core.logging_config import get_logger
 from src import Order, OrderType, OrderSide
 from src.strategies.position_state import PositionState, PositionDirection, TradePhase
 from src.risk.martingale_validator import MartingaleSafetyManager
 from src.utils.trading_utils import get_order_type
 from src.constants import TradingConstants
+from src.domain.bot_models import DCAConfig, AveragingOrdersConfig
 
 logger = get_logger(__name__)
 
 
-class DCAPlanner:
+class DCAPlanner(IDCAPlanner):
     """
     Plans and executes DCA orders based on martingale loss thresholds.
     Follows Single Responsibility Principle - only handles DCA logic.
+    
+    Implements IDCAPlanner interface for polymorphic DCA strategy execution.
+    Configuration is driven exclusively by bot's DCAConfig from database.
+    No config file fallback - bot configuration must be provided.
     """
     
     def __init__(
         self,
-        config: IConfigurationManager,
         order_manager: IOrderManager,
         martingale_safety: MartingaleSafetyManager,
+        bot_dca_config: DCAConfig,
         dca_metadata_manager=None
     ):
-        """Initialize the DCA planner."""
-        self.config = config
+        """
+        Initialize the DCA planner.
+        
+        Args:
+            order_manager: Order execution manager
+            martingale_safety: Safety validator for martingale limits
+            bot_dca_config: Bot's DCA configuration from database (REQUIRED)
+            dca_metadata_manager: Optional metadata persistence
+            
+        Raises:
+            ValueError: If bot_dca_config is None
+        """
+        if bot_dca_config is None:
+            raise ValueError("bot_dca_config is required - DCA configuration must come from database")
+        
         self.order_manager = order_manager
         self.martingale_safety = martingale_safety
         self.dca_metadata_manager = dca_metadata_manager
         
-        # Load strategy configurations
-        self.long_config = config.get_config('strategies.long_strategy', {})
-        self.short_config = config.get_config('strategies.short_strategy', {})
+        # Bot-specific DCA config from database (REQUIRED - no file fallback)
+        self._bot_dca_config = bot_dca_config
+    
+    def set_bot_config(self, dca_config: DCAConfig) -> None:
+        """
+        Update the bot's DCA configuration at runtime.
+        
+        Args:
+            dca_config: Bot's DCA configuration from database
+            
+        Raises:
+            ValueError: If dca_config is None
+        """
+        if dca_config is None:
+            raise ValueError("dca_config cannot be None - database configuration required")
+        self._bot_dca_config = dca_config
+        logger.info(f"✅ DCAPlanner updated with bot-specific DCA config")
+        if dca_config.averaging_orders:
+            logger.info(f"   - Orders count: {dca_config.averaging_orders.orders_count}")
+            logger.info(f"   - Step percent: {dca_config.averaging_orders.step_percent}%")
+            logger.info(f"   - Step multiplier: {dca_config.averaging_orders.step_multiplier}x")
+    
+    def _get_dca_thresholds(self) -> tuple[float, float, float]:
+        """
+        Get DCA threshold configuration.
+        
+        Returns:
+            Tuple of (base_threshold_percent, progressive_multiplier, max_threshold_percent)
+            
+        Priority:
+            1. Bot's DCAConfig.averaging_orders (from database)
+            2. Global config file (legacy fallback)
+        """
+        # Priority 1: Use bot-specific config from database
+        if self._bot_dca_config and self._bot_dca_config.averaging_orders:
+            avg_config = self._bot_dca_config.averaging_orders
+            base_threshold = float(avg_config.step_percent)
+            
+            # Use step_multiplier if enabled, otherwise no progression (1.0)
+            if avg_config.step_multiplier_enabled:
+                progressive_multiplier = float(avg_config.step_multiplier)
+            else:
+                progressive_multiplier = 1.0
+            
+            # Max threshold is capped at 6x base threshold or 15% max
+            max_threshold = min(base_threshold * 6, 15.0)
+            
+            logger.debug(f"📊 Using bot database config for DCA thresholds:")
+            logger.debug(f"   Base: {base_threshold}%, Multiplier: {progressive_multiplier}x, Max: {max_threshold}%")
+            
+            return base_threshold, progressive_multiplier, max_threshold
+        
+        # No fallback - configuration must come from database
+        raise ValueError("Bot DCA config with averaging_orders is required - no config file fallback")
+    
+    def _get_order_type(self) -> OrderType:
+        """
+        Get order type for DCA orders from bot database config.
+        
+        Returns:
+            OrderType from bot config
+            
+        Raises:
+            ValueError: If bot config is missing start_settings
+        """
+        if self._bot_dca_config and self._bot_dca_config.start_settings:
+            order_type_str = self._bot_dca_config.start_settings.base_order_type.value
+            return get_order_type(order_type_str)
+        
+        raise ValueError("Bot DCA config with start_settings is required for order type")
+    
+    def _get_max_averaging_attempts(self) -> int:
+        """
+        Get maximum DCA attempts allowed from bot database config.
+        
+        Returns:
+            Max DCA attempts from bot config
+            
+        Raises:
+            ValueError: If bot config is missing averaging_orders
+        """
+        if self._bot_dca_config and self._bot_dca_config.averaging_orders:
+            return self._bot_dca_config.averaging_orders.orders_count
+        
+        raise ValueError("Bot DCA config with averaging_orders is required for max attempts")
     
     def _check_martingale_dca(
         self, 
@@ -86,9 +189,8 @@ class DCAPlanner:
             logger.info(f"   DCA Attempts: {position.averaging_attempts}")
             
             # Calculate progressive DCA threshold based on attempts
-            base_threshold = self.config.get_config('strategies.dca.base_threshold_percent', 1.5)
-            progressive_multiplier = self.config.get_config('strategies.dca.progressive_multiplier', 1.8)
-            max_threshold = self.config.get_config('strategies.dca.max_threshold_percent', 6.0)
+            # Uses bot config from database (preferred) or global config (fallback)
+            base_threshold, progressive_multiplier, max_threshold = self._get_dca_thresholds()
             
             current_threshold = base_threshold
             for _ in range(position.averaging_attempts):
@@ -321,7 +423,7 @@ class DCAPlanner:
         Returns:
             Tuple of (order_price, order_side). order_price is None for market orders.
         """
-        order_type = get_order_type(self.config.get_config('trading.order_type', 'limit'))
+        order_type = self._get_order_type()
         current_price = position.current_price
         
         if order_type != OrderType.LIMIT:
@@ -509,7 +611,8 @@ class DCAPlanner:
             True if order placed successfully, False otherwise
         """
         config = self.long_config if position.direction == PositionDirection.LONG else self.short_config
-        order_type = get_order_type(self.config.get_config('trading.order_type', 'limit'))
+        order_type = self._get_order_type()
+        max_attempts = self._get_max_averaging_attempts()
         
         # Create technical DCA order
         order = Order(
@@ -651,10 +754,8 @@ class DCAPlanner:
             Minimum price improvement as decimal (e.g., 0.025 for 2.5%)
         """
         try:
-            # Get base configuration
-            base_threshold = self.config.get_config('strategies.dca.base_threshold_percent', 1.5) / 100.0
-            multiplier = self.config.get_config('strategies.dca.progressive_multiplier', 1.8)
-            max_threshold = self.config.get_config('strategies.dca.max_threshold_percent', 6.0) / 100.0
+            # Get DCA thresholds from bot-specific config (database) or global config file
+            base_threshold, multiplier, max_threshold = self._get_dca_thresholds()
             
             # Calculate progressive threshold using logarithmic scaling
             # Formula: base_threshold * (multiplier ^ attempts)
@@ -677,3 +778,83 @@ class DCAPlanner:
             logger.error(f"Error calculating progressive DCA threshold: {e}")
             # Fallback to 2% threshold
             return 0.02
+
+    # =========================================================================
+    # IDCAPlanner Interface Implementation
+    # =========================================================================
+    
+    async def check_dca_opportunity(
+        self,
+        position: PositionStateType,
+        current_price: float,
+        timeframe: str = "15m"
+    ) -> Dict[str, Any]:
+        """
+        Check if DCA should be executed for the given position.
+        
+        Implements IDCAPlanner.check_dca_opportunity by delegating to
+        the internal martingale DCA check logic.
+        
+        Args:
+            position: Current position state
+            current_price: Current market price
+            timeframe: Signal timeframe for context
+            
+        Returns:
+            Dictionary with keys: should_dca, reason, level, confidence, message
+        """
+        # Update position's current price for accuracy
+        position.current_price = current_price
+        
+        # Determine position direction and delegate to martingale check
+        is_long = position.direction == PositionDirection.LONG
+        return self._check_martingale_dca(position, is_long)
+    
+    def is_progressive_price(
+        self,
+        position: PositionStateType,
+        proposed_price: float
+    ) -> Dict[str, Any]:
+        """
+        Validate that the proposed DCA price improves the average.
+        
+        Implements IDCAPlanner.is_progressive_price by delegating to
+        the internal progressive price validation.
+        
+        For LONG: new price must be BELOW last DCA (averaging down)
+        For SHORT: new price must be ABOVE last DCA (averaging up)
+        
+        Args:
+            position: Current position state
+            proposed_price: Proposed DCA order price
+            
+        Returns:
+            Dictionary with keys: is_progressive, reason, message, last_price
+        """
+        return self.is_progressive_dca_price(position, proposed_price)
+    
+    async def execute_dca(
+        self,
+        position: PositionStateType,
+        dca_decision: Dict[str, Any],
+        calculate_size_callback: Callable
+    ) -> bool:
+        """
+        Execute a DCA order based on the decision.
+        
+        Implements IDCAPlanner.execute_dca by delegating to
+        the internal technical DCA execution logic.
+        
+        Args:
+            position: Current position state
+            dca_decision: DCA decision from check_dca_opportunity
+            calculate_size_callback: Callback to calculate position size
+            
+        Returns:
+            True if DCA order was placed successfully
+        """
+        return await self.execute_technical_dca(
+            position, 
+            dca_decision, 
+            calculate_size_callback
+        )

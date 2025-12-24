@@ -5,6 +5,7 @@ Tracks and manages trading positions with persistence.
 
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+from collections import OrderedDict
 from src.interfaces import IPositionManager, IConfigurationManager
 from src.exceptions import PositionNotFoundException
 from src.core.logging_config import get_logger
@@ -16,12 +17,108 @@ from src.broker.interfaces import BrokerType
 logger = get_logger(__name__)
 
 
+class LRUPositionCache:
+    """
+    LRU (Least Recently Used) cache for positions with bounded size.
+    
+    Prevents unbounded memory growth by evicting least recently accessed
+    positions when the cache reaches its maximum size.
+    
+    Thread-safety: Not thread-safe. Use with asyncio event loop only.
+    
+    Example:
+        cache = LRUPositionCache(max_size=100)
+        cache["AAPL_alpaca"] = position
+        position = cache.get("AAPL_alpaca")  # Moves to most recent
+    """
+    
+    def __init__(self, max_size: int = 500):
+        """
+        Initialize LRU cache.
+        
+        Args:
+            max_size: Maximum number of positions to cache. Defaults to 500.
+        """
+        self._max_size = max_size
+        self._cache: OrderedDict[str, Position] = OrderedDict()
+        self._eviction_count = 0
+    
+    def __setitem__(self, key: str, position: Position) -> None:
+        """
+        Add or update position in cache.
+        
+        Moves key to end (most recently used) and evicts oldest if needed.
+        """
+        if key in self._cache:
+            # Move to end (most recently used)
+            self._cache.move_to_end(key)
+        self._cache[key] = position
+        
+        # Evict oldest if over capacity
+        while len(self._cache) > self._max_size:
+            evicted_key, _ = self._cache.popitem(last=False)
+            self._eviction_count += 1
+            logger.debug(f"LRU cache evicted: {evicted_key} (total evictions: {self._eviction_count})")
+    
+    def __getitem__(self, key: str) -> Position:
+        """Get position and mark as recently used."""
+        position = self._cache[key]
+        self._cache.move_to_end(key)
+        return position
+    
+    def __contains__(self, key: str) -> bool:
+        """Check if key exists in cache."""
+        return key in self._cache
+    
+    def get(self, key: str, default: Optional[Position] = None) -> Optional[Position]:
+        """Get position with default, marking as recently used if found."""
+        try:
+            return self[key]
+        except KeyError:
+            return default
+    
+    def values(self) -> list:
+        """Get all cached positions."""
+        return list(self._cache.values())
+    
+    def items(self):
+        """Get all cache key-value pairs."""
+        return self._cache.items()
+    
+    def clear(self) -> None:
+        """Clear all cached positions."""
+        self._cache.clear()
+    
+    def copy(self) -> Dict[str, Position]:
+        """Return a copy of the cache as a dict."""
+        return dict(self._cache)
+    
+    def __len__(self) -> int:
+        """Return number of cached positions."""
+        return len(self._cache)
+    
+    @property
+    def eviction_count(self) -> int:
+        """Get total number of evictions."""
+        return self._eviction_count
+    
+    @property
+    def max_size(self) -> int:
+        """Get maximum cache size."""
+        return self._max_size
+
+
 class PositionManager(IPositionManager):
     """
     Manages trading positions with database persistence.
     Tracks position updates, P&L, and position history.
     Supports multiple brokers via BrokerRouter.
+    
+    Uses LRU cache for positions to prevent unbounded memory growth.
     """
+    
+    # Default max cache size - can be overridden via config
+    DEFAULT_MAX_CACHE_SIZE = 500
     
     def __init__(self, config: IConfigurationManager, database_manager, broker_router: Optional[BrokerRouter] = None):
         """
@@ -35,10 +132,15 @@ class PositionManager(IPositionManager):
         self._config = config
         self._database = database_manager
         self._broker_router = broker_router
-        # Cache key: f"{symbol}_{broker}"
-        self._positions: Dict[str, Position] = {}
         
-        logger.info("PositionManager initialized")
+        # LRU cache with configurable max size
+        max_cache_size = config.get_config(
+            "performance.max_position_cache_size", 
+            self.DEFAULT_MAX_CACHE_SIZE
+        )
+        self._positions = LRUPositionCache(max_size=max_cache_size)
+        
+        logger.info(f"PositionManager initialized with LRU cache (max_size={max_cache_size})")
     
     def _get_cache_key(self, symbol: str, broker: str) -> str:
         """Generate cache key for position."""
@@ -88,34 +190,53 @@ class PositionManager(IPositionManager):
             logger.error(f"Error getting position for {symbol}: {str(e)}")
             return None
     
-    async def get_all_positions(self, broker: str = None) -> List[Position]:
+    async def get_all_positions(
+        self, 
+        broker: str = None,
+        limit: Optional[int] = None,
+        offset: int = 0
+    ) -> List[Position]:
         """
-        Get all current positions.
+        Get all current positions with optional pagination and broker filter.
+        
+        Pagination is delegated to the database layer for efficiency,
+        avoiding loading all records into memory before filtering.
         
         Args:
             broker: Optional broker filter
+            limit: Maximum number of positions to return. None for all positions.
+            offset: Number of positions to skip (for pagination). Defaults to 0.
             
         Returns:
-            List of all current positions
+            List of all current positions, optionally paginated
         """
         try:
-            # Load all positions from database
-            all_positions = await self._database.get_all_positions(broker)
+            # Delegate pagination to database layer for efficiency
+            # Exclude zero quantity at database level to avoid loading unused records
+            active_positions = await self._database.get_all_positions(
+                broker=broker,
+                limit=limit,
+                offset=offset,
+                exclude_zero_quantity=True
+            )
             
-            # Update memory cache
-            for position in all_positions:
+            # Update memory cache with fetched positions
+            for position in active_positions:
                 pos_broker = position.broker or 'alpaca'
                 self._positions[self._get_cache_key(position.symbol, pos_broker)] = position
             
-            # Filter out zero positions
-            active_positions = [pos for pos in all_positions if pos.quantity != 0]
-            
-            logger.debug(f"Retrieved {len(active_positions)} active positions")
+            logger.debug(f"Retrieved {len(active_positions)} active positions (offset={offset}, limit={limit})")
             return active_positions
             
         except Exception as e:
             logger.error(f"Error getting all positions: {str(e)}")
-            return list(self._positions.values())
+            # Return from cache with pagination
+            cached = [pos for pos in self._positions.values() if pos.quantity != 0]
+            if offset > 0:
+                cached = cached[offset:]
+            if limit is not None:
+                cached = cached[:limit]
+            return cached
     
     async def update_position(self, symbol: str, quantity: float, price: float, broker: str = 'alpaca') -> None:
         """
@@ -338,15 +459,24 @@ class PositionManager(IPositionManager):
                     except Exception as e:
                         return broker_type, [], e
                 
-                # Fetch from all brokers in parallel
+                # Fetch from all brokers in parallel with exception handling
+                # return_exceptions=True ensures one broker failure doesn't break others
                 import asyncio
                 results = await asyncio.gather(
                     *[fetch_broker_positions(bt) for bt in brokers],
-                    return_exceptions=False
+                    return_exceptions=True
                 )
                 
-                # Process results
-                for broker_type, positions, error in results:
+                # Process results, handling any exceptions
+                for i, result in enumerate(results):
+                    # Check if result is an exception (from return_exceptions=True)
+                    if isinstance(result, Exception):
+                        broker_type = brokers[i] if i < len(brokers) else None
+                        logger.error(f"Exception fetching positions from broker {broker_type}: {result}")
+                        stats["errors"] += 1
+                        continue
+                    
+                    broker_type, positions, error = result
                     if error:
                         logger.error(f"Error fetching positions from {broker_type.value}: {error}")
                         stats["errors"] += 1

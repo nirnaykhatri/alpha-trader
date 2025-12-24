@@ -167,11 +167,11 @@ def main():
         print("   Make sure you're in the trading bot root directory")
     
     # Check config file
-    if Path("config.yaml").exists():
-        print("✅ config.yaml found")
+    if Path("config/settings.toml").exists():
+        print("✅ config/settings.toml found")
     else:
-        print("❌ config.yaml not found")
-        print("   Copy config.yaml.example to config.yaml and configure it")
+        print("❌ config/settings.toml not found")
+        print("   Check that the config directory exists with settings.toml")
     
     print("\n" + "=" * 50)
     if not failed_dependencies and src_path.exists():

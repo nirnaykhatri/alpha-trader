@@ -16,28 +16,6 @@ from src.domain import DecisionContext
 logger = logging.getLogger(__name__)
 
 
-def _format_limit_state(current: float, cap: float, label: str, is_ok: bool = None) -> str:
-    """
-    Helper function to format limit state messages consistently.
-    
-    Args:
-        current: Current value
-        cap: Maximum allowed value
-        label: Descriptive label for the limit
-        is_ok: Optional explicit OK/exceeded flag (auto-determined if None)
-        
-    Returns:
-        Formatted limit state string
-    """
-    if is_ok is None:
-        is_ok = current < cap
-    
-    if is_ok:
-        return f"{label} OK: {current:.2f}/{cap:.2f}"
-    else:
-        return f"{label} exceeded: {current:.2f} >= {cap:.2f}"
-
-
 class IRiskValidator(ABC):
     """
     Abstract base class for risk validators.
@@ -90,7 +68,7 @@ class ConsecutiveLossValidator(IRiskValidator):
     ) -> RiskDecision:
         """Check consecutive loss limit."""
         is_ok = context.dca_attempts < self.max_consecutive_losses
-        reason = _format_limit_state(
+        reason = RiskEnvelopeCalculator.format_limit_state(
             current=context.dca_attempts,
             cap=self.max_consecutive_losses,
             label="Consecutive losses",
@@ -135,7 +113,7 @@ class SymbolLossLimitValidator(IRiskValidator):
         current_loss = abs(context.unrealized_pnl)
         is_ok = current_loss < max_loss
         
-        reason = "$" + _format_limit_state(
+        reason = "$" + RiskEnvelopeCalculator.format_limit_state(
             current=current_loss,
             cap=max_loss,
             label="Symbol loss",
@@ -180,7 +158,7 @@ class IndividualLossLimitValidator(IRiskValidator):
         max_loss = account_balance * self.max_individual_loss_pct
         is_ok = proposed_size <= max_loss
         
-        reason = "$" + _format_limit_state(
+        reason = "$" + RiskEnvelopeCalculator.format_limit_state(
             current=proposed_size,
             cap=max_loss,
             label="Individual trade size",
@@ -347,6 +325,37 @@ class RiskEnvelopeCalculator:
             # Execute with effective_limit
             execute_order(size=envelope.effective_limit)
     """
+    
+    @staticmethod
+    def format_limit_state(current: float, cap: float, label: str, is_ok: bool = None) -> str:
+        """
+        Format limit state messages consistently.
+        
+        This utility method provides standardized formatting for all
+        risk validator limit messages, ensuring consistent output.
+        
+        Args:
+            current: Current value
+            cap: Maximum allowed value
+            label: Descriptive label for the limit
+            is_ok: Optional explicit OK/exceeded flag (auto-determined if None)
+            
+        Returns:
+            Formatted limit state string
+            
+        Example:
+            >>> RiskEnvelopeCalculator.format_limit_state(3, 5, "DCA attempts")
+            "DCA attempts OK: 3.00/5.00"
+            >>> RiskEnvelopeCalculator.format_limit_state(6, 5, "DCA attempts")
+            "DCA attempts exceeded: 6.00 >= 5.00"
+        """
+        if is_ok is None:
+            is_ok = current < cap
+        
+        if is_ok:
+            return f"{label} OK: {current:.2f}/{cap:.2f}"
+        else:
+            return f"{label} exceeded: {current:.2f} >= {cap:.2f}"
     
     def __init__(
         self,

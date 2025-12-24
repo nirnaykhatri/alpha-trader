@@ -17,6 +17,7 @@ from src import TradingSignal
 from src.signals.signal_processor import SignalProcessor
 from src.signals.webhook_handlers import WebhookHandler
 from src.signals.monitoring_router import MonitoringRouter
+from src.signals.routers import AdminRouter
 
 
 logger = get_logger(__name__)
@@ -63,6 +64,7 @@ class TradingViewSignalListener(ISignalListener, IAsyncContextManager):
             market_data
         )
         self._monitoring_router = MonitoringRouter(bot_instance)
+        self._admin_router = AdminRouter(bot_instance, config)
         
         # Initialize FastAPI with comprehensive OpenAPI documentation
         self._app = FastAPI(
@@ -114,6 +116,10 @@ class TradingViewSignalListener(ISignalListener, IAsyncContextManager):
         # Register routers from modular components
         self._app.include_router(self._webhook_handler.router)
         self._app.include_router(self._monitoring_router.router)
+        self._app.include_router(self._admin_router.router)
+        
+        # Register dependency checks for readiness probe
+        self._register_dependency_checks()
         
         self._server = None
         self._is_running = False
@@ -217,37 +223,131 @@ class TradingViewSignalListener(ISignalListener, IAsyncContextManager):
     
     def set_bot_instance(self, bot_instance):
         """
-        Set the bot instance reference for monitoring endpoints.
+        Set the bot instance reference for monitoring and admin endpoints.
         
         Args:
             bot_instance: Trading bot instance
         """
         self._bot_instance = bot_instance
         self._monitoring_router.set_bot_instance(bot_instance)
-        logger.info("Bot instance reference updated for monitoring endpoints")
+        self._admin_router.set_bot_instance(bot_instance)
+        logger.info("Bot instance reference updated for monitoring and admin endpoints")
+    
+    def _register_dependency_checks(self) -> None:
+        """
+        Register dependency checks with monitoring router for /ready endpoint.
+        
+        Validates critical dependencies at startup and during health checks:
+        - SignalR connection string configuration
+        - Azure App Configuration availability  
+        - Database connection status
+        
+        These checks are exposed via /ready endpoint for Container Apps health probes.
+        """
+        # Check SignalR configuration
+        async def check_signalr() -> dict:
+            """Validate SignalR connection string is configured."""
+            signalr_conn = self._config.get_config("azure.signalr_connection_string", "")
+            hub_name = self._config.get_config("azure.signalr_hub_name", "trading")
+            
+            if not signalr_conn:
+                return {
+                    "healthy": False,
+                    "configured": False,
+                    "message": "SignalR connection string not configured",
+                    "hub_name": hub_name
+                }
+            
+            # Basic validation - check connection string format
+            is_valid_format = "Endpoint=" in signalr_conn and "AccessKey=" in signalr_conn
+            return {
+                "healthy": is_valid_format,
+                "configured": True,
+                "message": "SignalR configured" if is_valid_format else "Invalid SignalR connection string format",
+                "hub_name": hub_name
+            }
+        
+        # Check Azure App Configuration
+        async def check_azure_config() -> dict:
+            """Validate Azure App Configuration availability."""
+            azure_endpoint = self._config.get_config("azure.app_config_endpoint", "")
+            
+            if not azure_endpoint:
+                # Not required - local config is fine
+                return {
+                    "healthy": True,
+                    "configured": False,
+                    "message": "Using local configuration (Azure App Config not configured)"
+                }
+            
+            # Check if ConfigurationManager has Azure config initialized
+            azure_initialized = getattr(self._config, '_azure_config_initialized', False)
+            return {
+                "healthy": True,  # Not a hard failure if Azure config unavailable
+                "configured": True,
+                "azure_connected": azure_initialized,
+                "message": "Azure App Config connected" if azure_initialized else "Azure App Config configured but not connected"
+            }
+        
+        # Check database connectivity
+        async def check_database() -> dict:
+            """Validate database connection status."""
+            if not self._bot_instance:
+                return {
+                    "healthy": False,
+                    "message": "Bot instance not initialized"
+                }
+            
+            try:
+                # Access the database manager through bot instance
+                db_manager = getattr(self._bot_instance, 'db_manager', None)
+                if not db_manager:
+                    return {
+                        "healthy": False,
+                        "message": "Database manager not available"
+                    }
+                
+                # Try to verify DB is accessible
+                is_connected = getattr(db_manager, 'is_connected', True)
+                return {
+                    "healthy": is_connected,
+                    "message": "Database connected" if is_connected else "Database disconnected"
+                }
+            except Exception as e:
+                return {
+                    "healthy": False,
+                    "message": f"Database check failed: {str(e)}"
+                }
+        
+        # Register all checks with monitoring router
+        self._monitoring_router.register_dependency_check("signalr", check_signalr)
+        self._monitoring_router.register_dependency_check("azure_config", check_azure_config)
+        self._monitoring_router.register_dependency_check("database", check_database)
+        
+        logger.info("📋 Registered 3 dependency checks: signalr, azure_config, database")
     
     def _display_endpoints(self) -> None:
         """Display available endpoints to the user."""
         base_url = f"http://{self._host}:{self._port}"
         
         print("\n" + "="*70)
-        print("📊 ENHANCED BOT MONITORING ENDPOINTS AVAILABLE")
+        print("📊 TRADING BOT API ENDPOINTS")
         print("="*70)
-        print(f"🏠 Health Check:      {base_url}/health")
-        print(f"📈 Positions:         {base_url}/positions")
-        print(f"🔍 Position Detail:   {base_url}/positions/{{symbol}}")
-        print(f"📊 Bot Status:        {base_url}/status")
-        print(f"🎯 Strategy Details:  {base_url}/strategy")
-        print(f"📋 Recent Orders:     {base_url}/orders")
-        print(f"💰 Trading Summary:   {base_url}/trades")
-        print(f"🔄 DCA Orders:        {base_url}/dca-orders")
-        print(f"📊 Portfolio Summary: {base_url}/portfolio-summary")
-        print(f"📚 API Docs:          {base_url}/docs")
+        print("\n🔍 MONITORING (Read-Only)")
+        print(f"  🏠 Health Check:      {base_url}/health")
+        print(f"  📈 Positions:         {base_url}/positions")
+        print(f"  📋 Recent Orders:     {base_url}/orders")
+        print(f"  📊 Portfolio Summary: {base_url}/portfolio-summary")
+        print(f"  📚 API Docs:          {base_url}/docs")
+        print("\n🎮 ADMIN (Trading Terminal)")
+        print(f"  📝 Place Order:       POST {base_url}/admin/orders")
+        print(f"  🚫 Cancel Order:      DELETE {base_url}/admin/orders/{{id}}")
+        print(f"  📤 Close Position:    POST {base_url}/admin/positions/{{symbol}}/close")
+        print(f"  🚀 Start Bot:         POST {base_url}/admin/bot/start")
+        print(f"  ⏸️  Pause Bot:         POST {base_url}/admin/bot/pause")
+        print(f"  🛑 Stop Bot:          POST {base_url}/admin/bot/stop")
+        print(f"  ⚙️  Get Config:        GET {base_url}/admin/config")
+        print(f"  💰 Funds Summary:     GET {base_url}/admin/funds/summary")
         print("="*70)
-        print("💡 Enhanced DCA Tracking: Upgrade to see progressive pricing validation,")
-        print("   technical analysis context, and comprehensive position analytics!")
-        print("="*70)
-        print()
-        print("💡 TIP: Bookmark these URLs to monitor your bot!")
-        print("📱 Access from any browser or API client")
+        print("💡 TIP: Use the Trading Terminal UI for easy access!")
         print("="*70 + "\n")

@@ -1,12 +1,13 @@
 """ 
 Pydantic Configuration Schema Validation
 
-Provides strong typing and validation for TOML configuration structure.
+Provides strong typing and validation for configuration structure.
 Catches errors at startup rather than runtime.
 
-Note: This module validates the structure of configuration loaded from
-config/settings.toml via Dynaconf. The schema definitions ensure type
-safety regardless of the configuration file format.
+Note: This module validates configuration structure loaded from:
+- Azure App Configuration (production)
+- Environment variables (local development)
+The schema definitions ensure type safety regardless of the source.
 
 Includes severity classification for validation issues.
 """
@@ -238,7 +239,7 @@ class ConfigValidator:
     
     Example:
         validator = ConfigValidator()
-        config = validator.load_and_validate('config.yaml')
+        config = validator.load_and_validate()
         
         if validator.has_warnings():
             for warning in validator.get_warnings():
@@ -567,9 +568,12 @@ class ConfigValidator:
         return diffs
 
 
-def validate_config_file(config_path: str = 'config.yaml') -> BotConfig:
+def validate_config_file(config_path: str = None) -> BotConfig:
     """
-    Convenience function to validate config file.
+    Convenience function to validate config.
+    
+    Note: config_path is deprecated - configuration is loaded from
+    Azure App Configuration or environment variables.
     
     Example:
         try:

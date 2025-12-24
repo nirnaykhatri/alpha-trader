@@ -3,7 +3,7 @@
 Test Configuration Module
 
 Provides configuration helpers for webhook and integration tests.
-Reads from the TOML-based configuration system.
+Reads from the Azure-native configuration system with environment variable fallback.
 
 This module provides:
 - get_webhook_url(mode): Get webhook URL for local or ngrok mode
@@ -22,18 +22,18 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # Try to import from the project's config system
 try:
-    from src.config.settings import ConfigManager
+    from src.core import ConfigurationManager
     HAS_CONFIG_MANAGER = True
 except ImportError:
     HAS_CONFIG_MANAGER = False
 
 
-def _get_config_manager() -> Optional[Any]:
-    """Get the ConfigManager instance if available."""
+def _get_config_manager() -> Optional[ConfigurationManager]:
+    """Get the ConfigurationManager instance if available."""
     if not HAS_CONFIG_MANAGER:
         return None
     try:
-        return ConfigManager()
+        return ConfigurationManager()
     except Exception:
         return None
 
@@ -133,21 +133,16 @@ def get_test_config() -> Dict[str, Any]:
         "test_symbols": ["AAPL", "GOOGL", "MSFT", "TSLA"],
     }
 
-    # Try to get values from the TOML configuration
+    # Try to get values from the configuration
     config_mgr = _get_config_manager()
     if config_mgr:
         try:
-            config["webhook_port"] = config_mgr.get_config("api.webhook.port", 8080)
-            webhook_host = config_mgr.get_config("api.webhook.host", "0.0.0.0")
-            config["webhook_host"] = "localhost" if webhook_host == "0.0.0.0" else webhook_host
+            webhook_config = config_mgr.get_webhook_config()
+            config["webhook_port"] = webhook_config.port
+            config["webhook_host"] = "localhost" if webhook_config.host == "0.0.0.0" else webhook_config.host
             config["timeout"] = config_mgr.get_config("api.timeout", 30)
             config["max_retries"] = config_mgr.get_config("api.max_retries", 3)
             config["retry_delay"] = config_mgr.get_config("api.retry_delay", 1.0)
-
-            # Get default symbols
-            symbols = config_mgr.get_config("symbols.default_symbols", None)
-            if symbols:
-                config["test_symbols"] = symbols
 
             # Update webhook URL with correct port
             config["webhook_url"] = f"http://{config['webhook_host']}:{config['webhook_port']}/webhook"

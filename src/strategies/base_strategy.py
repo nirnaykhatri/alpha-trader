@@ -1,395 +1,367 @@
 """
-Base Strategy Abstract Class
-Provides common functionality and enforces consistent interface for all trading strategies.
-Follows SOLID principles and provides template method pattern.
+Base Strategy - Abstract base class for all trading strategies.
+
+Provides common functionality and default implementations for
+ITradingStrategy methods that placeholder strategies can inherit.
+
+This module contains:
+- BaseStrategy: Abstract base with common functionality
+- Placeholder implementations for strategies not yet implemented
+
+Author: Trading Bot Team
+Version: 1.0.0
 """
 
-import asyncio
-from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List
-from datetime import datetime
-from dataclasses import dataclass
-from enum import Enum
-
-from src.interfaces import IConfigurationManager, IMarketDataProvider
+from abc import ABC
+from typing import Dict, Optional, Any
+from src.interfaces import (
+    IOrderManager, IMarketDataProvider, IRiskManager, ITradingStrategy,
+    TradingSignal, Position, StrategyEvaluation
+)
 from src.core.logging_config import get_logger
-from src.exceptions import TradingBotException, ConfigurationException
-
+from src.domain.bot_models import BotConfiguration, BotType
 
 logger = get_logger(__name__)
 
 
-class StrategyState(Enum):
-    """Strategy execution states."""
-    INITIALIZED = "initialized"
-    RUNNING = "running"
-    PAUSED = "paused"
-    STOPPED = "stopped"
-    ERROR = "error"
-
-
-@dataclass
-class StrategyMetrics:
-    """Strategy performance metrics."""
-    total_trades: int = 0
-    winning_trades: int = 0
-    losing_trades: int = 0
-    total_pnl: float = 0.0
-    max_drawdown: float = 0.0
-    win_rate: float = 0.0
-    average_trade_duration: float = 0.0
-    last_updated: datetime = None
-    
-    def __post_init__(self):
-        if self.last_updated is None:
-            self.last_updated = datetime.utcnow()
-    
-    def update_win_rate(self):
-        """Update win rate based on current trade counts."""
-        if self.total_trades > 0:
-            self.win_rate = self.winning_trades / self.total_trades
-        else:
-            self.win_rate = 0.0
-
-
-class BaseStrategy(ABC):
+class BaseStrategy(ITradingStrategy, ABC):
     """
     Abstract base class for all trading strategies.
-    Implements common functionality and enforces consistent interface.
+    
+    Provides common functionality such as:
+    - Configuration management
+    - State tracking
+    - Default implementations for common methods
+    
+    Subclasses must implement:
+    - execute_tick()
+    - handle_signal()
+    - evaluate_entry()
+    - evaluate_exit()
+    - evaluate_dca()
+    - name property
+    - bot_type property
     """
     
-    def __init__(self, config: IConfigurationManager, market_data: IMarketDataProvider):
+    # Override in subclasses
+    STRATEGY_NAME = "base_strategy"
+    BOT_TYPE = BotType.DCA  # Default, override in subclasses
+    
+    def __init__(
+        self,
+        order_manager: IOrderManager,
+        market_data: IMarketDataProvider,
+        risk_manager: IRiskManager,
+        bot_config: BotConfiguration,
+        position_manager=None,
+        resilience_tracker=None
+    ):
         """
-        Initialize base strategy.
+        Initialize the base strategy.
         
         Args:
-            config: Configuration manager instance
-            market_data: Market data provider instance
+            order_manager: Order execution manager
+            market_data: Market data provider
+            risk_manager: Risk management service
+            bot_config: Bot's configuration from database
+            position_manager: Position tracking manager
+            resilience_tracker: Resilience tracking service
         """
-        self._config = config
-        self._market_data = market_data
-        self._state = StrategyState.INITIALIZED
-        self._metrics = StrategyMetrics()
-        self._logger = get_logger(self.__class__.__name__)
+        if bot_config is None:
+            raise ValueError("bot_config is required - configuration must come from database")
         
-        # Protected attributes that subclasses can access
-        self._validation_enabled = True
-        self._performance_tracking = True
+        self.order_manager = order_manager
+        self.market_data = market_data
+        self.risk_manager = risk_manager
+        self.position_manager = position_manager
+        self._bot_config = bot_config
         
-        # Load base configuration
-        self._load_base_config()
-        
-        self._logger.info(f"{self.__class__.__name__} initialized")
+        # Strategy state tracking
+        self._is_active = False
+        self._is_initialized = False
     
-    @property
-    def state(self) -> StrategyState:
-        """Get current strategy state."""
-        return self._state
-    
-    @property
-    def metrics(self) -> StrategyMetrics:
-        """Get strategy performance metrics."""
-        return self._metrics
-    
-    def _load_base_config(self) -> None:
-        """Load base configuration common to all strategies."""
-        try:
-            self._validation_enabled = self._config.get_config("strategies.validation_enabled", True)
-            self._performance_tracking = self._config.get_config("strategies.performance_tracking", True)
-            
-            # Log level for strategy-specific logging
-            strategy_log_level = self._config.get_config("strategies.log_level", "INFO")
-            
-        except Exception as e:
-            self._logger.warning(f"Failed to load base configuration: {e}")
-            raise ConfigurationException(f"Base strategy configuration error: {e}")
-    
-    def _validate_inputs(self, **kwargs) -> None:
-        """
-        Enhanced input validation with comprehensive edge case handling.
-        
-        Handles edge cases that can occur during bot restarts, market gaps,
-        or data inconsistencies.
-        
-        Raises:
-            ValueError: If validation fails
-            ValidationException: For complex validation errors
-        """
-        if not self._validation_enabled:
+    async def initialize(self) -> None:
+        """Initialize the strategy."""
+        if self._is_initialized:
+            logger.warning(f"{self.name} already initialized, skipping")
             return
         
-        # Common validations with enhanced error messages
-        for key, value in kwargs.items():
-            if value is None:
-                raise ValueError(f"Required parameter '{key}' cannot be None")
-            
-            # Enhanced price validation with edge case detection
-            if key.endswith('_price'):
-                if not isinstance(value, (int, float)):
-                    raise ValueError(f"Price parameter '{key}' must be numeric, got: {type(value).__name__}")
-                
-                if value <= 0:
-                    raise ValueError(f"Price parameter '{key}' must be positive, got: {value}")
-                
-                # Check for extreme values that might indicate data errors
-                if value > 1000000:  # $1M per share - very unusual
-                    self._logger.warning(f"⚠️ Extremely high price detected for {key}: ${value:,.2f}")
-                elif value < 0.001:  # Less than 0.1 cent - very unusual
-                    self._logger.warning(f"⚠️ Very low price detected for {key}: ${value:.6f}")
-            
-            # Enhanced symbol validation
-            if key == 'symbol':
-                if not isinstance(value, str) or not value.strip():
-                    raise ValueError(f"Symbol must be non-empty string, got: {value}")
-                
-                # Clean and validate symbol format
-                cleaned_symbol = value.strip().upper()
-                if not cleaned_symbol.replace('.', '').replace('-', '').replace('_', '').isalnum():
-                    raise ValueError(f"Invalid symbol format: {value}")
-                
-                # Check for unreasonably long symbols (potential corruption)
-                if len(cleaned_symbol) > 15:
-                    self._logger.warning(f"⚠️ Unusually long symbol: {cleaned_symbol}")
-            
-            # Quantity validation
-            if key in ['quantity', 'shares', 'size']:
-                if not isinstance(value, (int, float)):
-                    raise ValueError(f"Quantity parameter '{key}' must be numeric, got: {type(value).__name__}")
-                
-                if value <= 0:
-                    raise ValueError(f"Quantity parameter '{key}' must be positive, got: {value}")
-            
-            # Percentage validation
-            if key.endswith('_percent') or key.endswith('_percentage'):
-                if not isinstance(value, (int, float)):
-                    raise ValueError(f"Percentage parameter '{key}' must be numeric, got: {type(value).__name__}")
-                
-                if not (0 <= value <= 100):
-                    self._logger.warning(f"⚠️ Unusual percentage value for {key}: {value}%")
-
-    def _handle_strategy_error(self, error: Exception, context: str) -> Dict[str, Any]:
-        """
-        Centralized error handling for strategy execution.
-        
-        Provides recovery mechanisms and consistent error reporting.
-        
-        Args:
-            error: The exception that occurred
-            context: Context description of where the error occurred
-            
-        Returns:
-            Error response dictionary with recovery suggestions
-        """
-        error_type = type(error).__name__
-        error_message = str(error)
-        
-        # Log the error with context
-        self._logger.error(f"Strategy error in {context}: {error_type} - {error_message}")
-        
-        # Change state to error if it's a critical failure
-        if isinstance(error, (ConnectionError, TimeoutError)):
-            self._change_state(StrategyState.ERROR, f"Connection/timeout error in {context}")
-        elif isinstance(error, ValueError):
-            self._change_state(StrategyState.ERROR, f"Validation error in {context}")
-        else:
-            self._logger.warning(f"Non-critical error in {context}, continuing execution")
-        
-        # Build error response with recovery suggestions
-        error_response = {
-            'success': False,
-            'error_type': error_type,
-            'error_message': error_message,
-            'context': context,
-            'timestamp': datetime.utcnow(),
-            'strategy_state': self._state.value
+        logger.info(f"🚀 Initializing {self.name} strategy...")
+        self._is_initialized = True
+        self._is_active = True
+        logger.info(f"✅ {self.name} strategy initialized")
+    
+    async def close(self) -> None:
+        """Close the strategy and release resources."""
+        logger.info(f"🛑 Closing {self.name} strategy...")
+        self._is_active = False
+        self._is_initialized = False
+        logger.info(f"✅ {self.name} strategy closed")
+    
+    def get_state(self) -> Dict[str, Any]:
+        """Get the current state of the strategy."""
+        return {
+            'name': self.name,
+            'bot_type': self.bot_type.value,
+            'is_active': self.is_active,
+            'is_initialized': self._is_initialized,
+            'implemented': False,  # Placeholder indicator
+            'message': f"{self.name} is not yet implemented"
         }
-        
-        # Add recovery suggestions based on error type
-        if isinstance(error, ConnectionError):
-            error_response['recovery_suggestions'] = [
-                "Check network connectivity",
-                "Verify API endpoints are accessible",
-                "Consider implementing retry logic"
-            ]
-        elif isinstance(error, TimeoutError):
-            error_response['recovery_suggestions'] = [
-                "Increase timeout values",
-                "Check system performance",
-                "Verify data provider response times"
-            ]
-        elif isinstance(error, ValueError):
-            error_response['recovery_suggestions'] = [
-                "Validate input parameters",
-                "Check data format and types",
-                "Review configuration settings"
-            ]
-        else:
-            error_response['recovery_suggestions'] = [
-                "Review strategy logs for details",
-                "Check system resources",
-                "Consider restarting the strategy"
-            ]
-        
-        return error_response
+    
+    @property
+    def name(self) -> str:
+        """Get the strategy name."""
+        return self.STRATEGY_NAME
+    
+    @property
+    def is_active(self) -> bool:
+        """Check if strategy is active."""
+        return self._is_active
+    
+    @property
+    def bot_type(self) -> BotType:
+        """Get the bot type this strategy implements."""
+        return self.BOT_TYPE
 
-    def _safe_execute(self, operation_name: str, operation_func, *args, **kwargs) -> Any:
-        """
-        Safely execute a strategy operation with error handling and recovery.
-        
-        Args:
-            operation_name: Description of the operation being performed
-            operation_func: Function to execute
-            *args: Positional arguments for the function
-            **kwargs: Keyword arguments for the function
-            
-        Returns:
-            Operation result or None if failed
-        """
-        try:
-            self._logger.debug(f"Executing {operation_name}")
-            result = operation_func(*args, **kwargs)
-            self._logger.debug(f"✅ {operation_name} completed successfully")
-            return result
-            
-        except Exception as e:
-            error_response = self._handle_strategy_error(e, operation_name)
-            self._logger.error(f"❌ {operation_name} failed: {error_response['error_message']}")
-            
-            # Decide whether to re-raise or return None based on error type
-            if isinstance(e, (ValueError, TypeError)):
-                # Re-raise validation errors as they indicate programming issues
-                raise
-            else:
-                # Return None for runtime errors to allow graceful degradation
-                return None
 
-    async def _safe_async_execute(self, operation_name: str, operation_func, *args, **kwargs) -> Any:
-        """
-        Safely execute an async strategy operation with error handling and recovery.
-        
-        Args:
-            operation_name: Description of the operation being performed
-            operation_func: Async function to execute
-            *args: Positional arguments for the function
-            **kwargs: Keyword arguments for the function
-            
-        Returns:
-            Operation result or None if failed
-        """
-        try:
-            self._logger.debug(f"Executing async {operation_name}")
-            result = await operation_func(*args, **kwargs)
-            self._logger.debug(f"✅ Async {operation_name} completed successfully")
-            return result
-            
-        except asyncio.TimeoutError:
-            error_response = self._handle_strategy_error(
-                TimeoutError(f"Operation {operation_name} timed out"), operation_name
-            )
-            self._logger.error(f"⏰ {operation_name} timed out")
-            return None
-            
-        except Exception as e:
-            error_response = self._handle_strategy_error(e, operation_name)
-            self._logger.error(f"❌ Async {operation_name} failed: {error_response['error_message']}")
-            
-            # Decide whether to re-raise or return None based on error type
-            if isinstance(e, (ValueError, TypeError)):
-                # Re-raise validation errors as they indicate programming issues
-                raise
-            else:
-                # Return None for runtime errors to allow graceful degradation
-                return None
+class NotImplementedStrategy(BaseStrategy):
+    """
+    Base class for strategies that are not yet implemented.
     
-    def _update_metrics(self, trade_result: Dict[str, Any]) -> None:
-        """
-        Update strategy performance metrics.
-        
-        Args:
-            trade_result: Dictionary containing trade outcome data
-        """
-        if not self._performance_tracking:
-            return
-        
-        try:
-            self._metrics.total_trades += 1
-            
-            pnl = trade_result.get('pnl', 0.0)
-            self._metrics.total_pnl += pnl
-            
-            if pnl > 0:
-                self._metrics.winning_trades += 1
-            elif pnl < 0:
-                self._metrics.losing_trades += 1
-            
-            # Update win rate
-            self._metrics.update_win_rate()
-            
-            # Update timestamp
-            self._metrics.last_updated = datetime.utcnow()
-            
-            self._logger.debug(f"Metrics updated: PnL={pnl:.2f}, Win Rate={self._metrics.win_rate:.2%}")
-            
-        except Exception as e:
-            self._logger.warning(f"Failed to update metrics: {e}")
+    Provides stub implementations that raise NotImplementedError
+    with helpful messages about the strategy status.
+    """
     
-    def _change_state(self, new_state: StrategyState, reason: str = "") -> None:
-        """
-        Change strategy state with logging.
-        
-        Args:
-            new_state: New state to transition to
-            reason: Optional reason for state change
-        """
-        if self._state != new_state:
-            old_state = self._state
-            self._state = new_state
-            self._logger.info(f"State changed: {old_state.value} -> {new_state.value}" + 
-                            (f" (Reason: {reason})" if reason else ""))
+    def _not_implemented_message(self, method_name: str) -> str:
+        """Generate a helpful not implemented message."""
+        return (
+            f"{self.name}.{method_name}() is not yet implemented. "
+            f"This strategy ({self.bot_type.value}) is a placeholder. "
+            f"Please use DCA strategy for production trading."
+        )
     
-    @abstractmethod
-    async def initialize(self) -> bool:
-        """
-        Initialize strategy. Must be implemented by subclasses.
-        
-        Returns:
-            True if initialization successful
-        """
-        pass
+    async def evaluate_entry(
+        self,
+        signal: TradingSignal,
+        position: Optional[Position] = None,
+        market_context: Optional[Dict[str, Any]] = None
+    ) -> StrategyEvaluation:
+        """Placeholder - returns skip evaluation."""
+        return StrategyEvaluation(
+            should_act=False,
+            action_type="skip",
+            reason=self._not_implemented_message("evaluate_entry"),
+            confidence=0.0
+        )
     
-    @abstractmethod
-    async def execute(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Execute strategy logic. Must be implemented by subclasses.
-        
-        Args:
-            data: Input data for strategy execution
-            
-        Returns:
-            Strategy execution results
-        """
-        pass
+    async def evaluate_exit(
+        self,
+        position: Position,
+        current_price: float,
+        market_context: Optional[Dict[str, Any]] = None
+    ) -> StrategyEvaluation:
+        """Placeholder - returns skip evaluation."""
+        return StrategyEvaluation(
+            should_act=False,
+            action_type="skip",
+            reason=self._not_implemented_message("evaluate_exit"),
+            confidence=0.0
+        )
     
-    @abstractmethod
-    async def cleanup(self) -> None:
-        """
-        Cleanup strategy resources. Must be implemented by subclasses.
-        """
-        pass
+    async def evaluate_dca(
+        self,
+        position: Position,
+        current_price: float,
+        market_context: Optional[Dict[str, Any]] = None
+    ) -> StrategyEvaluation:
+        """Placeholder - returns skip evaluation."""
+        return StrategyEvaluation(
+            should_act=False,
+            action_type="skip",
+            reason=self._not_implemented_message("evaluate_dca"),
+            confidence=0.0
+        )
     
-    def get_config_value(self, key: str, default: Any = None) -> Any:
-        """
-        Safe method to get configuration values with fallback.
-        
-        Args:
-            key: Configuration key
-            default: Default value if key not found
-            
-        Returns:
-            Configuration value or default
-        """
-        try:
-            return self._config.get_config(key, default)
-        except Exception as e:
-            self._logger.warning(f"Failed to get config '{key}': {e}")
-            return default
+    async def execute_tick(
+        self,
+        current_price: float,
+        market_context: Optional[Dict[str, Any]] = None
+    ) -> Optional[StrategyEvaluation]:
+        """Placeholder - returns None (no action)."""
+        logger.debug(f"{self.name}: execute_tick called but not implemented")
+        return None
+    
+    async def handle_signal(
+        self,
+        signal: Dict[str, Any]
+    ) -> Optional[StrategyEvaluation]:
+        """Placeholder - returns None (no action)."""
+        logger.warning(
+            f"{self.name}: Signal received but strategy not implemented. "
+            f"Signal: {signal.get('action')} {signal.get('symbol')}"
+        )
+        return None
+
+
+class GridStrategy(NotImplementedStrategy):
+    """
+    Grid Trading Strategy (Placeholder).
+    
+    Grid trading places buy and sell orders at predefined price levels
+    (grid lines) above and below a set price. Profits are made when
+    price oscillates between grid levels.
+    
+    Features (when implemented):
+    - Automatic grid level calculation
+    - Dynamic grid adjustment
+    - Range-bound profit optimization
+    - Works best in sideways markets
+    
+    Status: NOT IMPLEMENTED - Placeholder only
+    """
+    
+    STRATEGY_NAME = "grid_strategy"
+    BOT_TYPE = BotType.GRID
+    
+    def get_state(self) -> Dict[str, Any]:
+        """Get strategy state with grid-specific info."""
+        state = super().get_state()
+        state.update({
+            'grid_levels': [],
+            'active_orders': [],
+            'price_range': {'lower': None, 'upper': None},
+            'grid_spacing': None,
+            'message': "Grid strategy is not yet implemented. Coming in future release."
+        })
+        return state
+
+
+class SpotLoopStrategy(NotImplementedStrategy):
+    """
+    Spot Loop Trading Strategy (Placeholder).
+    
+    Loop strategy continuously buys low and sells high within a
+    defined range. Similar to grid but optimized for spot markets
+    with simpler mechanics.
+    
+    Features (when implemented):
+    - Simple buy/sell loop logic
+    - Range detection
+    - Profit locking on each cycle
+    - Minimal capital requirement
+    
+    Status: NOT IMPLEMENTED - Placeholder only
+    """
+    
+    STRATEGY_NAME = "spot_loop_strategy"
+    BOT_TYPE = BotType.SPOT_LOOP
+    
+    def get_state(self) -> Dict[str, Any]:
+        """Get strategy state with loop-specific info."""
+        state = super().get_state()
+        state.update({
+            'loop_count': 0,
+            'current_phase': 'idle',  # 'buying' or 'selling'
+            'buy_price': None,
+            'sell_price': None,
+            'message': "Spot loop strategy is not yet implemented. Coming in future release."
+        })
+        return state
+
+
+class ComboStrategy(NotImplementedStrategy):
+    """
+    Combo Trading Strategy (Placeholder).
+    
+    Combines multiple strategy elements (DCA + Grid, etc.) into
+    a unified approach. Adapts behavior based on market conditions.
+    
+    Features (when implemented):
+    - Multi-strategy orchestration
+    - Condition-based strategy switching
+    - Combined risk management
+    - Adaptive behavior
+    
+    Status: NOT IMPLEMENTED - Placeholder only
+    """
+    
+    STRATEGY_NAME = "combo_strategy"
+    BOT_TYPE = BotType.COMBO
+    
+    def get_state(self) -> Dict[str, Any]:
+        """Get strategy state with combo-specific info."""
+        state = super().get_state()
+        state.update({
+            'active_sub_strategies': [],
+            'current_mode': 'idle',
+            'strategy_weights': {},
+            'message': "Combo strategy is not yet implemented. Coming in future release."
+        })
+        return state
+
+
+class FuturesDCAStrategy(NotImplementedStrategy):
+    """
+    Futures DCA Trading Strategy (Placeholder).
+    
+    DCA strategy adapted for futures/perpetual contracts with
+    leverage support and funding rate considerations.
+    
+    Features (when implemented):
+    - Leverage management
+    - Funding rate optimization
+    - Long/short position support
+    - Liquidation protection
+    - Margin management
+    
+    Status: NOT IMPLEMENTED - Placeholder only
+    """
+    
+    STRATEGY_NAME = "futures_dca_strategy"
+    BOT_TYPE = BotType.FUTURES_DCA
+    
+    def get_state(self) -> Dict[str, Any]:
+        """Get strategy state with futures-specific info."""
+        state = super().get_state()
+        state.update({
+            'leverage': 1,
+            'margin_type': 'cross',
+            'funding_rate': None,
+            'liquidation_price': None,
+            'position_side': None,  # 'long' or 'short'
+            'message': "Futures DCA strategy is not yet implemented. Coming in future release."
+        })
+        return state
+
+
+class FuturesComboStrategy(NotImplementedStrategy):
+    """
+    Futures Combo Trading Strategy (Placeholder).
+    
+    Combines multiple futures trading strategies with advanced
+    position management and hedging capabilities.
+    
+    Features (when implemented):
+    - Multi-strategy futures trading
+    - Hedging support
+    - Cross-margin optimization
+    - Advanced liquidation protection
+    
+    Status: NOT IMPLEMENTED - Placeholder only
+    """
+    
+    STRATEGY_NAME = "futures_combo_strategy"
+    BOT_TYPE = BotType.FUTURES_COMBO
+    
+    def get_state(self) -> Dict[str, Any]:
+        """Get strategy state with futures combo-specific info."""
+        state = super().get_state()
+        state.update({
+            'active_sub_strategies': [],
+            'leverage': 1,
+            'hedge_positions': [],
+            'total_margin_used': 0,
+            'message': "Futures combo strategy is not yet implemented. Coming in future release."
+        })
+        return state

@@ -13,7 +13,8 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
 from src.core.configuration import ConfigurationManager
-from src.strategies.advanced_strategy import AdvancedTradingStrategy, PositionState, PositionDirection, TradePhase
+from src.strategies.dca_strategy import DCAStrategy
+from src.strategies.position_state import PositionState, PositionDirection, TradePhase
 import pytest
 
 @pytest.mark.asyncio
@@ -40,12 +41,41 @@ async def test_dca_triggers():
     mock_risk_manager = AsyncMock()
     mock_position_manager = AsyncMock()
     
+    # Create mock BotConfiguration for DCAStrategy
+    from decimal import Decimal
+    from src.domain.bot_models import (
+        BotConfiguration, DCAConfig, BotType, PositionMode,
+        AveragingOrdersConfig, TakeProfitConfig, StopLossConfig,
+        QuickSetupPreset
+    )
+    
+    bot_config = BotConfiguration(
+        symbol="TEST",
+        exchange="alpaca",
+        bot_type=BotType.DCA,
+        position_mode=PositionMode.LONG,
+        dca_config=DCAConfig(
+            quick_setup=QuickSetupPreset.MID_TERM,
+            averaging_orders=AveragingOrdersConfig(
+                orders_count=3,
+                step_percent=Decimal("2.0"),
+                amount_multiplier=Decimal("2.0"),
+            ),
+            take_profit=TakeProfitConfig(
+                enabled=True,
+                price_change_percent=Decimal("5.0"),
+                trailing_deviation=Decimal("2.0"),
+            ),
+            stop_loss=StopLossConfig(enabled=True, percent=Decimal("10.0")),
+        ),
+    )
+    
     # Create strategy instance
-    strategy = AdvancedTradingStrategy(
-        config=mock_config,
+    strategy = DCAStrategy(
         order_manager=mock_order_manager,
         market_data=mock_market_data,
         risk_manager=mock_risk_manager,
+        bot_config=bot_config,
         position_manager=mock_position_manager
     )
     

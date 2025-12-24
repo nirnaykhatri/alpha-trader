@@ -1,9 +1,13 @@
 """
 Monitoring endpoints for bot status, positions, orders, and analytics.
 Provides comprehensive monitoring and analytics capabilities.
+
+Includes health and readiness endpoints for Azure Container Apps:
+- /health: Liveness probe - checks if app is running
+- /ready: Readiness probe - checks if app can handle traffic
 """
 
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime
 from fastapi import Request, HTTPException, APIRouter
 from fastapi.responses import JSONResponse
@@ -19,6 +23,10 @@ class MonitoringRouter:
     """
     Provides monitoring and analytics endpoints for the trading bot.
     All endpoints are localhost-only for security.
+    
+    Container Apps Health Probes:
+        - /health: Liveness probe - returns 200 if app is running
+        - /ready: Readiness probe - returns 200 if all dependencies ready
     """
     
     def __init__(self, bot_instance=None):
@@ -29,6 +37,7 @@ class MonitoringRouter:
             bot_instance: Reference to the trading bot instance
         """
         self._bot_instance = bot_instance
+        self._dependency_checks: Dict[str, Any] = {}
         
         # Create router for monitoring endpoints
         self.router = APIRouter(
@@ -45,17 +54,107 @@ class MonitoringRouter:
         """Set the bot instance reference."""
         self._bot_instance = bot_instance
     
+    def register_dependency_check(self, name: str, check_func) -> None:
+        """
+        Register a dependency health check function for readiness probe.
+        
+        Args:
+            name: Name of the dependency (e.g., 'database', 'key_vault')
+            check_func: Async function that returns dict with 'healthy' bool
+        """
+        self._dependency_checks[name] = check_func
+        logger.info(f"Registered dependency check: {name}")
+    
+    async def _check_all_dependencies(self) -> Dict[str, Any]:
+        """
+        Check all registered dependencies for readiness probe.
+        
+        Returns:
+            Dict with overall status and individual dependency results
+        """
+        results = {}
+        all_healthy = True
+        
+        for name, check_func in self._dependency_checks.items():
+            try:
+                result = await check_func()
+                results[name] = result
+                if not result.get('healthy', False):
+                    all_healthy = False
+            except Exception as e:
+                logger.error(f"Dependency check failed for {name}: {str(e)}")
+                results[name] = {'healthy': False, 'error': str(e)}
+                all_healthy = False
+        
+        return {
+            'all_healthy': all_healthy,
+            'dependencies': results
+        }
+    
     def _setup_routes(self) -> None:
         """Setup all monitoring routes."""
         
         @self.router.get("/health", tags=["health"])
         async def health_check():
-            """Health check endpoint."""
+            """
+            Liveness probe endpoint for Container Apps.
+            
+            Returns 200 if the application is running.
+            This is a lightweight check - does not verify dependencies.
+            
+            Returns:
+                Health status with timestamp and version
+            """
             return {
                 "status": "healthy", 
                 "timestamp": datetime.utcnow().isoformat(),
                 "version": "1.0.0"
             }
+        
+        @self.router.get("/ready", tags=["health"])
+        async def readiness_check():
+            """
+            Readiness probe endpoint for Container Apps.
+            
+            Checks all registered dependencies (database, key vault, etc.)
+            and returns 200 only if ALL dependencies are healthy.
+            
+            Container Apps will not route traffic until this returns 200.
+            
+            Returns:
+                200 with status if ready, 503 if not ready
+            """
+            try:
+                # Check all registered dependencies
+                result = await self._check_all_dependencies()
+                
+                response_data = {
+                    "status": "ready" if result['all_healthy'] else "not_ready",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "version": "1.0.0",
+                    "dependencies": result['dependencies']
+                }
+                
+                if result['all_healthy']:
+                    return JSONResponse(
+                        content=response_data,
+                        status_code=200
+                    )
+                else:
+                    return JSONResponse(
+                        content=response_data,
+                        status_code=503
+                    )
+            except Exception as e:
+                logger.error(f"Readiness check failed: {str(e)}")
+                return JSONResponse(
+                    content={
+                        "status": "not_ready",
+                        "error": str(e),
+                        "timestamp": datetime.utcnow().isoformat()
+                    },
+                    status_code=503
+                )
         
         @self.router.get("/", tags=["health"])
         async def root():

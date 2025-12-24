@@ -2,14 +2,10 @@
 Strategy Components Package
 
 Modular components for the Advanced Trading Strategy.
+
+Note: Legacy components (DCALevelSelector, PositionAdjustmentPlanner, PriceContextService)
+have been removed as the old TradingBotOrchestrator architecture is deprecated.
+The new bot_engine architecture uses database-driven configuration via BotConfiguration.
 """
 
-from src.strategies.components.price_context_service import PriceContextService
-from src.strategies.components.dca_level_selector import DCALevelSelector
-from src.strategies.components.position_adjustment_planner import PositionAdjustmentPlanner
-
-__all__ = [
-    'PriceContextService',
-    'DCALevelSelector',
-    'PositionAdjustmentPlanner',
-]
+__all__ = []
