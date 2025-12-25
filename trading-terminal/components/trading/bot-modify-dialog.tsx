@@ -32,6 +32,7 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import type { Bot, UpdateBotRequest } from '@/lib/types/bot'
+import { BOT_TYPE_LABELS } from '@/lib/types/bot'
 
 // ============================================================================
 // Types
@@ -120,10 +121,10 @@ export function BotModifyDialog({
         investmentAmount: bot.configuration.investmentAmount.toString(),
         leverage: bot.configuration.leverage || 3,
         marginMode: bot.configuration.marginMode === 'cross' ? 'cross' : 'isolated',
-        stopLossEnabled: bot.configuration.dcaConfig.stopLossPercent !== null,
-        stopLossValue: bot.configuration.dcaConfig.stopLossPercent?.toString() || '0.0954',
-        takeProfitEnabled: true,
-        takeProfitValue: bot.configuration.dcaConfig.takeProfitPercent.toString(),
+        stopLossEnabled: bot.configuration.dcaConfig.stopLoss?.enabled ?? false,
+        stopLossValue: bot.configuration.dcaConfig.stopLoss?.percent?.toString() || '5.0',
+        takeProfitEnabled: bot.configuration.dcaConfig.takeProfit?.enabled ?? true,
+        takeProfitValue: bot.configuration.dcaConfig.takeProfit?.priceChangePercent?.toString() || '1.0',
       }))
     }
   }, [bot])
@@ -144,15 +145,17 @@ export function BotModifyDialog({
 
     try {
       await onSave(bot.id, {
-        configuration: {
-          positionMode: form.positionMode,
-          investmentAmount: parseFloat(form.investmentAmount),
-          leverage: form.leverage,
-          marginMode: form.marginMode,
-          dcaConfig: {
-            ...bot.configuration.dcaConfig,
-            stopLossPercent: form.stopLossEnabled ? parseFloat(form.stopLossValue) : null,
-            takeProfitPercent: parseFloat(form.takeProfitValue),
+        dcaConfig: {
+          ...bot.configuration.dcaConfig,
+          stopLoss: {
+            ...bot.configuration.dcaConfig.stopLoss,
+            enabled: form.stopLossEnabled,
+            percent: parseFloat(form.stopLossValue),
+          },
+          takeProfit: {
+            ...bot.configuration.dcaConfig.takeProfit,
+            enabled: form.takeProfitEnabled,
+            priceChangePercent: parseFloat(form.takeProfitValue),
           },
         },
       })
@@ -174,7 +177,7 @@ export function BotModifyDialog({
       <SheetContent className="w-[400px] sm:w-[450px] overflow-y-auto">
         <SheetHeader className="space-y-3">
           <div className="flex items-center justify-between">
-            <SheetTitle className="text-lg">Modify COMBO Bot</SheetTitle>
+            <SheetTitle className="text-lg">Modify {BOT_TYPE_LABELS[bot.configuration.botType]}</SheetTitle>
             <Button
               variant="ghost"
               size="icon"

@@ -30,8 +30,8 @@ python -m pytest tests/test_webhook_concurrency.py::TestWebhookConcurrency::test
 # Run with automatic URL detection
 python tests/run_webhook_tests.py
 
-# Run with specific URL
-python tests/run_webhook_tests.py https://your-ngrok-url.ngrok-free.app/webhook
+# Run with specific URL (Azure deployment or local ngrok)
+python tests/run_webhook_tests.py https://your-app.azurecontainerapps.io/webhook
 ```
 
 ### Test Categories
@@ -81,8 +81,12 @@ Predefined test payloads in `test_config.py`:
 ```powershell
 # Test the actual fix scenario
 $payload = '{"symbol":"RGTI","action":"sell","price":13.48,"quantity":148}'
-Invoke-RestMethod -Uri "https://your-ngrok-url.ngrok-free.app/webhook" -Method POST -Headers @{"Content-Type"="application/json"} -Body $payload
-Invoke-RestMethod -Uri "https://your-ngrok-url.ngrok-free.app/webhook" -Method POST -Headers @{"Content-Type"="application/json"} -Body $payload
+
+# For Azure deployment (recommended):
+Invoke-RestMethod -Uri "https://your-app.azurecontainerapps.io/webhook" -Method POST -Headers @{"Content-Type"="application/json"} -Body $payload
+
+# For local development with ngrok (optional):
+# Invoke-RestMethod -Uri "https://your-ngrok-url.ngrok-free.app/webhook" -Method POST -Headers @{"Content-Type"="application/json"} -Body $payload
 ```
 
 #### Expected Results

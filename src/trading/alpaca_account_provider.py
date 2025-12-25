@@ -9,6 +9,7 @@ from alpaca.trading.client import TradingClient
 from src.interfaces import IAccountProvider
 from src.core.logging_config import get_logger
 from src.utils import run_blocking
+from src.exceptions import BrokerAPIException
 
 logger = get_logger(__name__)
 
@@ -41,10 +42,11 @@ class AlpacaAccountProvider(IAccountProvider):
             return equity
             
         except Exception as e:
-            logger.error(f"❌ Error getting account value from Alpaca API: {str(e)}")
-            logger.warning("🚨 Using hardcoded fallback - this should NOT happen in production!")
-            # Fallback to configured value
-            return 100000.0
+            error_msg = f"Failed to get account value from Alpaca API: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            logger.critical("🚨 FAIL-CLOSED: Trading blocked until account data is available")
+            # Fail closed - raise exception instead of returning unsafe fallback
+            raise BrokerAPIException(error_msg)
     
     async def get_buying_power(self) -> float:
         """Get available buying power."""
@@ -62,10 +64,11 @@ class AlpacaAccountProvider(IAccountProvider):
             return buying_power
             
         except Exception as e:
-            logger.error(f"❌ Error getting buying power from Alpaca API: {str(e)}")
-            logger.warning("🚨 Using fallback value - this should NOT happen in production!")
-            # Fallback to account value
-            return await self.get_account_value()
+            error_msg = f"Failed to get buying power from Alpaca API: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            logger.critical("🚨 FAIL-CLOSED: Trading blocked until account data is available")
+            # Fail closed - raise exception instead of unsafe fallback
+            raise BrokerAPIException(error_msg)
     
     async def get_portfolio_value(self) -> float:
         """Get total portfolio value including positions."""
@@ -76,8 +79,9 @@ class AlpacaAccountProvider(IAccountProvider):
             return portfolio_value
             
         except Exception as e:
-            logger.error(f"Error getting portfolio value: {str(e)}")
-            return await self.get_account_value()
+            error_msg = f"Failed to get portfolio value from Alpaca API: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            raise BrokerAPIException(error_msg)
     
     async def get_cash(self) -> float:
         """Get available cash (not including margin)."""
@@ -89,10 +93,9 @@ class AlpacaAccountProvider(IAccountProvider):
             return cash
             
         except Exception as e:
-            logger.error(f"Error getting cash: {str(e)}")
-            # Fallback to half of account value (conservative estimate)
-            account_value = await self.get_account_value()
-            return account_value * 0.5
+            error_msg = f"Failed to get cash from Alpaca API: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            raise BrokerAPIException(error_msg)
     
     async def get_actual_position(self, symbol: str) -> Optional[float]:
         """Get actual position quantity from Alpaca for a symbol."""

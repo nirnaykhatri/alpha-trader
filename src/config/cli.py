@@ -63,18 +63,20 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("   ○ Environment Variables (local development)")
         print("   Set AZURE_KEYVAULT_URL or AZURE_APP_CONFIGURATION_ENDPOINT to use Azure")
     
-    # Database
-    print(f"\n💾 Database:")
+    # Database (Cosmos DB)
+    print(f"\n💾 Database (Cosmos DB):")
     db_config = config.get_database_config()
-    if db_config.url:
-        # Mask sensitive parts of connection string
-        masked_url = db_config.url
-        if "@" in masked_url:
-            parts = masked_url.split("@")
-            masked_url = parts[0].rsplit(":", 1)[0] + ":***@" + parts[-1]
-        print(f"   ✓ Configured: {masked_url[:60]}...")
+    cosmos_endpoint = os.environ.get("COSMOS_ENDPOINT", "")
+    if cosmos_endpoint:
+        # Mask sensitive parts of endpoint
+        masked_endpoint = cosmos_endpoint
+        if len(masked_endpoint) > 50:
+            masked_endpoint = masked_endpoint[:50] + "..."
+        print(f"   ✓ Cosmos Endpoint: {masked_endpoint}")
+        print(f"   Throughput: {db_config.throughput_ru} RU/s")
+        print(f"   Consistency: {db_config.consistency_level}")
     else:
-        print("   ○ Not configured (using default SQLite)")
+        print("   ○ Not configured - set COSMOS_ENDPOINT and COSMOS_KEY for Cosmos DB")
     
     # Logging
     print(f"\n📝 Logging:")
@@ -105,10 +107,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
     
     config = ConfigurationManager()
     
-    # Check database
-    db_config = config.get_database_config()
-    if not db_config.url:
-        issues.append(("WARN", "DATABASE_URL not set, using default SQLite"))
+    # Check database (Cosmos DB)
+    cosmos_endpoint = os.environ.get("COSMOS_ENDPOINT", "")
+    if not cosmos_endpoint:
+        issues.append(("WARN", "COSMOS_ENDPOINT not set - configure Cosmos DB for persistence"))
     
     # Check brokers
     alpaca = config.get_alpaca_config()

@@ -41,7 +41,7 @@ graph TB
     
     subgraph Infrastructure["💾 Infrastructure Layer"]
         OM["OrderManager"]
-        DB["DatabaseManager"]
+        DB["CosmosDBManager"]
         CACHE["RedisCache"]
         EB["EventBus"]
     end
@@ -187,7 +187,7 @@ classDiagram
 sequenceDiagram
     participant Orch as Orchestrator
     participant TS as TradeService
-    participant DB as DatabaseManager
+    participant DB as CosmosDBManager
     
     Note over Orch,DB: External Position Close Detection
     
@@ -200,7 +200,7 @@ sequenceDiagram
 ```
 
 **🔑 Key Feature**: **Deterministic Trade Lookup**
-- Uses `DatabaseManager.get_trade_by_exit_order_id()` for exact matching
+- Uses `CosmosDBManager.get_trade_by_exit_order_id()` for exact matching
 - Replaces heuristic symbol-based matching
 - Database schema tracks `entry_order_id` and `exit_order_id` in trades table
 
@@ -1143,9 +1143,11 @@ mindmap
 |:--------|:--------|
 | `hypothesis==6.92.1` | Property-based testing |
 | `fastapi` | Webhook server |
-| `sqlalchemy>=2.0.36` | Database ORM |
+| `azure-cosmos>=4.7.0` | Azure Cosmos DB (NoSQL persistence) |
 | `alpaca-py` | Alpaca broker |
 | `tastytrade` | Tastytrade broker (v11.x OAuth) |
+
+> **Note**: SQLAlchemy has been removed. All persistence uses Azure Cosmos DB.
 
 ### Optional (Recommended)
 

@@ -49,11 +49,11 @@ class WebhookSettings(BaseModel):
 
 
 class DatabaseSettings(BaseModel):
-    """Database configuration."""
+    """Database configuration - Cosmos DB."""
     
     url: str = Field(
-        default="sqlite:///data/trading_bot.db",
-        description="Database connection URL"
+        default="",  # Cosmos DB - configure via COSMOS_ENDPOINT environment variable
+        description="Database connection URL (deprecated for Cosmos DB)"
     )
     echo: bool = Field(default=False, description="Echo SQL queries")
     pool_size: int = Field(default=20, ge=1, le=100, description="Connection pool size")

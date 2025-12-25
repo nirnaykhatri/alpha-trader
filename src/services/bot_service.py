@@ -1,7 +1,7 @@
 """
 Bot Service Implementation.
 
-Concrete implementation of IBotService that uses BotRepository for
+Concrete implementation of IBotService that uses IBotRepository for
 database persistence and coordinates with trading components for
 bot lifecycle and trading operations.
 
@@ -9,7 +9,7 @@ This service bridges the domain layer (bots) with infrastructure
 (database, trading execution).
 
 Author: Trading Bot Team
-Version: 2.0.0
+Version: 3.0.0
 """
 
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
@@ -19,7 +19,7 @@ import uuid
 
 from src.core.logging_config import get_logger
 from src.services.bot_service_interface import IBotService
-from src.database.bot_repository import BotRepository
+from src.database.database_interface import IBotRepository
 from src.domain.bot_models import (
     Bot,
     BotConfiguration,
@@ -41,20 +41,21 @@ class BotService(IBotService):
     """
     Production bot service implementation.
     
-    Uses BotRepository for persistence and integrates with trading
-    components for actual order execution.
+    Uses IBotRepository for persistence and integrates with trading
+    components for actual order execution. Supports Cosmos DB backend.
     
     Attributes:
-        _repository: BotRepository for database operations
+        _repository: IBotRepository for database operations
         _account_mode: Current account mode (demo/live)
         _active_bots: In-memory cache of running bot instances
     
     Thread Safety:
         Uses async locks for state modifications.
-        Repository operations are async and use SQLAlchemy sessions.
+        Repository operations are async.
     
     Example:
-        >>> repo = BotRepository(session_factory)
+        >>> repo: IBotRepository = CosmosBotRepository(cosmos_endpoint, "trading-bot")
+        >>> await repo.initialize()
         >>> service = BotService(repo, account_mode="demo")
         >>> bot = await service.create_bot(
         ...     user_id="user123",
@@ -65,7 +66,7 @@ class BotService(IBotService):
     
     def __init__(
         self,
-        repository: BotRepository,
+        repository: IBotRepository,
         account_mode: str = "demo",
         order_manager: Optional[IOrderManager] = None,
         position_manager: Optional[IPositionManager] = None,
@@ -75,7 +76,7 @@ class BotService(IBotService):
         Initialize bot service.
         
         Args:
-            repository: BotRepository for persistence
+            repository: IBotRepository implementation (e.g., CosmosBotRepository)
             account_mode: Account mode (demo/live)
             order_manager: Optional order manager for trading execution
             position_manager: Optional position manager for position queries
@@ -132,7 +133,6 @@ class BotService(IBotService):
             name=name,
             description=description,
             state=BotState.CREATED,
-            is_active=False,
             configuration=configuration,
             performance=BotPerformance.empty(),
             created_at=datetime.utcnow(),
@@ -141,7 +141,7 @@ class BotService(IBotService):
         )
         
         # Persist to database
-        created_bot = await self._repository.create(bot)
+        created_bot = await self._repository.create_bot(bot)
         
         logger.info(f"Created bot {created_bot.id} for user {user_id}: {name}")
         return created_bot
@@ -157,13 +157,8 @@ class BotService(IBotService):
         Returns:
             Bot if found and accessible, None otherwise
         """
-        bot = await self._repository.get_by_id(bot_id, self._account_mode)
-        
-        # Authorization check
-        if bot and bot.user_id != user_id:
-            logger.warning(f"User {user_id} attempted to access bot {bot_id} owned by {bot.user_id}")
-            return None
-        
+        # Cosmos uses user_id as partition key for efficient lookup
+        bot = await self._repository.get_bot(bot_id, user_id)
         return bot
     
     async def list_bots(
@@ -187,16 +182,13 @@ class BotService(IBotService):
         Returns:
             List of Bot instances matching filters
         """
-        state_str = None
-        if state_filter:
-            state_str = ",".join(s.value for s in state_filter)
+        # Use first state from filter for Cosmos query (simplified)
+        state = state_filter[0] if state_filter else None
         
         bots = await self._repository.list_bots(
             user_id=user_id,
-            account_mode=self._account_mode,
-            state=state_str,
+            state=state,
             symbol=symbol_filter,
-            exchange=exchange_filter,
         )
         
         return bots
@@ -252,7 +244,7 @@ class BotService(IBotService):
         bot.updated_at = datetime.utcnow()
         
         # Persist
-        updated_bot = await self._repository.update(bot)
+        updated_bot = await self._repository.update_bot(bot)
         
         logger.info(f"Updated bot {bot_id}")
         return updated_bot
@@ -281,8 +273,13 @@ class BotService(IBotService):
         if bot.state == BotState.RUNNING:
             raise ValueError("Cannot delete a running bot. Stop it first.")
         
-        # Delete (creates history entry automatically)
-        deleted = await self._repository.delete(bot_id, hard_delete=False)
+        # Delete bot (archives to history automatically in Cosmos)
+        deleted = await self._repository.delete_bot(
+            bot_id=bot_id,
+            user_id=user_id,
+            close_reason="user_deleted",
+            archive=True
+        )
         
         if deleted:
             logger.info(f"Deleted bot {bot_id}")
@@ -320,12 +317,11 @@ class BotService(IBotService):
         
         # Update state
         bot.state = BotState.STARTING
-        bot.is_active = True
         bot.started_at = datetime.utcnow()
         bot.stopped_at = None
         bot.updated_at = datetime.utcnow()
         
-        await self._repository.update(bot)
+        await self._repository.update_bot(bot)
         
         # Integrate with trading execution via BotEngineManager
         if self._bot_engine_manager:
@@ -335,15 +331,14 @@ class BotService(IBotService):
             except Exception as e:
                 # Rollback state on failure
                 bot.state = BotState.STOPPED
-                bot.is_active = False
-                await self._repository.update(bot)
+                await self._repository.update_bot(bot)
                 raise ValueError(f"Failed to start bot engine: {e}")
         else:
             logger.warning(f"Bot {bot_id} started without BotEngineManager (demo mode)")
         
         # Transition to running
         bot.state = BotState.RUNNING
-        updated_bot = await self._repository.update(bot)
+        updated_bot = await self._repository.update_bot(bot)
         
         # Cache as active
         self._active_bots[bot_id] = updated_bot
@@ -404,7 +399,7 @@ class BotService(IBotService):
         # Update state
         bot.state = BotState.STOPPING
         bot.updated_at = datetime.utcnow()
-        await self._repository.update(bot)
+        await self._repository.update_bot(bot)
         
         # Stop via BotEngineManager if available
         if self._bot_engine_manager:
@@ -415,10 +410,8 @@ class BotService(IBotService):
         
         # Finalize stop
         bot.state = BotState.STOPPED
-        bot.is_active = False
-        bot.stopped_at = datetime.utcnow()
-        
-        updated_bot = await self._repository.update(bot)
+
+        updated_bot = await self._repository.update_bot(bot)
         
         # Remove from active cache
         self._active_bots.pop(bot_id, None)
@@ -449,7 +442,7 @@ class BotService(IBotService):
         bot.state = BotState.PAUSED
         bot.updated_at = datetime.utcnow()
         
-        updated_bot = await self._repository.update(bot)
+        updated_bot = await self._repository.update_bot(bot)
         
         logger.info(f"Paused bot {bot_id}")
         return updated_bot
@@ -475,7 +468,7 @@ class BotService(IBotService):
         bot.state = BotState.RUNNING
         bot.updated_at = datetime.utcnow()
         
-        updated_bot = await self._repository.update(bot)
+        updated_bot = await self._repository.update_bot(bot)
         
         logger.info(f"Resumed bot {bot_id}")
         return updated_bot
@@ -548,7 +541,7 @@ class BotService(IBotService):
             )
         
         bot.updated_at = datetime.utcnow()
-        updated_bot = await self._repository.update(bot)
+        updated_bot = await self._repository.update_bot(bot)
         
         logger.info(f"Manual average for bot {bot_id}")
         return updated_bot
@@ -747,19 +740,17 @@ class BotService(IBotService):
         Args:
             user_id: ID of the user
             symbol_filter: Filter by symbol
-            include_deleted: Include soft-deleted entries
+            include_deleted: Include soft-deleted entries (not used in Cosmos)
             limit: Maximum entries to return
-            offset: Pagination offset
+            offset: Pagination offset (not used in Cosmos)
             
         Returns:
             List of BotHistoryEntry instances
         """
-        return await self._repository.get_history(
+        return await self._repository.list_history(
             user_id=user_id,
-            symbol_filter=symbol_filter,
-            include_deleted=include_deleted,
+            symbol=symbol_filter,
             limit=limit,
-            offset=offset,
         )
     
     async def delete_history_entry(
@@ -771,19 +762,19 @@ class BotService(IBotService):
         """
         Delete a history entry.
         
+        Note: Cosmos DB implementation does not support history deletion
+        for audit trail purposes. Returns False.
+        
         Args:
             history_id: History entry to delete
             user_id: ID of requesting user
             hard_delete: If True, permanently delete
             
         Returns:
-            True if deleted, False if not found
+            False (history deletion not supported in Cosmos)
         """
-        return await self._repository.delete_history_entry(
-            history_id=history_id,
-            user_id=user_id,
-            hard_delete=hard_delete,
-        )
+        logger.warning(f"History deletion not supported - history_id: {history_id}")
+        return False
     
     async def get_history_stats(
         self,
@@ -887,7 +878,6 @@ class MockBotService(IBotService):
             name=name,
             description=description,
             state=BotState.CREATED,
-            is_active=False,
             configuration=configuration,
             performance=BotPerformance.empty(),
             created_at=datetime.utcnow(),
@@ -964,10 +954,9 @@ class MockBotService(IBotService):
         if not bot:
             raise ValueError(f"Bot {bot_id} not found")
         bot.state = BotState.RUNNING
-        bot.is_active = True
         bot.started_at = datetime.utcnow()
         return bot
-    
+
     async def stop_bot(
         self,
         bot_id: str,
@@ -980,10 +969,9 @@ class MockBotService(IBotService):
         if not bot:
             raise ValueError(f"Bot {bot_id} not found")
         bot.state = BotState.STOPPED
-        bot.is_active = False
         bot.stopped_at = datetime.utcnow()
         return bot
-    
+
     async def pause_bot(self, bot_id: str, user_id: str) -> Bot:
         """Pause a mock bot."""
         bot = await self.get_bot(bot_id, user_id)

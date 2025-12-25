@@ -20,7 +20,8 @@ import React, { ReactNode, useEffect } from 'react'
 import { AuthProvider, useAuth } from '@/components/auth'
 import { ToastProvider, ToastViewport } from '@/components/ui/toast'
 import { AppSettingsProvider, ThemeProvider } from '@/lib/contexts'
-import { setTokenProvider, getAuthHeaders, API_URL } from '@/lib/admin-api'
+import { setTokenProvider, getAuthHeaders } from '@/lib/admin-api'
+import { API_URL } from '@/lib/api'
 import { updateAssetMetadataCache } from '@/lib/types/asset'
 
 interface ProvidersProps {

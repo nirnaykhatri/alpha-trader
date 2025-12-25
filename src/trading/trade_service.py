@@ -23,7 +23,7 @@ from typing import Optional, Dict, List, Any
 from datetime import datetime
 
 from src import Order, OrderStatus, OrderSide
-from src.database.database_manager import DatabaseManager
+from src.database.cosmos_manager import CosmosDBManager
 from src.interfaces import IOrderManager
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ class TradeService:
     
     def __init__(
         self,
-        database: DatabaseManager,
+        database: CosmosDBManager,
         order_manager: IOrderManager
     ):
         """

@@ -23,11 +23,17 @@ from src.signals.routers.base_router import BaseAdminRouter, handle_route_errors
 # Config service import - may not exist in older installations
 try:
     from src.services.config_service_interface import IConfigService
+    _CONFIG_SERVICE_AVAILABLE = True
 except ImportError:
     IConfigService = None  # type: ignore
+    _CONFIG_SERVICE_AVAILABLE = False
 
 
 logger = get_logger(__name__)
+
+# Log import warnings after logger is initialized
+if not _CONFIG_SERVICE_AVAILABLE:
+    logger.warning("IConfigService interface not found - configuration management features may be limited")
 
 
 # =============================================================================

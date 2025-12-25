@@ -58,7 +58,7 @@ class BrokerSubsystem(IAsyncContextManager):
             config: The configuration manager instance.
         """
         self.config = config
-        self.is_running = False
+        self._is_running = False  # Use private var, expose via property
         
         # API Clients
         self.alpaca_trading_client: Optional[TradingClient] = None
@@ -79,6 +79,16 @@ class BrokerSubsystem(IAsyncContextManager):
         
         # Primary Account Provider (defaults to Alpaca for backward compatibility)
         self.primary_account_provider: Optional[IBrokerAccountProvider] = None
+    
+    @property
+    def is_running(self) -> bool:
+        """Check if the subsystem is currently running."""
+        return self._is_running
+    
+    @is_running.setter
+    def is_running(self, value: bool) -> None:
+        """Set the running state."""
+        self._is_running = value
 
     async def initialize(self) -> None:
         """
@@ -106,21 +116,23 @@ class BrokerSubsystem(IAsyncContextManager):
         """Initialize Alpaca components."""
         logger.info("Initializing Alpaca components...")
         
-        api_key = self.config.get_config("api.alpaca.api_key")
-        secret_key = self.config.get_config("api.alpaca.secret_key")
-        base_url = self.config.get_config("api.alpaca.base_url")
+        # Use typed config method for consistency
+        alpaca_config = self.config.get_alpaca_config()
         
-        if not api_key or not secret_key:
+        if not alpaca_config.is_configured:
             raise ConfigurationException("Alpaca API credentials are required")
         
         # Initialize clients
         self.alpaca_trading_client = TradingClient(
-            api_key=api_key,
-            secret_key=secret_key,
-            paper=True if "paper" in base_url else False
+            api_key=alpaca_config.api_key,
+            secret_key=alpaca_config.secret_key,
+            paper=True if "paper" in alpaca_config.base_url else False
         )
         
-        self.alpaca_data_client = StockHistoricalDataClient(api_key, secret_key)
+        self.alpaca_data_client = StockHistoricalDataClient(
+            alpaca_config.api_key, 
+            alpaca_config.secret_key
+        )
         
         # Initialize providers
         self._alpaca_market_data = AlpacaMarketDataProvider(self.config)

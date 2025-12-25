@@ -77,6 +77,14 @@ ehthumbs.db
 logs/
 *.log
 
+# Compressed files / archives
+*.gz
+*.tar.gz
+*.tgz
+*.zip
+*.rar
+*.7z
+
 # Database
 *.db
 *.sqlite

@@ -35,7 +35,7 @@ from src.bot_engine.exceptions import (
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.bot_engine.bot_engine_manager import BotEngineManager
-    from src.database.bot_repository import BotRepository
+    from src.database.database_interface import IBotRepository
 
 logger = get_logger(__name__)
 

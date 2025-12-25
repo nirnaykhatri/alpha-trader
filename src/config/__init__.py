@@ -24,6 +24,11 @@ Environment Variables (local development fallback):
     AZURE_KEYVAULT_URL: Key Vault URL
     AZURE_APP_CONFIGURATION_ENDPOINT: App Config URL
     DATABASE_URL, LOG_LEVEL, ALPACA_API_KEY, etc.
+
+Configuration Contract:
+    All configuration fields are defined in src/config/config_contract.py
+    which serves as the single source of truth for field names, types,
+    required status, and validation rules.
 """
 
 from src.config.azure_config_provider import (
@@ -41,7 +46,16 @@ from src.config.azure_config_provider import (
     LoggingConfig,
 )
 
-from src.core.configuration import ConfigurationManager
+# Import contract for type-safe config access
+from src.config.config_contract import (
+    ConfigContract,
+    ConfigField,
+    ConfigCategory,
+    ConfigSource,
+)
+
+# Note: ConfigurationManager is imported from src.core to avoid circular imports
+# Use: from src.core import ConfigurationManager
 
 __all__ = [
     # Azure-native async configuration
@@ -53,8 +67,11 @@ __all__ = [
     "SecretKeys",
     "DEFAULT_CONFIG",
     
-    # Sync wrapper (backward compatibility)
-    "ConfigurationManager",
+    # Configuration contract
+    "ConfigContract",
+    "ConfigField",
+    "ConfigCategory",
+    "ConfigSource",
     
     # Configuration data classes
     "AlpacaBrokerConfig",

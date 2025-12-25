@@ -29,14 +29,14 @@ from src.bot_engine.bot_engine_router import BotEngineRouter
 
 if TYPE_CHECKING:
     from src.interfaces import IConfigurationManager
-    from src.database.bot_repository import BotRepository
+    from src.database.database_interface import IBotRepository
 
 logger = get_logger(__name__)
 
 
 async def create_bot_engine(
     config_manager: "IConfigurationManager",
-    bot_repository: "BotRepository",
+    bot_repository: "IBotRepository",
     engine_config: Optional[BotEngineConfig] = None,
 ) -> Tuple[BotEngineManager, BotEngineRouter]:
     """

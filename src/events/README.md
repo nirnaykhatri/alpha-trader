@@ -85,7 +85,7 @@ The bot uses an event-driven architecture for loose coupling between components.
 
 **Subscribers**:
 - `PositionManager` → Updates in-memory position cache
-- `DatabaseManager` → Persists position to DB
+- `CosmosDBManager` → Persists position to DB
 - `RiskManager` → Updates exposure calculations
 - `MetricsCollector` → Increments `positions_opened_total`
 
@@ -196,7 +196,7 @@ The bot uses an event-driven architecture for loose coupling between components.
 
 **Subscribers**:
 - `PositionManager` → Removes from active positions
-- `DatabaseManager` → Marks position as closed
+- `CosmosDBManager` → Marks position as closed
 - `RiskManager` → Updates daily/weekly P&L
 - `ConfidenceCalibrationStore` → Records outcome for factor tuning
 - `MetricsCollector` → Observes `trade_pnl_dollars`, `trade_duration_seconds`
@@ -374,7 +374,7 @@ The bot uses an event-driven architecture for loose coupling between components.
 ```
 
 **Subscribers**:
-- `DatabaseManager` → Flushes pending writes
+- `CosmosDBManager` → Flushes pending writes
 - `OrderManager` → Cancels pending orders (if configured)
 - `AuditLogger` → Logs shutdown event
 

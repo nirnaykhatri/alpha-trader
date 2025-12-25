@@ -19,7 +19,7 @@ from src.broker.subsystem import BrokerSubsystem
 from src.strategies import DCAStrategy, TrailingManager
 from src.risk import RiskManager
 from src.position import PositionManager
-from src.database import DatabaseManager
+from src.database import CosmosDBManager
 from src.utils import BoundedFetcher
 from src.services.fill_processor import FillProcessor
 from src import TradingSignal
@@ -152,9 +152,9 @@ class ComponentInitializer:
             fill_processor=fill_processor
         )
     
-    async def _initialize_database(self) -> DatabaseManager:
+    async def _initialize_database(self) -> CosmosDBManager:
         """Initialize and connect to the database."""
-        database = DatabaseManager(self._config)
+        database = CosmosDBManager(self._config)
         await database.initialize()
         logger.debug("Database initialized")
         return database
@@ -168,7 +168,7 @@ class ComponentInitializer:
     
     def _create_position_manager(
         self, 
-        database: DatabaseManager, 
+        database: CosmosDBManager, 
         broker_subsystem: BrokerSubsystem
     ) -> PositionManager:
         """Create position manager with dependencies."""
@@ -231,7 +231,7 @@ class InitializedComponents:
     """
     
     config: ConfigurationManager
-    database: DatabaseManager
+    database: CosmosDBManager
     broker_subsystem: BrokerSubsystem
     position_manager: PositionManager
     risk_manager: RiskManager

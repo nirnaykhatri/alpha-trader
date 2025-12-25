@@ -30,7 +30,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from src.core.logging_config import setup_logging, get_logger
 from src.config.configuration_manager import ConfigurationManager
-from src.database.database_manager import DatabaseManager
+from src.database.cosmos_manager import CosmosDBManager
 from src.position.position_manager import PositionManager
 
 
@@ -82,7 +82,7 @@ async def main():
         config = ConfigurationManager(args.config)
         await config.initialize()
         
-        database = DatabaseManager(config)
+        database = CosmosDBManager(config)
         await database.initialize()
         
         # Initialize trading client for Alpaca access

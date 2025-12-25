@@ -9,6 +9,7 @@ This factory centralizes strategy creation logic and ensures:
 - Consistent dependency injection
 - Easy addition of new strategies
 - Clear error messages for unsupported types
+- Thread-safe runtime registration
 
 Usage:
     factory = StrategyFactory()
@@ -22,10 +23,11 @@ Usage:
     await strategy.initialize()
 
 Author: Trading Bot Team
-Version: 1.0.0
+Version: 1.1.0
 """
 
-from typing import Dict, Type, Optional
+import threading
+from typing import Dict, Type, Optional, FrozenSet
 from src.interfaces import (
     IOrderManager, IMarketDataProvider, IRiskManager, ITradingStrategy
 )
@@ -34,11 +36,11 @@ from src.core.logging_config import get_logger
 
 # Strategy imports
 from src.strategies.dca_strategy import DCAStrategy
+from src.strategies.futures_dca_strategy import FuturesDCAStrategy
 from src.strategies.base_strategy import (
     GridStrategy,
     SpotLoopStrategy,
     ComboStrategy,
-    FuturesDCAStrategy,
     FuturesComboStrategy
 )
 
@@ -62,9 +64,13 @@ class StrategyFactory:
         grid = factory.create(BotType.GRID, order_mgr, market_data, risk_mgr, config)
     
     Thread Safety:
-        This class is stateless and thread-safe. Multiple threads can
-        safely call create() concurrently.
+        This class is thread-safe. The registry uses a lock for modifications
+        and immutable frozenset for the implemented strategies base set.
+        Multiple threads can safely call create() concurrently.
     """
+    
+    # Lock for thread-safe registry modifications
+    _registry_lock = threading.Lock()
     
     # Strategy type registry: Maps BotType to strategy class
     _STRATEGY_REGISTRY: Dict[BotType, Type[ITradingStrategy]] = {
@@ -76,8 +82,11 @@ class StrategyFactory:
         BotType.FUTURES_COMBO: FuturesComboStrategy,
     }
     
-    # Strategies that are fully implemented (not placeholders)
-    _IMPLEMENTED_STRATEGIES = {BotType.DCA}
+    # Base set of fully implemented strategies (immutable)
+    _IMPLEMENTED_BASE: FrozenSet[BotType] = frozenset({BotType.DCA, BotType.FUTURES_DCA})
+    
+    # Runtime-registered implemented strategies (mutable, protected by lock)
+    _runtime_implemented: set = set()
     
     @classmethod
     def create(
@@ -132,7 +141,7 @@ class StrategyFactory:
             )
         
         # Log if using placeholder
-        if bot_type not in cls._IMPLEMENTED_STRATEGIES:
+        if not cls._is_implemented_internal(bot_type):
             logger.warning(
                 f"⚠️ Creating placeholder strategy for {bot_type.value}. "
                 f"This strategy is not yet implemented and will not execute trades. "
@@ -154,6 +163,18 @@ class StrategyFactory:
         return strategy
     
     @classmethod
+    def _is_implemented_internal(cls, bot_type: BotType) -> bool:
+        """
+        Internal thread-safe check for implemented status.
+        
+        Combines the immutable base set with runtime registrations.
+        """
+        if bot_type in cls._IMPLEMENTED_BASE:
+            return True
+        with cls._registry_lock:
+            return bot_type in cls._runtime_implemented
+    
+    @classmethod
     def get_supported_types(cls) -> list[BotType]:
         """
         Get list of all supported bot types.
@@ -161,7 +182,8 @@ class StrategyFactory:
         Returns:
             List of BotType values that have registered strategies
         """
-        return list(cls._STRATEGY_REGISTRY.keys())
+        with cls._registry_lock:
+            return list(cls._STRATEGY_REGISTRY.keys())
     
     @classmethod
     def get_implemented_types(cls) -> list[BotType]:
@@ -171,7 +193,8 @@ class StrategyFactory:
         Returns:
             List of BotType values with full implementations
         """
-        return list(cls._IMPLEMENTED_STRATEGIES)
+        with cls._registry_lock:
+            return list(cls._IMPLEMENTED_BASE | cls._runtime_implemented)
     
     @classmethod
     def is_implemented(cls, bot_type: BotType) -> bool:
@@ -184,7 +207,7 @@ class StrategyFactory:
         Returns:
             True if fully implemented, False if placeholder
         """
-        return bot_type in cls._IMPLEMENTED_STRATEGIES
+        return cls._is_implemented_internal(bot_type)
     
     @classmethod
     def register_strategy(
@@ -197,7 +220,7 @@ class StrategyFactory:
         Register a new strategy type.
         
         This allows runtime registration of custom strategies
-        without modifying this class.
+        without modifying this class. Thread-safe for concurrent access.
         
         Args:
             bot_type: BotType enum value for the strategy
@@ -217,12 +240,13 @@ class StrategyFactory:
                 f"got {strategy_class.__name__}"
             )
         
-        cls._STRATEGY_REGISTRY[bot_type] = strategy_class
-        
-        if is_implemented:
-            cls._IMPLEMENTED_STRATEGIES.add(bot_type)
-        elif bot_type in cls._IMPLEMENTED_STRATEGIES:
-            cls._IMPLEMENTED_STRATEGIES.remove(bot_type)
+        with cls._registry_lock:
+            cls._STRATEGY_REGISTRY[bot_type] = strategy_class
+            
+            if is_implemented:
+                cls._runtime_implemented.add(bot_type)
+            elif bot_type in cls._runtime_implemented:
+                cls._runtime_implemented.remove(bot_type)
         
         logger.info(
             f"Registered strategy {strategy_class.__name__} "

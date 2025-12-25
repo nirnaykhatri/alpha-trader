@@ -1,38 +1,78 @@
 """
-Azure Cosmos DB database management implementation.
+Azure Cosmos DB Database Management Implementation.
 
 Provides async access to Cosmos DB NoSQL for storing trading data.
-Implements the same interface patterns as database_manager.py for seamless migration.
+This is the PRIMARY database backend for the trading bot.
+
+Lazy Loading:
+    Azure SDK imports are deferred until initialize() is called.
+    This allows tests to import this module without Azure SDK installed.
 
 Usage:
     cosmos_manager = CosmosDBManager(config)
     await cosmos_manager.initialize()
     await cosmos_manager.save_position(position)
+    
+    # For bot management, use CosmosBotRepository:
+    bot_repo = cosmos_manager.get_bot_repository()
+    await bot_repo.create_bot(bot)
 
-Containers:
-    - positions: Active trading positions (partition key: symbol)
-    - orders: Order history (partition key: symbol)
-    - trades: Completed trades with P&L (partition key: symbol)
-    - signals: Trading signals received (partition key: symbol)
+Containers (Core Trading):
+    - positions: Active trading positions (partition key: /symbol)
+    - orders: Order history (partition key: /symbol)
+    - trades: Completed trades with P&L (partition key: /symbol)
+    - signals: Trading signals received (partition key: /symbol)
+
+Containers (Bot Management - via CosmosBotRepository):
+    - bots: Active bot configurations (partition key: /user_id)
+    - bot_orders: All orders for bots (partition key: /bot_id)
+    - bot_history: Closed bot records (partition key: /user_id)
 
 Authentication:
     Uses DefaultAzureCredential (Managed Identity in Azure, CLI locally)
+    
+Note:
+    SQLite/SQLAlchemy support has been removed. Cosmos DB is the sole 
+    database backend for this application.
+    
+    This module uses the shared CosmosConnectionPool from cosmos_base.py
+    for efficient connection management across all repositories.
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 
-from azure.cosmos.aio import CosmosClient
-from azure.cosmos import PartitionKey, exceptions
-from azure.identity.aio import DefaultAzureCredential
+# Lazy imports for Azure SDK - only loaded when actually connecting
+if TYPE_CHECKING:
+    from azure.cosmos import PartitionKey, exceptions
 
 from src.interfaces import IConfigurationManager
 from src.exceptions import TradingBotException
 from src.core.logging_config import get_logger
-from src import Position, Order, OrderStatus, OrderType
+from src.interfaces import Position, Order, OrderStatus, OrderType
+
+# Import shared base and bot repository
+from src.database.cosmos_base import CosmosConnectionPool, CosmosBaseRepository
+from src.database.cosmos_bot_repository import CosmosBotRepository
+
+# Import pagination helpers for scalable queries
+from src.database.pagination import (
+    PaginationOptions,
+    PaginatedResult,
+    QueryProjection,
+    ActiveOnlyFilter,
+    build_paginated_query,
+    POSITION_FIELDS_FULL,
+    ORDER_FIELDS_FULL,
+    TRADE_FIELDS_FULL,
+    DEFAULT_MAX_ITEMS,
+    ABSOLUTE_MAX_ITEMS,
+)
 
 logger = get_logger(__name__)
 
@@ -44,14 +84,16 @@ class CosmosDBManager:
     Uses Azure Cosmos DB NoSQL API with serverless/free tier optimization.
     Partition key strategy: symbol for even distribution and efficient queries.
     
+    Uses the shared CosmosConnectionPool for efficient connection management
+    across all Cosmos DB repositories in the application.
+    
     Thread-Safety:
         This class is safe for concurrent async operations.
-        The Cosmos client handles connection pooling internally.
+        The shared connection pool handles synchronization internally.
     
     Attributes:
         _config: Configuration manager instance
-        _client: Async Cosmos DB client
-        _database: Database reference
+        _pool: Shared connection pool reference
         _containers: Dictionary of container references
     """
     
@@ -85,10 +127,9 @@ class CosmosDBManager:
                 - azure.cosmos.database_name: Database name
         """
         self._config = config
-        self._client: Optional[CosmosClient] = None
-        self._database = None
+        self._pool = CosmosConnectionPool.get_instance()
         self._containers: Dict[str, Any] = {}
-        self._credential: Optional[DefaultAzureCredential] = None
+        self._cosmos_exceptions = None  # Lazy loaded Azure exceptions module
         
         # Configuration
         self._endpoint = config.get_config(
@@ -108,32 +149,42 @@ class CosmosDBManager:
         
         logger.info(f"CosmosDBManager initialized for endpoint: {self._endpoint}")
     
+    @property
+    def _database(self):
+        """Get database reference from shared pool."""
+        return self._pool.database
+    
+    @property
+    def _client(self):
+        """Get client reference from shared pool."""
+        return self._pool.client
+    
     async def initialize(self) -> None:
         """
         Initialize async Cosmos DB connection and verify containers exist.
         
-        Creates database and containers if they don't exist.
-        Uses DefaultAzureCredential for authentication (Managed Identity in Azure).
+        Uses the shared CosmosConnectionPool for connection management.
+        Creates containers if they don't exist.
+        
+        Azure SDK is imported lazily here, allowing this module to be
+        imported without the SDK installed (e.g., for testing).
         
         Raises:
+            ImportError: If Azure SDK is not installed
             TradingBotException: If initialization fails
         """
+        # Lazy import Azure SDK - only when actually initializing
+        from azure.cosmos import PartitionKey, exceptions
+        
         try:
             logger.info("Initializing Cosmos DB connection...")
             
-            # Create credential for authentication
-            self._credential = DefaultAzureCredential()
-            
-            # Create async Cosmos client
-            self._client = CosmosClient(
-                url=self._endpoint,
-                credential=self._credential,
+            # Initialize shared connection pool
+            await self._pool.initialize(
+                endpoint=self._endpoint,
+                database_name=self._database_name
             )
             
-            # Get or create database
-            self._database = await self._client.create_database_if_not_exists(
-                id=self._database_name
-            )
             logger.info(f"Connected to database: {self._database_name}")
             
             # Get or create containers
@@ -146,6 +197,9 @@ class CosmosDBManager:
                 self._containers[container_name] = container
                 logger.debug(f"Container ready: {container_name}")
             
+            # Store exceptions module for use in other methods
+            self._cosmos_exceptions = exceptions
+            
             logger.info("Cosmos DB initialized successfully")
             
         except exceptions.CosmosHttpResponseError as e:
@@ -156,28 +210,17 @@ class CosmosDBManager:
             raise TradingBotException(f"Cosmos DB initialization failed: {str(e)}")
     
     async def close(self) -> None:
-        """Close async Cosmos DB connections."""
-        try:
-            if self._client:
-                await self._client.close()
-                logger.info("Cosmos DB connections closed")
-            if self._credential:
-                await self._credential.close()
-        except Exception as e:
-            logger.error(f"Error closing Cosmos DB: {str(e)}")
+        """Release local resources (connection pool is managed separately)."""
+        self._containers.clear()
+        logger.info("CosmosDBManager resources released")
     
     def _serialize_datetime(self, dt: Optional[datetime]) -> Optional[str]:
         """Serialize datetime to ISO format string."""
-        return dt.isoformat() if dt else None
+        return CosmosBaseRepository.serialize_datetime(dt)
     
     def _deserialize_datetime(self, dt_str: Optional[str]) -> Optional[datetime]:
         """Deserialize ISO format string to datetime."""
-        if not dt_str:
-            return None
-        try:
-            return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
-        except ValueError:
-            return None
+        return CosmosBaseRepository.deserialize_datetime(dt_str)
     
     # ==================== POSITION OPERATIONS ====================
     
@@ -217,7 +260,7 @@ class CosmosDBManager:
             
             logger.debug(f"Position saved: {position.symbol} ({broker})")
             
-        except exceptions.CosmosHttpResponseError as e:
+        except self._cosmos_exceptions.CosmosHttpResponseError as e:
             logger.error(f"Error saving position {position.symbol}: {e.message}")
             raise TradingBotException(f"Failed to save position: {e.message}")
     
@@ -250,55 +293,125 @@ class CosmosDBManager:
                     created_at=self._deserialize_datetime(item.get('created_at')),
                     broker=item.get('broker', 'alpaca'),
                 )
-            except exceptions.CosmosResourceNotFoundError:
+            except self._cosmos_exceptions.CosmosResourceNotFoundError:
                 return None
                 
         except Exception as e:
             logger.error(f"Error getting position {symbol}: {str(e)}")
             return None
     
-    async def get_all_positions(self, broker: str = None) -> List[Position]:
+    async def get_all_positions(
+        self,
+        broker: str = None,
+        max_items: int = DEFAULT_MAX_ITEMS,
+        exclude_zero_quantity: bool = True,
+        continuation_token: Optional[str] = None
+    ) -> PaginatedResult[Position]:
         """
-        Get all positions from Cosmos DB.
+        Get positions from Cosmos DB with pagination support.
+        
+        Uses field projection to reduce RU consumption and supports
+        continuation tokens for efficient cursor-based pagination.
         
         Args:
             broker: Optional broker filter
+            max_items: Maximum number of items to return (default 100, max 1000)
+            exclude_zero_quantity: If True, excludes closed positions (default True)
+            continuation_token: Token from previous query for pagination
             
         Returns:
-            List of all positions
+            PaginatedResult containing positions and continuation token
+            
+        Example:
+            # First page
+            result = await db.get_all_positions(max_items=50)
+            positions = result.items
+            
+            # Next page (if available)
+            if result.has_more:
+                result = await db.get_all_positions(
+                    max_items=50,
+                    continuation_token=result.continuation_token
+                )
         """
         try:
             container = self._containers['positions']
             
+            # Cap max_items for safety
+            max_items = min(max_items, ABSOLUTE_MAX_ITEMS)
+            
+            # Build conditions list
+            conditions = []
+            parameters = []
+            
+            if exclude_zero_quantity:
+                conditions.append(ActiveOnlyFilter.POSITION_HAS_QUANTITY)
+            
             if broker:
-                query = "SELECT * FROM c WHERE c.broker = @broker AND c.quantity != 0"
-                parameters = [{"name": "@broker", "value": broker}]
-            else:
-                query = "SELECT * FROM c WHERE c.quantity != 0"
-                parameters = []
+                conditions.append(ActiveOnlyFilter.broker_filter(broker))
+                parameters.append({"name": "@broker", "value": broker})
+            
+            # Build query with field projection (reduces RU consumption)
+            query = build_paginated_query(
+                fields=POSITION_FIELDS_FULL,
+                conditions=conditions if conditions else None,
+                order_by="created_at",
+                descending=True
+            )
             
             positions = []
-            async for item in container.query_items(
+            response_token = None
+            request_charge = 0.0
+            
+            # Execute query with pagination
+            query_iterator = container.query_items(
                 query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True
-            ):
+                parameters=parameters if parameters else None,
+                enable_cross_partition_query=True,
+                max_item_count=max_items,
+                continuation_token=continuation_token
+            )
+            
+            async for item in query_iterator:
                 positions.append(Position(
                     symbol=item['symbol'],
                     quantity=item['quantity'],
                     avg_price=item['avg_price'],
                     current_price=item['current_price'],
-                    unrealized_pnl=item['unrealized_pnl'],
-                    realized_pnl=item['realized_pnl'],
+                    unrealized_pnl=item.get('unrealized_pnl', 0),
+                    realized_pnl=item.get('realized_pnl', 0),
                     created_at=self._deserialize_datetime(item.get('created_at')),
                     broker=item.get('broker', 'alpaca'),
                 ))
+                
+                if len(positions) >= max_items:
+                    # Get continuation token for next page
+                    try:
+                        response_token = query_iterator.continuation_token
+                    except Exception:
+                        response_token = None
+                    break
             
-            return positions
+            # Check if there are more results
+            has_more = response_token is not None and len(positions) >= max_items
+            
+            if len(positions) >= max_items:
+                logger.debug(
+                    f"get_all_positions returned {len(positions)} items, "
+                    f"has_more={has_more}"
+                )
+            
+            return PaginatedResult(
+                items=positions,
+                continuation_token=response_token,
+                has_more=has_more,
+                total_fetched=len(positions),
+                request_charge=request_charge
+            )
             
         except Exception as e:
             logger.error(f"Error getting all positions: {str(e)}")
-            return []
+            return PaginatedResult(items=[], has_more=False)
     
     async def delete_position(self, symbol: str, broker: str = None) -> bool:
         """
@@ -321,7 +434,7 @@ class CosmosDBManager:
             logger.info(f"Position deleted: {symbol} ({broker})")
             return True
             
-        except exceptions.CosmosResourceNotFoundError:
+        except self._cosmos_exceptions.CosmosResourceNotFoundError:
             return False
         except Exception as e:
             logger.error(f"Error deleting position {symbol}: {str(e)}")
@@ -362,7 +475,7 @@ class CosmosDBManager:
             
             logger.debug(f"Order saved: {order.order_id}")
             
-        except exceptions.CosmosHttpResponseError as e:
+        except self._cosmos_exceptions.CosmosHttpResponseError as e:
             logger.error(f"Error saving order {order.order_id}: {e.message}")
             raise TradingBotException(f"Failed to save order: {e.message}")
     
@@ -487,7 +600,7 @@ class CosmosDBManager:
             
             return trade_id
             
-        except exceptions.CosmosHttpResponseError as e:
+        except self._cosmos_exceptions.CosmosHttpResponseError as e:
             logger.error(f"Error creating trade entry: {e.message}")
             raise TradingBotException(f"Failed to create trade entry: {e.message}")
     
@@ -517,7 +630,7 @@ class CosmosDBManager:
             # Read existing trade
             try:
                 trade = await container.read_item(item=trade_id, partition_key=symbol)
-            except exceptions.CosmosResourceNotFoundError:
+            except self._cosmos_exceptions.CosmosResourceNotFoundError:
                 raise TradingBotException(f"Trade {trade_id} not found")
             
             # Calculate P&L
@@ -578,82 +691,161 @@ class CosmosDBManager:
             logger.error(f"Error completing trade: {str(e)}")
             raise TradingBotException(f"Failed to complete trade: {str(e)}")
     
-    async def get_open_trades(self, symbol: str = None) -> List[Dict[str, Any]]:
+    async def get_open_trades(
+        self,
+        symbol: str = None,
+        max_items: int = DEFAULT_MAX_ITEMS,
+        continuation_token: Optional[str] = None
+    ) -> PaginatedResult[Dict[str, Any]]:
         """
-        Get all open trades (not yet completed).
+        Get open trades (not yet completed) with pagination support.
+        
+        Uses field projection to only fetch required fields, reducing RU consumption.
         
         Args:
             symbol: Optional symbol filter
+            max_items: Maximum number of items to return (default 100, max 1000)
+            continuation_token: Token from previous query for pagination
             
         Returns:
-            List of open trade dictionaries
+            PaginatedResult containing open trade dictionaries and continuation token
         """
         try:
             container = self._containers['trades']
             
+            # Cap max_items for safety
+            max_items = min(max_items, ABSOLUTE_MAX_ITEMS)
+            
+            # Define fields needed for open trades (minimal projection)
+            open_trade_fields = [
+                "id", "symbol", "broker", "entry_price", "entry_quantity",
+                "entry_time", "entry_side", "strategy_used"
+            ]
+            
+            # Build conditions
+            conditions = [ActiveOnlyFilter.TRADE_IS_OPEN]
+            parameters = []
+            
             if symbol:
-                query = "SELECT * FROM c WHERE c.completed_at = null AND c.symbol = @symbol"
-                parameters = [{"name": "@symbol", "value": symbol}]
-            else:
-                query = "SELECT * FROM c WHERE c.completed_at = null"
-                parameters = []
+                conditions.append(ActiveOnlyFilter.symbol_filter(symbol))
+                parameters.append({"name": "@symbol", "value": symbol})
+            
+            # Build query with projection
+            query = build_paginated_query(
+                fields=open_trade_fields,
+                conditions=conditions,
+                order_by="entry_time",
+                descending=True
+            )
             
             trades = []
-            async for item in container.query_items(
+            response_token = None
+            
+            query_iterator = container.query_items(
                 query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True
-            ):
+                parameters=parameters if parameters else None,
+                enable_cross_partition_query=True,
+                max_item_count=max_items,
+                continuation_token=continuation_token
+            )
+            
+            async for item in query_iterator:
                 trades.append({
                     'trade_id': item['id'],
                     'symbol': item['symbol'],
+                    'broker': item.get('broker', 'alpaca'),
                     'entry_price': item['entry_price'],
                     'entry_quantity': item['entry_quantity'],
                     'entry_time': self._deserialize_datetime(item.get('entry_time')),
                     'entry_side': item['entry_side'],
                     'strategy_used': item.get('strategy_used'),
                 })
+                
+                if len(trades) >= max_items:
+                    try:
+                        response_token = query_iterator.continuation_token
+                    except Exception:
+                        response_token = None
+                    break
             
-            return trades
+            has_more = response_token is not None and len(trades) >= max_items
+            
+            return PaginatedResult(
+                items=trades,
+                continuation_token=response_token,
+                has_more=has_more,
+                total_fetched=len(trades)
+            )
             
         except Exception as e:
             logger.error(f"Error getting open trades: {str(e)}")
-            return []
+            return PaginatedResult(items=[], has_more=False)
     
     async def get_completed_trades(
         self,
         symbol: str = None,
-        limit: int = 100
-    ) -> List[Dict[str, Any]]:
+        limit: int = DEFAULT_MAX_ITEMS,
+        continuation_token: Optional[str] = None
+    ) -> PaginatedResult[Dict[str, Any]]:
         """
-        Get completed trades with P&L information.
+        Get completed trades with P&L information and pagination support.
+        
+        Uses field projection for efficient RU consumption.
         
         Args:
             symbol: Optional symbol filter
-            limit: Maximum number of trades to return
+            limit: Maximum number of trades to return (default 100, max 1000)
+            continuation_token: Token from previous query for pagination
             
         Returns:
-            List of completed trade dictionaries
+            PaginatedResult containing completed trade dictionaries
         """
         try:
             container = self._containers['trades']
             
+            # Cap limit for safety
+            limit = min(limit, ABSOLUTE_MAX_ITEMS)
+            
+            # Define fields needed for completed trades
+            completed_trade_fields = [
+                "id", "symbol", "broker", "entry_price", "exit_price",
+                "entry_quantity", "exit_quantity", "entry_time", "exit_time",
+                "realized_pnl", "profit_percentage", "exit_reason", "strategy_used"
+            ]
+            
+            # Build conditions
+            conditions = [ActiveOnlyFilter.TRADE_IS_COMPLETED]
+            parameters = []
+            
             if symbol:
-                query = f"SELECT TOP {limit} * FROM c WHERE c.completed_at != null AND c.symbol = @symbol ORDER BY c.completed_at DESC"
-                parameters = [{"name": "@symbol", "value": symbol}]
-            else:
-                query = f"SELECT TOP {limit} * FROM c WHERE c.completed_at != null ORDER BY c.completed_at DESC"
-                parameters = []
+                conditions.append(ActiveOnlyFilter.symbol_filter(symbol))
+                parameters.append({"name": "@symbol", "value": symbol})
+            
+            # Build query with projection
+            query = build_paginated_query(
+                fields=completed_trade_fields,
+                conditions=conditions,
+                order_by="completed_at",
+                descending=True,
+                limit=limit
+            )
             
             trades = []
-            async for item in container.query_items(
+            response_token = None
+            
+            query_iterator = container.query_items(
                 query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True
-            ):
+                parameters=parameters if parameters else None,
+                enable_cross_partition_query=True,
+                max_item_count=limit,
+                continuation_token=continuation_token
+            )
+            
+            async for item in query_iterator:
                 trades.append({
                     'trade_id': item['id'],
                     'symbol': item['symbol'],
+                    'broker': item.get('broker', 'alpaca'),
                     'entry_price': item['entry_price'],
                     'exit_price': item.get('exit_price'),
                     'quantity': item.get('exit_quantity'),
@@ -664,12 +856,26 @@ class CosmosDBManager:
                     'exit_reason': item.get('exit_reason'),
                     'strategy_used': item.get('strategy_used'),
                 })
+                
+                if len(trades) >= limit:
+                    try:
+                        response_token = query_iterator.continuation_token
+                    except Exception:
+                        response_token = None
+                    break
             
-            return trades
+            has_more = response_token is not None and len(trades) >= limit
+            
+            return PaginatedResult(
+                items=trades,
+                continuation_token=response_token,
+                has_more=has_more,
+                total_fetched=len(trades)
+            )
             
         except Exception as e:
             logger.error(f"Error getting completed trades: {str(e)}")
-            return []
+            return PaginatedResult(items=[], has_more=False)
     
     # ==================== SIGNAL OPERATIONS ====================
     
@@ -698,7 +904,7 @@ class CosmosDBManager:
             
             logger.debug(f"Signal saved: {signal.signal_id}")
             
-        except exceptions.CosmosHttpResponseError as e:
+        except self._cosmos_exceptions.CosmosHttpResponseError as e:
             logger.error(f"Error saving signal {signal.signal_id}: {e.message}")
             raise
     
@@ -838,3 +1044,33 @@ class CosmosDBManager:
         except Exception as e:
             logger.error(f"Error getting trading history: {str(e)}")
             return {}
+    
+    # ==================== BOT REPOSITORY INTEGRATION ====================
+    
+    def get_bot_repository(self) -> CosmosBotRepository:
+        """
+        Get the bot repository for bot management operations.
+        
+        The bot repository provides complete CRUD operations for:
+        - Bots (active bot configurations and state)
+        - Bot orders (all orders associated with bots)
+        - Bot history (closed/deleted bots for analytics)
+        
+        Returns:
+            CosmosBotRepository instance configured with the same endpoint
+            
+        Usage:
+            ```python
+            bot_repo = cosmos_manager.get_bot_repository()
+            await bot_repo.initialize()
+            
+            # Create a bot
+            bot = Bot(user_id="user123", name="AAPL DCA", symbol="AAPL")
+            await bot_repo.create_bot(bot)
+            ```
+        """
+        return CosmosBotRepository(
+            cosmos_endpoint=self._endpoint,
+            database_name=self._database_name,
+            credential=self._credential
+        )

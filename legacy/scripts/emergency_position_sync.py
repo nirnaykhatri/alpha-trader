@@ -21,7 +21,7 @@ async def emergency_sync():
         
         # Import required modules
         from src.core.configuration import ConfigurationManager
-        from src.database.database_manager import DatabaseManager
+        from src.database.cosmos_manager import CosmosDBManager
         from src.position.position_manager import PositionManager
         from src.trading.alpaca_account_provider import AlpacaAccountProvider
         from src.broker.router import BrokerRouter
@@ -30,7 +30,7 @@ async def emergency_sync():
         # Initialize components
         print("\n📋 Initializing components...")
         config = ConfigurationManager()  # Loads from config/ directory
-        db_manager = DatabaseManager(config)
+        db_manager = CosmosDBManager(config)
         account_provider = AlpacaAccountProvider(config)
         
         # Initialize BrokerRouter with just the account provider

@@ -42,7 +42,8 @@
 
 ```bash
 # 1️⃣ Set required environment variables
-export DATABASE_URL="sqlite:///trading_bot.db"
+export AZURE_COSMOS_ENDPOINT="https://your-cosmos-account.documents.azure.com:443/"
+export AZURE_COSMOS_DATABASE="trading-bot"
 export ALPACA_API_KEY="your-alpaca-api-key"
 export ALPACA_SECRET_KEY="your-alpaca-secret-key"
 
@@ -119,7 +120,6 @@ Store sensitive credentials in Azure Key Vault:
 |:------------|:------------|:--------|
 | `alpaca-api-key` | Alpaca API Key | `PKXXXXXX...` |
 | `alpaca-secret-key` | Alpaca Secret Key | `xxxxxxxx...` |
-| `database-connection-string` | Database connection | `postgresql://...` |
 | `webhook-secret` | Webhook validation secret | `your-secret-key` |
 
 ### Optional Secrets
@@ -157,7 +157,8 @@ Runtime configuration that can be updated without redeployment:
 
 | Key | Description | Default |
 |:----|:------------|:--------|
-| `database/url` | Database connection URL | `sqlite:///trading_bot.db` |
+| `database/throughput_ru` | Cosmos DB throughput (RU/s) | `400` |
+| `database/consistency_level` | Cosmos consistency level | `Session` |
 | `logging/level` | Log level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
 | `logging/format` | Log format (json, text) | `json` |
 | `webhook/port` | Webhook server port | `8080` |
@@ -196,8 +197,9 @@ For local development without Azure:
 ### Required Variables
 
 ```bash
-# Database
-export DATABASE_URL="sqlite:///trading_bot.db"
+# Azure Cosmos DB (Database)
+export AZURE_COSMOS_ENDPOINT="https://your-account.documents.azure.com:443/"
+export AZURE_COSMOS_DATABASE="trading-bot"
 
 # Alpaca (choose one mode)
 # Paper Trading
@@ -236,7 +238,8 @@ export TASTYTRADE_ACCOUNT_ID="your-account-id"
 
 | Environment Variable | Maps To | Priority |
 |:--------------------|:--------|:---------|
-| `DATABASE_URL` | `database.url` | Env > Default |
+| `AZURE_COSMOS_ENDPOINT` | `azure.cosmos.endpoint` | Required |
+| `AZURE_COSMOS_DATABASE` | `azure.cosmos.database_name` | Env > Default |
 | `ALPACA_API_KEY` | Secret: `alpaca-api-key` | Env > Key Vault |
 | `ALPACA_SECRET_KEY` | Secret: `alpaca-secret-key` | Env > Key Vault |
 | `LOG_LEVEL` | `logging.level` | Env > App Config |
@@ -283,32 +286,67 @@ Environment variables:
 
 ---
 
-## 💾 Database Configuration
+## 💾 Database Configuration (Cosmos DB)
+
+The trading bot uses **Azure Cosmos DB** exclusively for all data persistence.
 
 ```python
 config = ConfigurationManager()
-db = config.get_database_config()
 
-print(f"URL: {db.url}")
-print(f"Pool Size: {db.pool_size}")
-print(f"Echo SQL: {db.echo}")
+# Cosmos DB is configured via Azure endpoints
+cosmos_endpoint = config.get_config("azure.cosmos.endpoint")
+cosmos_database = config.get_config("azure.cosmos.database_name", "trading-bot")
 ```
 
-### Connection Strings
+### Required Configuration
 
-**SQLite (Local Development)**:
-```bash
-export DATABASE_URL="sqlite:///trading_bot.db"
-```
+| Environment Variable | Description | Example |
+|:--------------------|:------------|:--------|
+| `AZURE_COSMOS_ENDPOINT` | Cosmos DB account endpoint | `https://account.documents.azure.com:443/` |
+| `AZURE_COSMOS_DATABASE` | Database name | `trading-bot` |
 
-**PostgreSQL (Production)**:
-```bash
-export DATABASE_URL="postgresql://user:password@host:5432/dbname"
-```
+### Cosmos DB Containers
 
-**Azure Cosmos DB (PostgreSQL API)**:
+The database uses the following containers:
+
+| Container | Partition Key | Purpose |
+|:----------|:-------------|:--------|
+| `positions` | `/symbol` | Active trading positions |
+| `orders` | `/symbol` | Order history |
+| `trades` | `/symbol` | Completed trades with P&L |
+| `signals` | `/symbol` | Trading signals received |
+| `bots` | `/user_id` | Active bot configurations |
+| `bot_orders` | `/bot_id` | Orders associated with bots |
+| `bot_history` | `/user_id` | Closed bot records |
+
+### Authentication
+
+Cosmos DB uses **Azure Managed Identity** for authentication:
+- **Local Development**: Uses Azure CLI credentials (`az login`)
+- **Azure Deployment**: Uses system-assigned Managed Identity
+
+### Setting Up Cosmos DB
+
 ```bash
-export DATABASE_URL="postgresql://user:password@your-cosmos.postgres.cosmos.azure.com:5432/dbname?sslmode=require"
+# Create Cosmos DB account (if not exists)
+az cosmosdb create \
+    --name your-cosmos-account \
+    --resource-group your-rg \
+    --default-consistency-level Session
+
+# Create database
+az cosmosdb sql database create \
+    --account-name your-cosmos-account \
+    --resource-group your-rg \
+    --name trading-bot
+
+# Grant Managed Identity access (for Azure deployment)
+az cosmosdb sql role assignment create \
+    --account-name your-cosmos-account \
+    --resource-group your-rg \
+    --scope "/" \
+    --principal-id <managed-identity-object-id> \
+    --role-definition-id 00000000-0000-0000-0000-000000000002  # Cosmos DB Built-in Data Contributor
 ```
 
 ---
@@ -369,7 +407,8 @@ Trading Bot Configuration Status
    ○ Environment Variables (local development)
 
 💾 Database:
-   ✓ Configured: sqlite:///trading_bot.db...
+   ✓ Configured: Azure Cosmos DB
+   Endpoint: https://your-account.documents.azure.com:443/
 
 📝 Logging:
    Level: INFO
@@ -417,7 +456,7 @@ from src.core import ConfigurationManager
 config = ConfigurationManager()
 
 # Get simple config values
-db_url = config.get_config("database.url", "sqlite:///default.db")
+throughput = config.get_config("database.throughput_ru", 400)  # Cosmos RU/s
 log_level = config.get_config("logging.level", "INFO")
 
 # Get secrets
@@ -425,7 +464,7 @@ api_key = config.get_secret("alpaca-api-key", "")
 
 # Get typed configurations
 alpaca = config.get_alpaca_config()
-db = config.get_database_config()
+db = config.get_database_config()  # Returns Cosmos DB config
 webhook = config.get_webhook_config()
 logging = config.get_logging_config()
 

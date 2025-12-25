@@ -43,7 +43,7 @@ from src.interfaces import ITradingStrategy
 
 if TYPE_CHECKING:
     from src.bot_engine.interfaces import IMarketDataHub, ISignalRouter, IBrokerConnectionPool
-    from src.database.bot_repository import BotRepository
+    from src.database.database_interface import IBotRepository
     from src.interfaces import (
         Order, Position, IOrderManager, IMarketDataProvider, 
         IRiskManager, IPositionManager
@@ -85,7 +85,7 @@ class BotRunnerContext:
     market_data_hub: "IMarketDataHub"
     signal_router: "ISignalRouter"
     broker_pool: "IBrokerConnectionPool"
-    bot_repository: "BotRepository"
+    bot_repository: "IBotRepository"
     
     # Trading services (optional - created from broker_pool if not provided)
     order_manager: Optional["IOrderManager"] = None
@@ -643,8 +643,20 @@ class BotRunner(IBotRunner):
         Used when no strategy is injected. This preserves the original
         embedded logic during migration period.
         
+        .. deprecated:: 2.1.0
+            This method will be removed in v3.0.0. All bots should use
+            ITradingStrategy injection via StrategyFactory.
+            
         TODO: Remove this once all bots use injected strategies.
         """
+        import warnings
+        warnings.warn(
+            "Legacy tick execution is deprecated. Use ITradingStrategy injection "
+            "via StrategyFactory instead. Will be removed in v3.0.0.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        
         # Execute strategy-specific logic based on bot type
         if self._bot.bot_type == BotType.DCA:
             await self._execute_dca_tick()
@@ -657,11 +669,17 @@ class BotRunner(IBotRunner):
     
     # =========================================================================
     # Legacy Strategy Execution (Backwards Compatibility)
-    # TODO: Remove once all bots use ITradingStrategy injection
+    # DEPRECATED: Will be removed in v3.0.0
+    # All bots should use ITradingStrategy injection via StrategyFactory
     # =========================================================================
     
     async def _execute_dca_tick(self) -> None:
-        """Execute one tick of DCA strategy logic."""
+        """
+        Execute one tick of DCA strategy logic.
+        
+        .. deprecated:: 2.1.0
+            Use DCAStrategy with ITradingStrategy interface instead.
+        """
         phase = self._bot.operational_phase
         
         if phase == BotOperationalPhase.WAITING_FOR_SIGNAL:
@@ -923,54 +941,105 @@ class BotRunner(IBotRunner):
             f"{base_amount} {self._bot.symbol} ({order_type})"
         )
         
-        # TODO: Execute order via broker pool
-        # For now, simulate order placement
-        self._has_position = True
-        self._position_size = base_amount / self._current_price if self._current_price else Decimal("0")
-        self._avg_entry_price = self._current_price
-        self._base_order_price = self._current_price  # Capture base order price for price_reference
-        self._safety_orders_used = 0
-        self._last_order_at = datetime.utcnow()
+        # Delegate to OrderHandler for actual execution
+        success = await self._order_handler.place_base_order(
+            current_price=self._current_price or Decimal("0"),
+            on_phase_update=self._update_operational_phase,
+            on_persist=self._persist_state,
+        )
         
-        await self._update_operational_phase(BotOperationalPhase.IN_POSITION)
-        await self._persist_state()
+        if success:
+            # Sync state from OrderHandler
+            state = self._order_handler.sync_to_runner()
+            self._has_position = state["has_position"]
+            self._position_size = state["position_size"]
+            self._avg_entry_price = state["avg_entry_price"]
+            self._base_order_price = state["base_order_price"]
+            self._safety_orders_used = state["safety_orders_used"]
+            self._last_order_at = state["last_order_at"]
+            self._current_deal_id = state["current_deal_id"]
+            self._deal_start_time = state["deal_start_time"]
+            self._active_deals_count = state["active_deals_count"]
     
     async def _place_safety_order(self) -> None:
         """Place a safety order (DCA)."""
         logger.info(f"Bot {self.bot_id} placing safety order #{self._safety_orders_used + 1}")
         
-        # TODO: Execute safety order via broker pool
-        self._safety_orders_used += 1
-        self._last_order_at = datetime.utcnow()
+        # Sync current state to OrderHandler before execution
+        self._order_handler.sync_from_runner(
+            has_position=self._has_position,
+            position_size=self._position_size,
+            avg_entry_price=self._avg_entry_price,
+            base_order_price=self._base_order_price,
+            safety_orders_used=self._safety_orders_used,
+        )
         
-        await self._update_operational_phase(BotOperationalPhase.IN_POSITION)
-        await self._persist_state()
+        # Delegate to OrderHandler for actual execution
+        success = await self._order_handler.place_safety_order(
+            current_price=self._current_price or Decimal("0"),
+            on_phase_update=self._update_operational_phase,
+            on_persist=self._persist_state,
+        )
+        
+        if success:
+            # Sync state back from OrderHandler
+            state = self._order_handler.sync_to_runner()
+            self._safety_orders_used = state["safety_orders_used"]
+            self._last_order_at = state["last_order_at"]
+            self._position_size = state["position_size"]
+            self._avg_entry_price = state["avg_entry_price"]
     
     async def _execute_take_profit(self) -> None:
         """Execute take profit order."""
         logger.info(f"Bot {self.bot_id} executing take profit")
         
-        # TODO: Execute via broker pool
-        self._has_position = False
-        self._position_size = None
-        self._avg_entry_price = None
-        self._last_order_at = datetime.utcnow()
+        # Sync current state to OrderHandler
+        self._order_handler.sync_from_runner(
+            has_position=self._has_position,
+            position_size=self._position_size,
+            avg_entry_price=self._avg_entry_price,
+            base_order_price=self._base_order_price,
+            safety_orders_used=self._safety_orders_used,
+        )
         
-        await self._update_operational_phase(BotOperationalPhase.POSITION_CLOSED)
-        await self._persist_state()
+        # Delegate to OrderHandler for actual execution
+        await self._order_handler.execute_take_profit(
+            on_phase_update=self._update_operational_phase,
+            on_persist=self._persist_state,
+        )
+        
+        # Sync state back from OrderHandler
+        state = self._order_handler.sync_to_runner()
+        self._has_position = state["has_position"]
+        self._position_size = state["position_size"]
+        self._avg_entry_price = state["avg_entry_price"]
+        self._last_order_at = state["last_order_at"]
     
     async def _execute_stop_loss(self) -> None:
         """Execute stop loss order."""
         logger.info(f"Bot {self.bot_id} executing stop loss")
         
-        # TODO: Execute via broker pool
-        self._has_position = False
-        self._position_size = None
-        self._avg_entry_price = None
-        self._last_order_at = datetime.utcnow()
+        # Sync current state to OrderHandler
+        self._order_handler.sync_from_runner(
+            has_position=self._has_position,
+            position_size=self._position_size,
+            avg_entry_price=self._avg_entry_price,
+            base_order_price=self._base_order_price,
+            safety_orders_used=self._safety_orders_used,
+        )
         
-        await self._update_operational_phase(BotOperationalPhase.POSITION_CLOSED)
-        await self._persist_state()
+        # Delegate to OrderHandler for actual execution
+        await self._order_handler.execute_stop_loss(
+            on_phase_update=self._update_operational_phase,
+            on_persist=self._persist_state,
+        )
+        
+        # Sync state back from OrderHandler
+        state = self._order_handler.sync_to_runner()
+        self._has_position = state["has_position"]
+        self._position_size = state["position_size"]
+        self._avg_entry_price = state["avg_entry_price"]
+        self._last_order_at = state["last_order_at"]
     
     async def _close_position(self) -> None:
         """Close the current position."""
@@ -979,14 +1048,26 @@ class BotRunner(IBotRunner):
         
         logger.info(f"Bot {self.bot_id} closing position")
         
-        await self._update_operational_phase(BotOperationalPhase.CLOSING_POSITION)
+        # Sync current state to OrderHandler
+        self._order_handler.sync_from_runner(
+            has_position=self._has_position,
+            position_size=self._position_size,
+            avg_entry_price=self._avg_entry_price,
+            base_order_price=self._base_order_price,
+            safety_orders_used=self._safety_orders_used,
+        )
         
-        # TODO: Execute close via broker pool
-        self._has_position = False
-        self._position_size = None
-        self._avg_entry_price = None
+        # Delegate to OrderHandler for actual execution
+        await self._order_handler.close_position(
+            on_phase_update=self._update_operational_phase,
+            on_persist=self._persist_state,
+        )
         
-        await self._update_operational_phase(BotOperationalPhase.POSITION_CLOSED)
+        # Sync state back from OrderHandler
+        state = self._order_handler.sync_to_runner()
+        self._has_position = state["has_position"]
+        self._position_size = state["position_size"]
+        self._avg_entry_price = state["avg_entry_price"]
     
     # =========================================================================
     # Signal Handlers
@@ -1187,9 +1268,20 @@ class BotRunner(IBotRunner):
         return True
     
     async def _manage_grid_orders(self) -> None:
-        """Manage grid orders for grid trading strategy."""
-        # TODO: Implement grid order management
-        pass
+        """
+        Manage grid orders for grid trading strategy.
+        
+        Raises:
+            NotImplementedError: Grid trading is not yet implemented.
+            
+        Note:
+            Grid trading requires a dedicated GridStrategy implementation.
+            See: https://github.com/alpha-trader/alpha-trader/issues/XXX
+        """
+        raise NotImplementedError(
+            "Grid trading strategy is not yet implemented. "
+            "Use DCA or Combo bot types for now."
+        )
     
     # =========================================================================
     # State Management
@@ -1213,12 +1305,20 @@ class BotRunner(IBotRunner):
             await self._update_operational_phase(BotOperationalPhase.IDLE)
     
     async def _start_new_deal(self) -> None:
-        """Start a new deal/cycle after completing previous one."""
+        """
+        Start a new deal/cycle after completing previous one.
+        
+        If reinvest profit is enabled, calculates the profit from the completed deal
+        and allocates it proportionally between base order and DCA orders based on
+        their share of total investment.
+        """
         # Track cumulative P&L from completed deal
         deal_pnl = self._calculate_unrealized_pnl()
         if deal_pnl is not None:
             if deal_pnl >= 0:
                 self._cumulative_profit += deal_pnl
+                # Apply reinvest profit if enabled and deal was profitable
+                await self._apply_reinvest_profit(deal_pnl)
             else:
                 self._cumulative_loss += abs(deal_pnl)
         
@@ -1244,6 +1344,56 @@ class BotRunner(IBotRunner):
             await self._determine_initial_phase()
         
         await self._persist_state()
+    
+    async def _apply_reinvest_profit(self, realized_profit: "Decimal") -> None:
+        """
+        Apply reinvest profit settings to increase base and DCA order sizes.
+        
+        Calculates the precise allocation based on the ratio of base order
+        to DCA orders in the original configuration. This ensures proportional
+        reinvestment that maintains the intended DCA structure.
+        
+        Args:
+            realized_profit: The realized profit from the completed deal
+        """
+        from decimal import Decimal
+        
+        dca_config = self._bot.configuration.dca_config
+        if not dca_config or not dca_config.risk_management:
+            return
+        
+        risk_mgmt = dca_config.risk_management
+        if not risk_mgmt.reinvest_profit_enabled:
+            return
+        
+        if realized_profit <= Decimal("0"):
+            return
+        
+        # Get current order amounts
+        base_order_amount = dca_config.start_settings.base_order_amount
+        dca_total_amount = dca_config.averaging_orders.total_amount
+        
+        # Calculate reinvest allocation
+        base_addition, dca_addition = risk_mgmt.calculate_reinvest_allocation(
+            realized_profit=realized_profit,
+            base_order_amount=base_order_amount,
+            dca_total_amount=dca_total_amount,
+        )
+        
+        if base_addition > 0 or dca_addition > 0:
+            # Update the configuration
+            dca_config.start_settings.base_order_amount = base_order_amount + base_addition
+            dca_config.averaging_orders.total_amount = dca_total_amount + dca_addition
+            
+            logger.info(
+                f"Bot {self.bot_id} reinvesting profit: "
+                f"${realized_profit:.2f} * {risk_mgmt.reinvest_profit_percent}% = "
+                f"base order +${base_addition:.2f} (now ${dca_config.start_settings.base_order_amount:.2f}), "
+                f"DCA orders +${dca_addition:.2f} (now ${dca_config.averaging_orders.total_amount:.2f})"
+            )
+            
+            # Persist the updated configuration
+            await self._persist_state()
     
     async def _update_bot_state(
         self, 

@@ -1,6 +1,16 @@
 """
-Signal processing module for TradingView webhook signals.
-Handles signal validation, parsing, and transformation.
+Webhook Signal Parser for TradingView signals.
+Handles signal validation, parsing, and transformation from raw webhook data.
+
+NOTE: This class was renamed from SignalProcessor to WebhookSignalParser to avoid
+naming collision with src.bot_engine.signal_processor.SignalProcessor which handles
+signal dispatch/routing.
+
+Responsibilities:
+- Parse raw webhook JSON into TradingSignal objects
+- Validate signal data (required fields, format)
+- Fetch market prices when not provided
+- Security validation (webhook secrets)
 """
 
 import asyncio
@@ -18,10 +28,13 @@ from src.signals.webhook_security import WebhookSecurityValidator
 logger = get_logger(__name__)
 
 
-class SignalProcessor:
+class WebhookSignalParser:
     """
-    Processes and validates TradingView signals.
-    Provides signal parsing, validation, and transformation logic.
+    Parses and validates TradingView webhook signals.
+    Transforms raw webhook data into TradingSignal objects.
+    
+    This is distinct from bot_engine.SignalProcessor which handles
+    signal dispatch and routing to handlers.
     """
     
     def __init__(
@@ -226,3 +239,15 @@ class SignalProcessor:
             True if signature is valid, False otherwise
         """
         return self._security_validator.verify_signature(body, signature)
+
+
+# =============================================================================
+# Backwards Compatibility Alias
+# =============================================================================
+
+# DEPRECATED: Use WebhookSignalParser instead
+# This alias exists for backwards compatibility during migration.
+# The name "SignalProcessor" was ambiguous - it conflicted with
+# src.bot_engine.signal_processor.SignalProcessor which handles dispatch.
+# TODO: Remove in v2.0 after all imports are updated to WebhookSignalParser
+SignalProcessor = WebhookSignalParser

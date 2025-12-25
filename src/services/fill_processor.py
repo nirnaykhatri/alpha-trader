@@ -12,11 +12,11 @@ from src.core.logging_config import get_logger
 from src.interfaces import (
     IOrderManager, 
     IPositionManager,
-    IDatabaseManager,
     Order, 
     OrderSide, 
     OrderStatus
 )
+from src.database.database_interface import IDatabaseManager
 from src.exceptions import OrderExecutionException
 
 logger = get_logger(__name__)

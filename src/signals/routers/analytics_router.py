@@ -24,11 +24,17 @@ from src.signals.routers.base_router import BaseAdminRouter, handle_route_errors
 # Analytics service import - may not exist in older installations
 try:
     from src.services.analytics_service_interface import IAnalyticsService
+    _ANALYTICS_SERVICE_AVAILABLE = True
 except ImportError:
     IAnalyticsService = None  # type: ignore
+    _ANALYTICS_SERVICE_AVAILABLE = False
 
 
 logger = get_logger(__name__)
+
+# Log import warnings after logger is initialized
+if not _ANALYTICS_SERVICE_AVAILABLE:
+    logger.warning("IAnalyticsService interface not found - analytics features may be limited")
 
 
 class AnalyticsRouter(BaseAdminRouter):

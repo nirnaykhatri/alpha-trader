@@ -23,7 +23,7 @@ from typing import Dict, Any, List, Optional, Callable, TYPE_CHECKING
 from datetime import datetime
 
 from src import Position
-from src.interfaces import IPositionManager, IConfigurationManager, ITrailingProfitManager
+from src.interfaces import IPositionManager, IConfigurationManager, ITrailingProfitManager, ITrailingManager
 from src.utils import BoundedFetcher
 
 
@@ -31,6 +31,7 @@ from src.utils import BoundedFetcher
 # BrokerSubsystem imports from src/trading which imports PositionMonitor
 if TYPE_CHECKING:
     from src.broker.subsystem import BrokerSubsystem
+    from src.broker.router import BrokerRouter
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ class PositionMonitor:
         config: IConfigurationManager,
         position_manager: IPositionManager,
         broker_subsystem: "BrokerSubsystem",
-        trailing_manager: ITrailingProfitManager,
+        trailing_manager: Optional[ITrailingProfitManager],
         price_fetcher: BoundedFetcher,
         advanced_strategy: Optional[Any] = None
     ):
@@ -92,7 +93,7 @@ class PositionMonitor:
             config: Configuration manager
             position_manager: Position manager for retrieving positions
             broker_subsystem: Broker subsystem for market data
-            trailing_manager: Trailing profit manager for profit conditions
+            trailing_manager: Trailing profit manager for profit conditions (optional - if None, profit-taking is disabled)
             price_fetcher: Bounded fetcher for parallel price requests
             advanced_strategy: Optional advanced strategy for DCA monitoring
         """
@@ -214,10 +215,7 @@ class PositionMonitor:
         if not symbols:
             return
         
-        price_dict = await self.price_fetcher.fetch_all(
-            symbols,
-            self.broker_subsystem.market_data.get_current_price
-        )
+        price_dict = await self._fetch_prices_routed(symbols)
         
         for position in positions:
             if position.quantity == 0:
@@ -236,7 +234,10 @@ class PositionMonitor:
                     current_price
                 )
             
-            # Check trailing profit conditions
+            # Check trailing profit conditions (skip if no trailing manager configured)
+            if self.trailing_manager is None:
+                continue
+                
             if await self.trailing_manager.should_take_profit(position, current_price):
                 # Check if we're in error cooldown for this symbol
                 import time
@@ -262,6 +263,87 @@ class PositionMonitor:
                     )
                     logger.error(f"   Error: {e}")
     
+    async def _fetch_prices_routed(self, symbols: List[str]) -> Dict[str, float]:
+        """
+        Fetch prices for symbols, routing each to the correct broker's market data provider.
+        
+        Uses BrokerRouter to determine which broker handles each symbol and fetches
+        from the appropriate market data provider. Falls back to default (Alpaca) if
+        router is not available.
+        
+        Args:
+            symbols: List of trading symbols to fetch prices for.
+            
+        Returns:
+            Dict mapping symbol to current price. Missing symbols are not in the dict.
+        """
+        price_dict: Dict[str, float] = {}
+        
+        # Check if router is available for multi-broker routing
+        router = getattr(self.broker_subsystem, 'router', None)
+        
+        if router is None:
+            # Fallback to default market data provider (backward compatibility)
+            logger.debug("BrokerRouter not available, using default market data provider")
+            return await self.price_fetcher.fetch_all(
+                symbols,
+                self.broker_subsystem.market_data.get_current_price
+            )
+        
+        # Group symbols by broker for efficient fetching
+        from src.broker.interfaces import BrokerType
+        broker_symbols: Dict[BrokerType, List[str]] = {}
+        
+        for symbol in symbols:
+            broker = router.get_broker_for_symbol(symbol)
+            if broker not in broker_symbols:
+                broker_symbols[broker] = []
+            broker_symbols[broker].append(symbol)
+        
+        # Fetch prices from each broker's market data provider
+        for broker, broker_syms in broker_symbols.items():
+            try:
+                provider = router.get_market_data_provider(broker)
+                
+                # Use bounded fetcher for each broker's symbols
+                broker_prices = await self.price_fetcher.fetch_all(
+                    broker_syms,
+                    provider.get_current_price
+                )
+                price_dict.update(broker_prices)
+                
+                logger.debug(f"Fetched {len(broker_prices)} prices from {broker.value}")
+                
+            except Exception as e:
+                logger.error(f"Failed to fetch prices from {broker.value}: {e}")
+                # Continue with other brokers even if one fails
+        
+        return price_dict
+    
+    async def _get_price_routed(self, symbol: str) -> Optional[float]:
+        """
+        Get price for a single symbol using the correct broker's market data provider.
+        
+        Args:
+            symbol: Trading symbol to get price for.
+            
+        Returns:
+            Current price or None if unavailable.
+        """
+        router = getattr(self.broker_subsystem, 'router', None)
+        
+        if router is None:
+            # Fallback to default market data provider
+            return await self.broker_subsystem.market_data.get_current_price(symbol)
+        
+        try:
+            broker = router.get_broker_for_symbol(symbol)
+            provider = router.get_market_data_provider(broker)
+            return await provider.get_current_price(symbol)
+        except Exception as e:
+            logger.error(f"Failed to get price for {symbol}: {e}")
+            return None
+    
     async def update_market_data(
         self,
         shutdown_event: asyncio.Event
@@ -286,9 +368,12 @@ class PositionMonitor:
                     
                     for position in positions:
                         if position.quantity != 0:
-                            current_price = await self.broker_subsystem.market_data.get_current_price(
-                                position.symbol
-                            )
+                            # Use routed price fetching for multi-broker support
+                            current_price = await self._get_price_routed(position.symbol)
+                            if current_price is None:
+                                logger.warning(f"Failed to get price for {position.symbol}")
+                                continue
+                                
                             # Update position with current price
                             position.current_price = current_price
                             

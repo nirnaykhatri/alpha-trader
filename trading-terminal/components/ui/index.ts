@@ -8,6 +8,20 @@ export { Badge, badgeVariants } from './badge'
 export { Button, buttonVariants } from './button'
 export { Card, CardHeader, CardFooter, CardTitle, CardDescription, CardContent } from './card'
 export {
+  AlertDialog,
+  AlertDialogPortal,
+  AlertDialogOverlay,
+  AlertDialogTrigger,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogFooter,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogAction,
+  AlertDialogCancel,
+  ConfirmDialog,
+} from './confirm-dialog'
+export {
   Dialog,
   DialogPortal,
   DialogOverlay,
@@ -89,3 +103,5 @@ export {
 } from './toast'
 export { useToast, toast } from './use-toast'
 export { Toaster } from './toaster'
+export { Popover, PopoverTrigger, PopoverContent, PopoverAnchor } from './popover'
+export { Combobox, type ComboboxOption } from './combobox'

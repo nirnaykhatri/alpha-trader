@@ -30,6 +30,7 @@ try:
     from src.services.bot_service_interface import IBotService
 except ImportError:
     IBotService = None  # type: ignore
+    # Logged below after logger is initialized
 
 # Bot models import
 try:
@@ -42,11 +43,19 @@ try:
         SignalConfig, IndicatorConfig, IndicatorType, IndicatorTimeframe,
         TradingViewWebhookConfig, PriceConditionConfig
     )
+    _BOT_MODELS_AVAILABLE = True
 except ImportError:
     Bot = None  # type: ignore
+    _BOT_MODELS_AVAILABLE = False
 
 
 logger = get_logger(__name__)
+
+# Log import warnings after logger is initialized
+if IBotService is None:
+    logger.warning("IBotService interface not found - bot management features may be limited")
+if not _BOT_MODELS_AVAILABLE:
+    logger.error("Bot domain models failed to import - bot management will not function correctly")
 
 
 # =============================================================================

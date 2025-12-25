@@ -1,1 +1,17 @@
 node_modules/
+
+# Next.js build output
+.next/
+out/
+
+# Build info
+*.tsbuildinfo
+next-env.d.ts
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Env files (local overrides)
+.env*.local

@@ -54,9 +54,9 @@ Strict separation of concerns across layers:
                     ↓
 ┌─────────────────────────────────────────────┐
 │ Data Layer (Persistence/External APIs)     │
-│ - src/database/database_manager.py         │
+│ - src/database/cosmos_manager.py           │
 │ - src/trading/alpaca_client.py             │
-│ - SQLAlchemy, API clients                  │
+│ - Azure Cosmos DB, Broker API clients      │
 └─────────────────────────────────────────────┘
 ```
 

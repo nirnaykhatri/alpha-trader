@@ -54,6 +54,10 @@ from src.strategies.trailing_manager import TrailingManager
 from src.strategies.phase_manager import PhaseManager
 from src.strategies.position_state import PositionState, PositionDirection, TradePhase
 
+# Extracted DCA components (SRP refactoring)
+from src.strategies.dca_evaluator import DCAPositionEvaluator
+from src.strategies.dca_signal_router import DCASignalRouter
+
 __all__ = [
     # Main strategy
     "DCAStrategy",
@@ -79,4 +83,8 @@ __all__ = [
     "PositionState",
     "PositionDirection",
     "TradePhase",
+    
+    # Extracted DCA components (SRP)
+    "DCAPositionEvaluator",
+    "DCASignalRouter",
 ]

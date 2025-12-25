@@ -18,13 +18,16 @@ Security:
 """
 
 import asyncio
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any, TYPE_CHECKING
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 
-from azure.identity.aio import DefaultAzureCredential
-from azure.keyvault.secrets.aio import SecretClient
-from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
+# Lazy imports: Azure SDK modules are imported when first needed
+# This allows tests and tools to import this module without requiring Azure SDK
+if TYPE_CHECKING:
+    from azure.identity.aio import DefaultAzureCredential
+    from azure.keyvault.secrets.aio import SecretClient
+    from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
 
 from src.interfaces import IConfigurationManager
 from src.exceptions import TradingBotException
@@ -130,7 +133,11 @@ class AzureKeyVaultSecrets:
         Creates the DefaultAzureCredential and SecretClient.
         Must be called before accessing secrets.
         
+        Azure SDK is imported lazily here, allowing this module to be
+        imported without the SDK installed (e.g., for testing).
+        
         Raises:
+            ImportError: If Azure SDK is not installed
             TradingBotException: If vault URL is not configured
         """
         if not self._vault_url:
@@ -140,6 +147,10 @@ class AzureKeyVaultSecrets:
             )
         
         try:
+            # Lazy import Azure SDK - only when actually initializing
+            from azure.identity.aio import DefaultAzureCredential
+            from azure.keyvault.secrets.aio import SecretClient
+            
             logger.info("Initializing Azure Key Vault client...")
             
             self._credential = DefaultAzureCredential()
@@ -221,12 +232,18 @@ class AzureKeyVaultSecrets:
             logger.debug(f"Secret '{secret_name}' retrieved from Key Vault")
             return value
             
-        except ResourceNotFoundError:
-            logger.warning(f"Secret '{secret_name}' not found in Key Vault")
-            return None
-        except HttpResponseError as e:
-            logger.error(f"Key Vault error for '{secret_name}': {e.message}")
-            raise TradingBotException(f"Key Vault error: {e.message}")
+        except Exception as e:
+            # Lazy import for exception types
+            from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
+            
+            if isinstance(e, ResourceNotFoundError):
+                logger.warning(f"Secret '{secret_name}' not found in Key Vault")
+                return None
+            elif isinstance(e, HttpResponseError):
+                logger.error(f"Key Vault error for '{secret_name}': {e.message}")
+                raise TradingBotException(f"Key Vault error: {e.message}")
+            else:
+                raise
     
     async def get_all_secrets(
         self,
@@ -323,9 +340,14 @@ class AzureKeyVaultSecrets:
             
             logger.info(f"Secret '{secret_name}' set in Key Vault")
             
-        except HttpResponseError as e:
-            logger.error(f"Failed to set secret '{secret_name}': {e.message}")
-            raise TradingBotException(f"Failed to set secret: {e.message}")
+        except Exception as e:
+            # Lazy import for exception handling
+            from azure.core.exceptions import HttpResponseError
+            
+            if isinstance(e, HttpResponseError):
+                logger.error(f"Failed to set secret '{secret_name}': {e.message}")
+                raise TradingBotException(f"Failed to set secret: {e.message}")
+            raise
     
     async def health_check(self) -> Dict[str, any]:
         """

@@ -22,14 +22,17 @@ Features:
 """
 
 import asyncio
-from typing import Dict, Optional, Any, Callable, List
+from typing import Dict, Optional, Any, Callable, List, TYPE_CHECKING
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 import json
 
-from azure.identity.aio import DefaultAzureCredential
-from azure.appconfiguration.aio import AzureAppConfigurationClient
-from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
+# Lazy imports: Azure SDK modules are imported when first needed
+# This allows tests and tools to import this module without requiring Azure SDK
+if TYPE_CHECKING:
+    from azure.identity.aio import DefaultAzureCredential
+    from azure.appconfiguration.aio import AzureAppConfigurationClient
+    from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
 
 from src.interfaces import IConfigurationManager
 from src.exceptions import TradingBotException
@@ -148,7 +151,11 @@ class AzureAppConfiguration:
         """
         Initialize App Configuration client and load initial configuration.
         
+        Azure SDK is imported lazily here, allowing this module to be
+        imported without the SDK installed (e.g., for testing).
+        
         Raises:
+            ImportError: If Azure SDK is not installed
             TradingBotException: If endpoint is not configured
         """
         if not self._endpoint:
@@ -158,6 +165,10 @@ class AzureAppConfiguration:
             )
         
         try:
+            # Lazy import Azure SDK - only when actually initializing
+            from azure.identity.aio import DefaultAzureCredential
+            from azure.appconfiguration.aio import AzureAppConfigurationClient
+            
             logger.info("Initializing Azure App Configuration client...")
             
             self._credential = DefaultAzureCredential()
@@ -236,6 +247,9 @@ class AzureAppConfiguration:
             True if changes were detected and reloaded
         """
         try:
+            # Lazy import for exception handling
+            from azure.core.exceptions import ResourceNotFoundError
+            
             # Check sentinel key ETag
             try:
                 sentinel = await self._client.get_configuration_setting(
@@ -423,9 +437,14 @@ class AzureAppConfiguration:
             
             logger.info(f"Configuration set: {key} = {value}")
             
-        except HttpResponseError as e:
-            logger.error(f"Failed to set configuration '{key}': {e.message}")
-            raise TradingBotException(f"Failed to set configuration: {e.message}")
+        except Exception as e:
+            # Lazy import for exception handling
+            from azure.core.exceptions import HttpResponseError
+            
+            if isinstance(e, HttpResponseError):
+                logger.error(f"Failed to set configuration '{key}': {e.message}")
+                raise TradingBotException(f"Failed to set configuration: {e.message}")
+            raise
     
     async def refresh(self) -> None:
         """Force a configuration refresh from App Configuration."""
@@ -449,6 +468,9 @@ class AzureAppConfiguration:
         
         start = datetime.utcnow()
         try:
+            # Lazy import for exception handling
+            from azure.core.exceptions import ResourceNotFoundError
+            
             # Try to read sentinel key
             try:
                 await self._client.get_configuration_setting(

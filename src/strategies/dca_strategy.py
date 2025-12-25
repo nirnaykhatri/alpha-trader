@@ -177,20 +177,15 @@ class DCAStrategy(ITradingStrategy):
         self.positions: Dict[str, PositionState] = {}
         self.position_timeframes: Dict[str, str] = {}
         
-        # Use injected DCA metadata manager or create default
+        # Use injected DCA metadata manager (Cosmos-based) or None
+        # Note: DCA metadata is now stored in Cosmos DB via BotOrder/BotHistory
         if deps.dca_metadata_manager is not None:
             self.dca_metadata_manager = deps.dca_metadata_manager
             logger.info("✅ DCA metadata manager injected")
-        elif self.position_manager and hasattr(self.position_manager, 'database'):
-            try:
-                from ..database.dca_metadata_manager import DCAMetadataManager
-                self.dca_metadata_manager = DCAMetadataManager(self.position_manager.database)
-                logger.info("✅ DCA metadata manager created (default)")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not create DCA metadata manager: {e}")
-                self.dca_metadata_manager = None
         else:
+            # DCA metadata is tracked via Cosmos DB bot orders/history
             self.dca_metadata_manager = None
+            logger.debug("DCA metadata manager not injected - using Cosmos DB for order tracking")
         
         # Use injected martingale safety manager or create default
         if deps.martingale_safety is not None:

@@ -5,10 +5,24 @@
 ### *Mapping External Dependencies to Codebase Integration Points*
 
 [![Status](https://img.shields.io/badge/Status-Production-brightgreen?style=for-the-badge)]()
-[![Last Updated](https://img.shields.io/badge/Updated-Nov%202025-blue?style=for-the-badge)]()
+[![Last Updated](https://img.shields.io/badge/Updated-Dec%202025-blue?style=for-the-badge)]()
 [![Adapters](https://img.shields.io/badge/Adapters-6-orange?style=for-the-badge)]()
 
 </div>
+
+---
+
+> ⚠️ **ARCHITECTURE UPDATE (December 2025)**
+> 
+> This document contains references to **SQLite/SQLAlchemy** which have been **removed**.
+> The trading bot now uses **Azure Cosmos DB** exclusively for persistence.
+> 
+> Key changes:
+> - Database: SQLite → Azure Cosmos DB (NoSQL)
+> - ORM: SQLAlchemy removed → Cosmos SDK async client
+> - Config: `database.url` deprecated → Use `AZURE_COSMOS_ENDPOINT` and `AZURE_COSMOS_KEY`
+> 
+> See [AZURE_DEPLOYMENT.md](AZURE_DEPLOYMENT.md) for current architecture.
 
 ---
 
@@ -36,13 +50,13 @@ graph TB
         STRAT["Strategy Engine<br/>src/strategies/"]
         OM["OrderManager<br/>src/trading/"]
         TT["TastytradeOrderExecutor<br/>src/broker/tastytrade_broker/"]
-        DB["DatabaseManager<br/>src/database/"]
+        DB["CosmosDBManager<br/>src/database/"]
         MET["Metrics Module<br/>src/utils/"]
         CACHE["RedisCache<br/>src/cache/"]
     end
     
     subgraph Storage["💾 Persistence"]
-        SQLITE[("🗄️ SQLite<br/>trading_bot.db")]
+        COSMOS[("☁️ Cosmos DB<br/>Azure NoSQL")]
         REDIS[("⚡ Redis<br/>Optional")]
     end
     
@@ -54,7 +68,7 @@ graph TB
     STRAT --> DB
     OM <-->|REST API| ALPACA
     TT <-->|OAuth API| TASTY
-    DB --> SQLITE
+    DB --> COSMOS
     CACHE --> REDIS
     MET -->|:9090/metrics| PROM
 ```
@@ -67,7 +81,7 @@ graph TB
 |:-:|:-------:|:--------|:-----------:|:---------------|
 | 1 | 🦙 **Alpaca** | Trade execution, positions, market data | 🔴 **CRITICAL** | Cannot execute trades via Alpaca |
 | 2 | 🍒 **Tastytrade** | Trade execution, positions (options-capable) | 🔴 **CRITICAL** | Cannot execute trades via Tastytrade |
-| 3 | 🗄️ **SQLite** | Position & order persistence | 🔴 **CRITICAL** | System halt (no state) |
+| 3 | ☁️ **Cosmos DB** | Position & order persistence | 🔴 **CRITICAL** | System halt (no state) |
 | 4 | 📈 **TradingView** | Inbound webhook signals | 🔴 **CRITICAL** | No signals received (passive mode) |
 | 5 | 📊 **Prometheus** | Metrics exposition | 🟢 **LOW** | Observability loss only |
 | 6 | ⚡ **Redis** | Response caching (optional) | 🟢 **LOW** | Performance degradation |
@@ -211,7 +225,9 @@ stateDiagram-v2
 
 ---
 
-## 🗄️ 3. SQLite Database
+## 🗄️ 3. Azure Cosmos DB
+
+> **UPDATED (December 2025)**: SQLite/SQLAlchemy removed. Now using Azure Cosmos DB for all persistence.
 
 > **Persistent storage for positions, orders, trades, and DCA metadata**
 
@@ -270,8 +286,7 @@ erDiagram
 
 | Class | File | Key Methods |
 |:------|:-----|:------------|
-| `Base` | `src/database/base.py` | Shared SQLAlchemy declarative base |
-| `DatabaseManager` | `src/database/database_manager.py` | `initialize()`, `save_position()`, `get_position()`, `get_all_positions()`, `save_order()`, `update_order_status()` |
+| `CosmosDBManager` | `src/database/cosmos_manager.py` | `initialize()`, `save_position()`, `get_position()`, `get_all_positions()`, `save_order()`, `update_order_status()` |
 | `DCAMetadataManager` | `src/database/dca_metadata_manager.py` | `save_dca_metadata()`, `get_dca_history()`, `get_average_entry()` |
 
 ### ⚙️ Configuration
@@ -279,26 +294,25 @@ erDiagram
 ```toml
 # config/settings.toml
 [default.database]
-url = "sqlite:///trading_bot.db"
-echo = false
-pool_size = 5
-max_overflow = 10
+# Cosmos DB credentials via environment variables:
+# COSMOS_ENDPOINT, COSMOS_KEY, COSMOS_DATABASE
 ```
 
 ### 🛡️ Transaction Safety
 
 ```mermaid
 flowchart LR
-    A[Begin Transaction] --> B{Operation}
-    B -->|Success| C[Commit]
-    B -->|Error| D[Rollback]
+    A[Begin Operation] --> B{Cosmos Request}
+    B -->|Success| C[Success Response]
+    B -->|Error| D[Retry with Backoff]
     C --> E[Complete]
-    D --> E
+    D -->|Max Retries| F[Raise Error]
+    D -->|Retry| B
 ```
 
 ### 📦 Dependencies
-- `SQLAlchemy` — Async ORM (≥2.0.36 for Python 3.13)
-- `aiosqlite` — Async SQLite driver
+- `azure-cosmos` — Azure Cosmos DB Python SDK (≥4.7.0)
+- `aiohttp` — Async HTTP for Cosmos operations
 
 ---
 
@@ -519,8 +533,8 @@ flowchart TB
     end
     
     subgraph Persistence["💾 Data Layer"]
-        DB["Database Manager"]
-        SQLITE[("🗄️ SQLite")]
+        DB["Cosmos DB Manager"]
+        COSMOS[("☁️ Cosmos DB")]
         CACHE["Redis Cache"]
         REDIS[("⚡ Redis")]
     end
@@ -542,7 +556,7 @@ flowchart TB
     OM --> TASTY
     
     STRAT --> DB
-    DB --> SQLITE
+    DB --> COSMOS
     
     STRAT -.-> CACHE
     CACHE -.-> REDIS
@@ -585,7 +599,7 @@ flowchart LR
 |:-------:|:---------|
 | 🦙 Alpaca | Switch to paper account |
 | 🍒 Tastytrade | Switch to sandbox mode |
-| 🗄️ SQLite | Backup before migration |
+| ☁️ Cosmos DB | Use replicated regions |
 | ⚡ Redis | Not required for core functionality |
 
 ---
@@ -596,7 +610,7 @@ flowchart LR
 |:-------:|:-------|:---------------:|:--------:|
 | 🦙 Alpaca | `alpaca_api_errors_total` | >5 in 5min | 🔴 High |
 | 🍒 Tastytrade | `tastytrade_api_errors_total` | >5 in 5min | 🔴 High |
-| 🗄️ SQLite | `db_connection_pool_exhausted` | >0 | 🔴 Critical |
+| ☁️ Cosmos DB | `cosmos_request_failures_total` | >5 in 5min | 🔴 Critical |
 | 📈 Webhook | `webhook_validation_failures_total` | >5 in 1min | 🟡 Medium |
 | ⚡ Redis | `redis_connection_failures_total` | >20 in 10min | 🟡 Medium |
 

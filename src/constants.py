@@ -5,7 +5,49 @@ This module centralizes all constant values used throughout the trading bot
 to improve code readability, maintainability, and prevent errors from typos.
 """
 
+from enum import Enum
 from typing import Final
+
+
+class PositionStatus(str, Enum):
+    """Status values for position records."""
+    ACTIVE = "active"
+    CLOSED = "closed"
+    PENDING = "pending"
+    CANCELLED = "cancelled"
+
+
+class OrderStatus(str, Enum):
+    """Status values for order records."""
+    PENDING = "pending"
+    SUBMITTED = "submitted"
+    FILLED = "filled"
+    PARTIALLY_FILLED = "partially_filled"
+    CANCELLED = "cancelled"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+class BotStatus(str, Enum):
+    """Status values for bot instances."""
+    ACTIVE = "active"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+    ERROR = "error"
+    STARTING = "starting"
+    STOPPING = "stopping"
+
+
+class OrderSideStr(str, Enum):
+    """Side values for orders (string enum for serialization)."""
+    BUY = "buy"
+    SELL = "sell"
+
+
+class PositionDirection(str, Enum):
+    """Direction values for positions."""
+    LONG = "long"
+    SHORT = "short"
 
 
 class APIConstants:
