@@ -22,6 +22,7 @@ from src.signals.routers.bot_management_router import BotManagementRouter
 from src.signals.routers.config_router import ConfigRouter
 from src.signals.routers.fund_router import FundRouter
 from src.signals.routers.analytics_router import AnalyticsRouter
+from src.signals.routers.dca_preview_router import DCAPreviewRouter
 from src.signals.routers.admin_router_composite import (
     AdminRouterComposite,
     create_admin_router
@@ -76,6 +77,7 @@ __all__ = [
     "ConfigRouter",
     "FundRouter",
     "AnalyticsRouter",
+    "DCAPreviewRouter",
     "AdminRouterComposite",
     "create_admin_router",
     # Backward compatibility

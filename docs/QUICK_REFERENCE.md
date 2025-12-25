@@ -98,18 +98,21 @@ except ValueError as e:
     print(f"❌ Configuration error: {e}")
 ```
 
-### 4. Database Connection Best Practices
+### 4. Database Connection (Cosmos DB)
 
-**Connection pooling is now automatic!**
+**Connection pooling is handled by Cosmos DB automatically!**
 
-Just ensure your `settings.toml` has:
-```yaml
-database:
-  url: "postgresql://user:pass@localhost/dbname"
-  pool_size: 20        # Uses DatabaseConstants.POOL_SIZE if not specified
-  max_overflow: 40     # Uses DatabaseConstants.POOL_MAX_OVERFLOW if not specified
-  pool_timeout: 30
-  pool_recycle: 3600
+Configure via environment variables:
+```bash
+# Required
+export COSMOS_ENDPOINT="https://your-account.documents.azure.com:443/"
+export COSMOS_KEY="your-cosmos-key"
+export COSMOS_DATABASE="trading-bot"
+
+# Optional settings in settings.toml
+# database:
+#   throughput_ru: 400       # Cosmos RU/s (400 = free tier minimum)
+#   consistency_level: "Session"  # Cosmos consistency level
 ```
 
 ### 5. FastAPI Documentation

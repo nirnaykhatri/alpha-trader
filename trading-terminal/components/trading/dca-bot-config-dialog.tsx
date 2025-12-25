@@ -29,47 +29,41 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/components/ui/collapsible'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Switch } from '@/components/ui/switch'
 import { Slider } from '@/components/ui/slider'
 import { Badge } from '@/components/ui/badge'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Separator } from '@/components/ui/separator'
+import { Combobox, type ComboboxOption } from '@/components/ui/combobox'
 import { cn } from '@/lib/utils'
 import {
-  ChevronDown,
-  ChevronRight,
-  TrendingUp,
-  TrendingDown,
   Info,
-  Minus,
-  Plus,
   History,
-  AlertTriangle,
-  Shield,
-  Target,
-  Wallet,
 } from 'lucide-react'
 import type {
-  BotType,
   PositionMode,
   DCAConfig,
   CreateBotRequest,
   QuickSetupPreset,
-  BotOrderType,
-  TakeProfitType,
-  PriceReference,
-  BotStartCondition,
 } from '@/lib/types/bot'
 import { DEFAULT_DCA_CONFIG, QUICK_SETUP_PRESETS } from '@/lib/types/bot'
 import type { AssetClass } from '@/lib/types/asset'
+import {
+  getSymbolsForExchange,
+  symbolsToComboboxOptions,
+  getSupportedAssetClasses,
+  exchangeSupportsAssetClass,
+} from '@/lib/data/exchange-symbols'
+import { fetchQuote } from '@/lib/api'
+
+// Import shared components
+import {
+  AveragingOrdersSection,
+  PositionTpSlSection,
+  RiskManagementSection,
+  BotSettingsSection,
+} from './shared'
 
 // ============================================================================
 // Types
@@ -109,148 +103,12 @@ const EXCHANGES = [
   { value: 'kraken', label: 'Kraken' },
 ]
 
-const ASSET_CLASSES: { value: AssetClass; label: string }[] = [
+const ALL_ASSET_CLASSES: { value: AssetClass; label: string }[] = [
   { value: 'crypto', label: 'Crypto' },
   { value: 'stock', label: 'Stocks' },
   { value: 'forex', label: 'Forex' },
   { value: 'etf', label: 'ETF' },
 ]
-
-// ============================================================================
-// Sub-components
-// ============================================================================
-
-/**
- * Collapsible Section Header
- */
-function SectionHeader({
-  title,
-  isOpen,
-  onToggle,
-  icon,
-}: {
-  title: string
-  isOpen: boolean
-  onToggle: () => void
-  icon?: React.ReactNode
-}) {
-  return (
-    <CollapsibleTrigger
-      onClick={onToggle}
-      className="flex items-center justify-between w-full py-3 hover:bg-muted/50 rounded-lg px-2 -mx-2 transition-colors"
-    >
-      <div className="flex items-center gap-2">
-        {icon}
-        <span className="font-medium">{title}</span>
-      </div>
-      {isOpen ? (
-        <ChevronDown className="h-4 w-4 text-muted-foreground" />
-      ) : (
-        <ChevronRight className="h-4 w-4 text-muted-foreground" />
-      )}
-    </CollapsibleTrigger>
-  )
-}
-
-/**
- * Number Input with +/- buttons
- */
-function NumberStepper({
-  value,
-  onChange,
-  min = 0,
-  max = 100,
-  step = 1,
-  label,
-  suffix,
-}: {
-  value: number
-  onChange: (value: number) => void
-  min?: number
-  max?: number
-  step?: number
-  label?: string
-  suffix?: string
-}) {
-  const decrement = () => onChange(Math.max(min, value - step))
-  const increment = () => onChange(Math.min(max, value + step))
-
-  return (
-    <div className="space-y-2">
-      {label && <Label className="text-sm text-muted-foreground">{label}</Label>}
-      <div className="flex items-center gap-1">
-        <Button
-          variant="outline"
-          size="icon"
-          className="h-8 w-8"
-          onClick={decrement}
-          disabled={value <= min}
-        >
-          <Minus className="h-3 w-3" />
-        </Button>
-        <div className="flex-1 text-center">
-          <span className="text-lg font-semibold">{value}</span>
-          {suffix && <span className="text-sm text-muted-foreground ml-1">{suffix}</span>}
-        </div>
-        <Button
-          variant="outline"
-          size="icon"
-          className="h-8 w-8"
-          onClick={increment}
-          disabled={value >= max}
-        >
-          <Plus className="h-3 w-3" />
-        </Button>
-      </div>
-    </div>
-  )
-}
-
-/**
- * Multiplier Slider with toggle
- */
-function MultiplierSlider({
-  label,
-  value,
-  enabled,
-  onValueChange,
-  onEnabledChange,
-  min = 1,
-  max = 3,
-  step = 0.1,
-}: {
-  label: string
-  value: number
-  enabled: boolean
-  onValueChange: (value: number) => void
-  onEnabledChange: (enabled: boolean) => void
-  min?: number
-  max?: number
-  step?: number
-}) {
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <Label className="text-sm">{label}</Label>
-        <Switch checked={enabled} onCheckedChange={onEnabledChange} />
-      </div>
-      {enabled && (
-        <div className="flex items-center gap-4">
-          <span className="text-sm text-muted-foreground">Off</span>
-          <Slider
-            value={[value]}
-            onValueChange={([v]) => onValueChange(v)}
-            min={min}
-            max={max}
-            step={step}
-            className="flex-1"
-          />
-          <span className="text-sm font-medium min-w-[3rem] text-right">x{value.toFixed(1)}</span>
-        </div>
-      )}
-    </div>
-  )
-}
 
 // ============================================================================
 // Main Component
@@ -266,6 +124,10 @@ export function DCABotConfigDialog({
 }: DCABotConfigDialogProps) {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  
+  // Current price state for order preview
+  const [currentPrice, setCurrentPrice] = useState<number>(0)
+  const [isPriceFetching, setIsPriceFetching] = useState(false)
   
   // Section collapse states
   const [botSettingsOpen, setBotSettingsOpen] = useState(false)
@@ -283,6 +145,118 @@ export function DCABotConfigDialog({
     quickSetup: 'mid_term',
     dcaConfig: { ...DEFAULT_DCA_CONFIG },
   })
+
+  // Fetch current price when symbol changes
+  useEffect(() => {
+    if (!form.symbol.trim()) {
+      setCurrentPrice(0)
+      return
+    }
+
+    const controller = new AbortController()
+    setIsPriceFetching(true)
+    
+    // Debounce the fetch
+    const timer = setTimeout(async () => {
+      try {
+        const quote = await fetchQuote(form.symbol, { signal: controller.signal })
+        if (quote?.price) {
+          setCurrentPrice(quote.price)
+        } else {
+          // Use mock prices for demo if API unavailable
+          const mockPrices: Record<string, number> = {
+            'BTC/USD': 43250.00,
+            'ETH/USD': 2280.00,
+            'AAPL': 178.50,
+            'MSFT': 374.20,
+            'GOOGL': 140.80,
+            'TSLA': 248.50,
+            'NVDA': 495.00,
+            'SPY': 475.00,
+          }
+          setCurrentPrice(mockPrices[form.symbol.toUpperCase()] || 100.00)
+        }
+      } catch (err) {
+        if (err instanceof Error && err.name !== 'AbortError') {
+          console.warn('Failed to fetch price:', err)
+          // Set a default price for visualization
+          setCurrentPrice(100.00)
+        }
+      } finally {
+        setIsPriceFetching(false)
+      }
+    }, 300)
+
+    return () => {
+      controller.abort()
+      clearTimeout(timer)
+    }
+  }, [form.symbol])
+
+  // Available asset classes for selected exchange
+  const availableAssetClasses = useMemo(() => {
+    const supported = getSupportedAssetClasses(form.exchange)
+    return ALL_ASSET_CLASSES.filter(ac => supported.includes(ac.value))
+  }, [form.exchange])
+
+  // Symbol options based on exchange and asset class
+  const symbolOptions = useMemo((): ComboboxOption[] => {
+    const symbols = getSymbolsForExchange(form.exchange, form.assetClass)
+    return symbolsToComboboxOptions(symbols, true)
+  }, [form.exchange, form.assetClass])
+
+  // Reset asset class when exchange changes if current class not supported
+  useEffect(() => {
+    if (!exchangeSupportsAssetClass(form.exchange, form.assetClass)) {
+      const supported = getSupportedAssetClasses(form.exchange)
+      if (supported.length > 0) {
+        setForm(prev => ({
+          ...prev,
+          assetClass: supported[0],
+          symbol: '', // Reset symbol when asset class changes
+        }))
+      }
+    }
+  }, [form.exchange, form.assetClass])
+
+  // Reset symbol when asset class changes
+  const handleAssetClassChange = useCallback((newAssetClass: AssetClass) => {
+    setForm(prev => ({
+      ...prev,
+      assetClass: newAssetClass,
+      symbol: '', // Reset symbol when asset class changes
+    }))
+  }, [])
+
+  // Sync investment amount when base order or averaging orders change
+  useEffect(() => {
+    const baseOrder = form.dcaConfig.startSettings?.baseOrderAmount || 0
+    const avgOrders = form.dcaConfig.averagingOrders?.totalAmount || 0
+    const newTotal = baseOrder + avgOrders
+    
+    // Only update if there's a meaningful difference (avoid floating point issues)
+    setForm(prev => {
+      if (Math.abs(newTotal - prev.investmentAmount) > 0.001) {
+        return {
+          ...prev,
+          investmentAmount: Math.round(newTotal * 100) / 100,
+          investmentPercent: Math.round((newTotal / availableBalance) * 10000) / 100,
+        }
+      }
+      return prev
+    })
+  }, [form.dcaConfig.startSettings?.baseOrderAmount, form.dcaConfig.averagingOrders?.totalAmount, availableBalance])
+
+  /**
+   * Sanitize numeric input to prevent invalid values like "0988".
+   * Parses the input and returns a clean number.
+   */
+  const sanitizeNumericInput = useCallback((value: string): number => {
+    // Remove leading zeros and parse as float
+    const cleaned = value.replace(/^0+(?=\d)/, '')
+    const num = parseFloat(cleaned)
+    return isNaN(num) ? 0 : Math.round(num * 100) / 100
+  }, [])
 
   // Calculate investment based on percentage
   const handleInvestmentPercentChange = useCallback((percent: number[]) => {
@@ -335,7 +309,7 @@ export function DCABotConfigDialog({
 
   // Calculate estimated PnL
   const estimatedPnL = useMemo(() => {
-    const tp = form.dcaConfig.takeProfit?.priceChangePercent || form.dcaConfig.takeProfitPercent
+    const tp = form.dcaConfig.takeProfit?.priceChangePercent || 1
     const amount = form.investmentAmount + (form.dcaConfig.averagingOrders?.totalAmount || 0)
     return (amount * tp) / 100
   }, [form.investmentAmount, form.dcaConfig])
@@ -409,8 +383,9 @@ export function DCABotConfigDialog({
 
         {/* Scrollable Content */}
         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-6">
-          {/* Exchange & Pair Selection */}
+          {/* Exchange, Asset Type & Pair Selection */}
           <div className="space-y-4">
+            {/* Exchange Selection */}
             <div className="space-y-2">
               <Label className="text-xs text-muted-foreground uppercase">Exchange</Label>
               <Select value={form.exchange} onValueChange={(v) => updateForm('exchange', v)}>
@@ -425,30 +400,55 @@ export function DCABotConfigDialog({
               </Select>
             </div>
 
-            <div className="space-y-2">
-              <Label className="text-xs text-muted-foreground uppercase">Pair</Label>
-              <Input
-                placeholder="TAO / USD"
-                value={form.symbol}
-                onChange={(e) => updateForm('symbol', e.target.value.toUpperCase())}
-              />
-            </div>
-
+            {/* Asset Type Selection */}
             <div className="space-y-2">
               <Label className="text-xs text-muted-foreground uppercase">Asset Type</Label>
               <Select 
                 value={form.assetClass} 
-                onValueChange={(v) => updateForm('assetClass', v as AssetClass)}
+                onValueChange={(v) => handleAssetClassChange(v as AssetClass)}
               >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {ASSET_CLASSES.map(ac => (
+                  {availableAssetClasses.map(ac => (
                     <SelectItem key={ac.value} value={ac.value}>{ac.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              {availableAssetClasses.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  No asset classes available for this exchange
+                </p>
+              )}
+            </div>
+
+            {/* Pair/Symbol Selection - Searchable Combobox */}
+            <div className="space-y-2">
+              <Label className="text-xs text-muted-foreground uppercase">
+                {form.assetClass === 'stock' || form.assetClass === 'etf' ? 'Symbol' : 'Pair'}
+              </Label>
+              <Combobox
+                options={symbolOptions}
+                value={form.symbol}
+                onValueChange={(v) => updateForm('symbol', v)}
+                placeholder={
+                  form.assetClass === 'stock' || form.assetClass === 'etf'
+                    ? 'Search symbol (e.g., AAPL, MSFT)...'
+                    : 'Search pair (e.g., BTC/USD, ETH/USDT)...'
+                }
+                emptyMessage={
+                  symbolOptions.length === 0
+                    ? `No ${form.assetClass} symbols available for ${form.exchange}`
+                    : 'No matching symbols found'
+                }
+                allowCustomValue={true}
+              />
+              {symbolOptions.length === 0 && (
+                <p className="text-xs text-yellow-600 dark:text-yellow-400">
+                  Enter a custom symbol or select a different asset type/exchange
+                </p>
+              )}
             </div>
           </div>
 
@@ -486,7 +486,7 @@ export function DCABotConfigDialog({
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <Label className="text-xs text-muted-foreground uppercase">
-                Investment, {form.symbol.split('/')[0] || 'USD'}
+                Investment, {form.strategy === 'short' ? (form.symbol.split('/')[0] || 'USD') : 'USD'}
               </Label>
               <span className="text-xs text-muted-foreground">
                 ≈ ${availableBalance.toLocaleString()} USD
@@ -496,11 +496,18 @@ export function DCABotConfigDialog({
             <div className="flex items-center gap-3">
               <Input
                 type="number"
+                min={0}
+                step="0.01"
                 value={form.investmentAmount}
                 onChange={(e) => {
-                  const val = parseFloat(e.target.value) || 0
+                  const val = sanitizeNumericInput(e.target.value)
                   updateForm('investmentAmount', val)
                   updateForm('investmentPercent', (val / availableBalance) * 100)
+                }}
+                onBlur={(e) => {
+                  // Ensure clean value on blur
+                  const val = sanitizeNumericInput(e.target.value)
+                  e.target.value = val.toString()
                 }}
                 className="flex-1"
               />
@@ -548,408 +555,58 @@ export function DCABotConfigDialog({
 
           <Separator />
 
-          {/* Bot Settings Section */}
-          <Collapsible open={botSettingsOpen} onOpenChange={setBotSettingsOpen}>
-            <SectionHeader
-              title="Bot settings"
-              isOpen={botSettingsOpen}
-              onToggle={() => setBotSettingsOpen(!botSettingsOpen)}
-            />
-            <CollapsibleContent className="space-y-4 pt-4">
-              {/* Bot start conditions */}
-              <div className="space-y-2">
-                <Label className="text-sm text-muted-foreground">Bot start conditions</Label>
-                <div className="p-3 bg-muted/30 rounded-lg space-y-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm">Place base order</span>
-                    <Badge variant="secondary">Immediately</Badge>
-                  </div>
-                  
-                  <div className="space-y-2">
-                    <Label className="text-xs text-muted-foreground">Base order amount</Label>
-                    <Input
-                      type="number"
-                      value={form.dcaConfig.startSettings?.baseOrderAmount || form.investmentAmount * 0.2}
-                      onChange={(e) => updateDcaConfig('startSettings', {
-                        ...form.dcaConfig.startSettings!,
-                        baseOrderAmount: parseFloat(e.target.value) || 0,
-                      })}
-                    />
-                  </div>
-
-                  <div className="flex rounded-lg border p-1">
-                    <Button
-                      variant={form.dcaConfig.startSettings?.baseOrderType === 'limit' ? 'default' : 'ghost'}
-                      size="sm"
-                      className="flex-1"
-                      onClick={() => updateDcaConfig('startSettings', {
-                        ...form.dcaConfig.startSettings!,
-                        baseOrderType: 'limit',
-                      })}
-                    >
-                      Limit
-                    </Button>
-                    <Button
-                      variant={form.dcaConfig.startSettings?.baseOrderType === 'market' ? 'default' : 'ghost'}
-                      size="sm"
-                      className="flex-1"
-                      onClick={() => updateDcaConfig('startSettings', {
-                        ...form.dcaConfig.startSettings!,
-                        baseOrderType: 'market',
-                      })}
-                    >
-                      Market
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            </CollapsibleContent>
-          </Collapsible>
+          {/* Bot Settings Section - Using shared component */}
+          <BotSettingsSection
+            isOpen={botSettingsOpen}
+            onOpenChange={setBotSettingsOpen}
+            dcaConfig={form.dcaConfig}
+            onConfigUpdate={updateDcaConfig}
+            defaultBaseOrderAmount={form.investmentAmount * 0.2}
+            currency={form.strategy === 'short' ? (form.symbol.split('/')[0] || 'USD') : 'USD'}
+            symbol={form.symbol}
+            assetClass={form.assetClass}
+          />
 
           <Separator />
 
-          {/* Averaging Orders Section */}
-          <Collapsible open={averagingOrdersOpen} onOpenChange={setAveragingOrdersOpen}>
-            <SectionHeader
-              title="Averaging orders"
-              isOpen={averagingOrdersOpen}
-              onToggle={() => setAveragingOrdersOpen(!averagingOrdersOpen)}
-            />
-            <CollapsibleContent className="space-y-4 pt-4">
-              {/* Averaging orders amount */}
-              <div className="space-y-2">
-                <Label className="text-xs text-muted-foreground">
-                  Averaging orders amount, {form.symbol.split('/')[0] || 'USD'}
-                </Label>
-                <Input
-                  type="number"
-                  value={form.dcaConfig.averagingOrders?.totalAmount || 0}
-                  onChange={(e) => updateDcaConfig('averagingOrders', {
-                    ...form.dcaConfig.averagingOrders!,
-                    totalAmount: parseFloat(e.target.value) || 0,
-                  })}
-                />
-              </div>
-
-              {/* Orders count */}
-              <NumberStepper
-                label="Averaging orders quantity"
-                value={form.dcaConfig.averagingOrders?.ordersCount || 4}
-                onChange={(v) => updateDcaConfig('averagingOrders', {
-                  ...form.dcaConfig.averagingOrders!,
-                  ordersCount: v,
-                })}
-                min={1}
-                max={100}
-                step={1}
-              />
-
-              {/* Step percent */}
-              <div className="space-y-2">
-                <Label className="text-xs text-muted-foreground">Averaging orders step, %</Label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={form.dcaConfig.averagingOrders?.stepPercent || 1.99}
-                  onChange={(e) => updateDcaConfig('averagingOrders', {
-                    ...form.dcaConfig.averagingOrders!,
-                    stepPercent: parseFloat(e.target.value) || 0,
-                  })}
-                />
-              </div>
-
-              {/* Active Orders Limit */}
-              <div className="flex items-center justify-between">
-                <Label className="text-sm">Active Orders Limit</Label>
-                <Switch
-                  checked={form.dcaConfig.averagingOrders?.activeOrdersLimit || false}
-                  onCheckedChange={(checked) => updateDcaConfig('averagingOrders', {
-                    ...form.dcaConfig.averagingOrders!,
-                    activeOrdersLimit: checked,
-                  })}
-                />
-              </div>
-
-              {/* Amount Multiplier */}
-              <MultiplierSlider
-                label="Amount multiplier"
-                value={form.dcaConfig.averagingOrders?.amountMultiplier || 1.3}
-                enabled={form.dcaConfig.averagingOrders?.amountMultiplierEnabled || false}
-                onValueChange={(v) => updateDcaConfig('averagingOrders', {
-                  ...form.dcaConfig.averagingOrders!,
-                  amountMultiplier: v,
-                })}
-                onEnabledChange={(enabled) => updateDcaConfig('averagingOrders', {
-                  ...form.dcaConfig.averagingOrders!,
-                  amountMultiplierEnabled: enabled,
-                })}
-              />
-
-              {/* Step Multiplier */}
-              <MultiplierSlider
-                label="Step multiplier"
-                value={form.dcaConfig.averagingOrders?.stepMultiplier || 1.3}
-                enabled={form.dcaConfig.averagingOrders?.stepMultiplierEnabled || false}
-                onValueChange={(v) => updateDcaConfig('averagingOrders', {
-                  ...form.dcaConfig.averagingOrders!,
-                  stepMultiplier: v,
-                })}
-                onEnabledChange={(enabled) => updateDcaConfig('averagingOrders', {
-                  ...form.dcaConfig.averagingOrders!,
-                  stepMultiplierEnabled: enabled,
-                })}
-              />
-            </CollapsibleContent>
-          </Collapsible>
+          {/* Averaging Orders Section - Using shared component */}
+          <AveragingOrdersSection
+            isOpen={averagingOrdersOpen}
+            onOpenChange={setAveragingOrdersOpen}
+            dcaConfig={form.dcaConfig}
+            onConfigUpdate={updateDcaConfig}
+            currency={form.symbol.split('/')[0] || 'USD'}
+            currentPrice={currentPrice}
+            baseOrderAmount={form.dcaConfig.startSettings?.baseOrderAmount || form.investmentAmount * 0.2}
+            isShort={form.strategy === 'short'}
+            assetClass={form.assetClass}
+          />
 
           <Separator />
 
-          {/* Position TP & SL Section */}
-          <Collapsible open={positionTpSlOpen} onOpenChange={setPositionTpSlOpen}>
-            <SectionHeader
-              title="Position TP & SL"
-              isOpen={positionTpSlOpen}
-              onToggle={() => setPositionTpSlOpen(!positionTpSlOpen)}
-              icon={<Target className="h-4 w-4 text-muted-foreground" />}
-            />
-            <CollapsibleContent className="space-y-4 pt-4">
-              {/* Take Profit */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <Label className="text-sm font-medium">Take Profit</Label>
-                  <Switch
-                    checked={form.dcaConfig.takeProfit?.enabled ?? true}
-                    onCheckedChange={(checked) => updateDcaConfig('takeProfit', {
-                      ...form.dcaConfig.takeProfit!,
-                      enabled: checked,
-                    })}
-                  />
-                </div>
-
-                {form.dcaConfig.takeProfit?.enabled && (
-                  <div className="p-3 bg-muted/30 rounded-lg space-y-3">
-                    {/* Regular/Trailing tabs */}
-                    <Tabs
-                      value={form.dcaConfig.takeProfit?.type || 'regular'}
-                      onValueChange={(v) => updateDcaConfig('takeProfit', {
-                        ...form.dcaConfig.takeProfit!,
-                        type: v as TakeProfitType,
-                      })}
-                    >
-                      <TabsList className="w-full">
-                        <TabsTrigger value="regular" className="flex-1">Regular</TabsTrigger>
-                        <TabsTrigger value="trailing" className="flex-1">Trailing</TabsTrigger>
-                      </TabsList>
-                    </Tabs>
-
-                    {/* Price change % */}
-                    <div className="space-y-2">
-                      <Label className="text-xs text-muted-foreground">
-                        Price change, %
-                        <Info className="h-3 w-3 ml-1 inline" />
-                      </Label>
-                      <Input
-                        type="number"
-                        step="0.1"
-                        value={form.dcaConfig.takeProfit?.priceChangePercent || 1}
-                        onChange={(e) => updateDcaConfig('takeProfit', {
-                          ...form.dcaConfig.takeProfit!,
-                          priceChangePercent: parseFloat(e.target.value) || 0,
-                        })}
-                      />
-                    </div>
-
-                    {/* Percentage of */}
-                    <div className="space-y-2">
-                      <Label className="text-xs text-muted-foreground">Percentage of</Label>
-                      <Select
-                        value={form.dcaConfig.takeProfit?.priceReference || 'average_price'}
-                        onValueChange={(v) => updateDcaConfig('takeProfit', {
-                          ...form.dcaConfig.takeProfit!,
-                          priceReference: v as PriceReference,
-                        })}
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="average_price">Average price</SelectItem>
-                          <SelectItem value="base_order_price">Base order price</SelectItem>
-                          <SelectItem value="last_order_price">Last order price</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    {/* Limit/Market toggle */}
-                    <div className="flex rounded-lg border p-1">
-                      <Button
-                        variant={form.dcaConfig.takeProfit?.orderType === 'limit' ? 'default' : 'ghost'}
-                        size="sm"
-                        className="flex-1"
-                        onClick={() => updateDcaConfig('takeProfit', {
-                          ...form.dcaConfig.takeProfit!,
-                          orderType: 'limit',
-                        })}
-                      >
-                        Limit
-                      </Button>
-                      <Button
-                        variant={form.dcaConfig.takeProfit?.orderType === 'market' ? 'default' : 'ghost'}
-                        size="sm"
-                        className="flex-1"
-                        onClick={() => updateDcaConfig('takeProfit', {
-                          ...form.dcaConfig.takeProfit!,
-                          orderType: 'market',
-                        })}
-                      >
-                        Market
-                      </Button>
-                    </div>
-
-                    {/* PNL Preview */}
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">PNL</span>
-                      <span className="text-green-500 font-medium">
-                        ≈ +${estimatedPnL.toFixed(2)} {form.symbol.split('/')[0] || 'USD'}
-                      </span>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Stop Loss */}
-              <div className="flex items-center justify-between">
-                <Label className="text-sm font-medium flex items-center gap-2">
-                  <AlertTriangle className="h-4 w-4 text-red-500" />
-                  Stop Loss
-                </Label>
-                <Switch
-                  checked={form.dcaConfig.stopLoss?.enabled || false}
-                  onCheckedChange={(checked) => updateDcaConfig('stopLoss', {
-                    ...form.dcaConfig.stopLoss!,
-                    enabled: checked,
-                  })}
-                />
-              </div>
-
-              {form.dcaConfig.stopLoss?.enabled && (
-                <div className="p-3 bg-muted/30 rounded-lg space-y-3">
-                  <div className="space-y-2">
-                    <Label className="text-xs text-muted-foreground">Stop Loss, %</Label>
-                    <Input
-                      type="number"
-                      step="0.1"
-                      value={form.dcaConfig.stopLoss?.percent || 5}
-                      onChange={(e) => updateDcaConfig('stopLoss', {
-                        ...form.dcaConfig.stopLoss!,
-                        percent: parseFloat(e.target.value) || 0,
-                      })}
-                    />
-                  </div>
-                </div>
-              )}
-            </CollapsibleContent>
-          </Collapsible>
+          {/* Position TP & SL Section - Using shared component */}
+          <PositionTpSlSection
+            isOpen={positionTpSlOpen}
+            onOpenChange={setPositionTpSlOpen}
+            dcaConfig={form.dcaConfig}
+            onConfigUpdate={updateDcaConfig}
+            estimatedPnL={estimatedPnL}
+            currency={form.symbol.split('/')[0] || 'USD'}
+            symbol={form.symbol}
+          />
 
           <Separator />
 
-          {/* Risk Management Section */}
-          <Collapsible open={riskManagementOpen} onOpenChange={setRiskManagementOpen}>
-            <SectionHeader
-              title="Risk management"
-              isOpen={riskManagementOpen}
-              onToggle={() => setRiskManagementOpen(!riskManagementOpen)}
-              icon={<Shield className="h-4 w-4 text-muted-foreground" />}
-            />
-            <CollapsibleContent className="space-y-4 pt-4">
-              {/* Pump/Dump Protection */}
-              <div className="flex items-center justify-between">
-                <Label className="text-sm">Pump / Dump Protection</Label>
-                <Switch
-                  checked={form.dcaConfig.riskManagement?.pumpDumpProtection || true}
-                  onCheckedChange={(checked) => updateDcaConfig('riskManagement', {
-                    ...form.dcaConfig.riskManagement!,
-                    pumpDumpProtection: checked,
-                  })}
-                />
-              </div>
-
-              {/* Target Total Profit */}
-              <div className="flex items-center justify-between">
-                <Label className="text-sm">Target total profit</Label>
-                <Switch
-                  checked={form.dcaConfig.riskManagement?.targetTotalProfit?.enabled || false}
-                  onCheckedChange={(checked) => updateDcaConfig('riskManagement', {
-                    ...form.dcaConfig.riskManagement!,
-                    targetTotalProfit: {
-                      ...form.dcaConfig.riskManagement?.targetTotalProfit,
-                      enabled: checked,
-                    },
-                  })}
-                />
-              </div>
-
-              {/* Allowed Total Loss */}
-              <div className="flex items-center justify-between">
-                <Label className="text-sm">Allowed total loss</Label>
-                <Switch
-                  checked={form.dcaConfig.riskManagement?.allowedTotalLoss?.enabled || false}
-                  onCheckedChange={(checked) => updateDcaConfig('riskManagement', {
-                    ...form.dcaConfig.riskManagement!,
-                    allowedTotalLoss: {
-                      ...form.dcaConfig.riskManagement?.allowedTotalLoss,
-                      enabled: checked,
-                    },
-                  })}
-                />
-              </div>
-
-              {/* Max Price */}
-              <div className="flex items-center justify-between">
-                <Label className="text-sm">Max. price</Label>
-                <Switch
-                  checked={form.dcaConfig.riskManagement?.maxPrice?.enabled || false}
-                  onCheckedChange={(checked) => updateDcaConfig('riskManagement', {
-                    ...form.dcaConfig.riskManagement!,
-                    maxPrice: {
-                      ...form.dcaConfig.riskManagement?.maxPrice,
-                      enabled: checked,
-                    },
-                  })}
-                />
-              </div>
-
-              {/* Min Price */}
-              <div className="flex items-center justify-between">
-                <Label className="text-sm">Min. price</Label>
-                <Switch
-                  checked={form.dcaConfig.riskManagement?.minPrice?.enabled || false}
-                  onCheckedChange={(checked) => updateDcaConfig('riskManagement', {
-                    ...form.dcaConfig.riskManagement!,
-                    minPrice: {
-                      ...form.dcaConfig.riskManagement?.minPrice,
-                      enabled: checked,
-                    },
-                  })}
-                />
-              </div>
-
-              {/* Renewal Profit */}
-              <div className="flex items-center justify-between">
-                <Label className="text-sm">Renewal profit</Label>
-                <Switch
-                  checked={form.dcaConfig.riskManagement?.renewalProfit?.enabled || false}
-                  onCheckedChange={(checked) => updateDcaConfig('riskManagement', {
-                    ...form.dcaConfig.riskManagement!,
-                    renewalProfit: {
-                      ...form.dcaConfig.riskManagement?.renewalProfit,
-                      enabled: checked,
-                    },
-                  })}
-                />
-              </div>
-            </CollapsibleContent>
-          </Collapsible>
+          {/* Risk Management Section - Using shared component */}
+          <RiskManagementSection
+            isOpen={riskManagementOpen}
+            onOpenChange={setRiskManagementOpen}
+            dcaConfig={form.dcaConfig}
+            onConfigUpdate={updateDcaConfig}
+            totalInvestment={totalInvestment}
+            currency="USD"
+            currentPrice={currentPrice}
+          />
 
           {/* Available Balance */}
           <div className="flex items-center justify-between text-sm p-3 bg-muted/30 rounded-lg">

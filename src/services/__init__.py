@@ -1,11 +1,16 @@
 """
-Services module for trading bot admin functionality.
+Services module for trading bot functionality.
 
-Provides service interfaces and implementations for admin operations,
-following Interface Segregation Principle (ISP) and Dependency Inversion (DIP).
+Provides service interfaces and implementations for:
+- Admin operations (orders, positions, lifecycle)
+- Execution policy (profit-taking, order adjustment)
+- Reconciliation (broker/database sync)
+- Trading summaries (performance, reporting)
+
+Following Interface Segregation Principle (ISP) and Dependency Inversion (DIP).
 
 Author: Trading Bot Team
-Version: 1.0.0
+Version: 1.1.0
 """
 
 from src.services.admin_interfaces import (
@@ -37,6 +42,30 @@ from src.services.bot_service import (
     MockBotService,
 )
 
+from src.services.fill_processor import FillProcessor
+
+from src.services.execution_policy_service import (
+    ExecutionPolicyService,
+    ProfitTakingDecision,
+    OrderAdjustmentDecision,
+    create_execution_policy_service,
+)
+
+from src.services.reconciliation_service import (
+    ReconciliationService,
+    PositionReconciliationResult,
+    ReconciliationSummary,
+    create_reconciliation_service,
+)
+
+from src.services.trading_summary_service import (
+    TradingSummaryService,
+    TradingSummary,
+    PerformanceMetrics,
+    PositionSummary,
+    create_trading_summary_service,
+)
+
 __all__ = [
     # Interfaces
     "IOrderService",
@@ -51,7 +80,7 @@ __all__ = [
     "PositionDTO",
     "BotStatus",
     "BotState",
-    # Implementations
+    # Admin Service Implementations
     "BotOrderService",
     "BotPositionService",
     "BotLifecycleService",
@@ -60,4 +89,22 @@ __all__ = [
     "BotFundService",
     "BotService",
     "MockBotService",
+    # Core Services
+    "FillProcessor",
+    # Execution Policy Service
+    "ExecutionPolicyService",
+    "ProfitTakingDecision",
+    "OrderAdjustmentDecision",
+    "create_execution_policy_service",
+    # Reconciliation Service
+    "ReconciliationService",
+    "PositionReconciliationResult",
+    "ReconciliationSummary",
+    "create_reconciliation_service",
+    # Trading Summary Service
+    "TradingSummaryService",
+    "TradingSummary",
+    "PerformanceMetrics",
+    "PositionSummary",
+    "create_trading_summary_service",
 ]

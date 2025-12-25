@@ -5,7 +5,7 @@ Handles position sizing, risk limits, and trade validation.
 
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
-from src.interfaces import IRiskManager, IConfigurationManager, IPositionManager, IAccountProvider
+from src.interfaces import IRiskManager, IConfigurationManager, IPositionManager, IAccountProvider, OrderSide
 from src.exceptions import RiskManagementException
 from src.core.logging_config import get_logger
 from src.constants import RiskManagementConstants as RiskConst
@@ -96,7 +96,7 @@ class RiskManager(IRiskManager):
                 return False
             
             # Check buying power
-            if order.side == "buy" and not await self._check_buying_power(order.symbol, order.quantity, order.price):
+            if order.side == OrderSide.BUY and not await self._check_buying_power(order.symbol, order.quantity, order.price):
                 logger.warning(f"Insufficient buying power for {order.symbol}")
                 return False
             
@@ -489,7 +489,7 @@ class RiskManager(IRiskManager):
         current_quantity = existing_position.quantity if existing_position else 0
         
         # Calculate new position size
-        if order.side == "buy":
+        if order.side == OrderSide.BUY:
             new_quantity = current_quantity + order.quantity
         else:
             new_quantity = current_quantity - order.quantity

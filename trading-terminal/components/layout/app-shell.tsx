@@ -54,6 +54,7 @@ import {
   PieChart,
   Link2,
   LineChart,
+  BookOpen,
 } from 'lucide-react'
 
 interface NavItem {
@@ -91,9 +92,14 @@ const navItems: NavItem[] = [
     icon: <History className="h-5 w-5" />,
   },
   {
-    title: 'Bot Controls',
-    href: '/bot',
+    title: 'Trading Bots',
+    href: '/bots',
     icon: <Bot className="h-5 w-5" />,
+  },
+  {
+    title: 'Bot Strategies',
+    href: '/strategies',
+    icon: <BookOpen className="h-5 w-5" />,
   },
   {
     title: 'Analytics',
@@ -117,24 +123,28 @@ const navItems: NavItem[] = [
   },
 ]
 
-interface BotStatus {
-  status: 'running' | 'paused' | 'stopped' | 'error'
+/** Bot status for app shell display */
+interface BotStatusDisplay {
+  status: 'running' | 'paused' | 'stopped' | 'error' | 'created' | 'completed' | 'stopping'
   message?: string
 }
 
 interface AppShellProps {
   children: ReactNode
-  botStatus?: BotStatus
+  botStatus?: BotStatusDisplay
 }
 
 /**
  * Status Indicator Component
  */
-function StatusIndicator({ status }: { status: BotStatus['status'] }) {
+function StatusIndicator({ status }: { status: BotStatusDisplay['status'] }) {
   const statusConfig = {
+    created: { color: 'bg-muted-foreground', icon: AlertTriangle, label: 'Created' },
     running: { color: 'bg-profit', icon: CheckCircle, label: 'Running' },
     paused: { color: 'bg-warning', icon: AlertTriangle, label: 'Paused' },
+    stopping: { color: 'bg-warning', icon: AlertTriangle, label: 'Stopping' },
     stopped: { color: 'bg-muted-foreground', icon: XCircle, label: 'Stopped' },
+    completed: { color: 'bg-profit', icon: CheckCircle, label: 'Completed' },
     error: { color: 'bg-loss', icon: AlertTriangle, label: 'Error' },
   }
 
@@ -159,7 +169,7 @@ function Sidebar({
 }: {
   collapsed: boolean
   onToggle: () => void
-  botStatus: BotStatus
+  botStatus: BotStatusDisplay
 }) {
   const pathname = usePathname()
 
@@ -362,7 +372,7 @@ function Header({ sidebarCollapsed }: { sidebarCollapsed: boolean }) {
 /**
  * Mobile Navigation Component
  */
-function MobileNav({ botStatus }: { botStatus: BotStatus }) {
+function MobileNav({ botStatus }: { botStatus: BotStatusDisplay }) {
   const [isOpen, setIsOpen] = useState(false)
   const pathname = usePathname()
 

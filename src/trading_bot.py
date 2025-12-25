@@ -6,6 +6,17 @@ The TradingBotOrchestrator serves as a thin facade delegating to specialized com
 - ComponentInitializer: Handles component creation and initialization
 - ShutdownCoordinator: Manages graceful shutdown sequence
 - SignalProcessor: Routes and processes trading signals
+- ExecutionPolicyService: Profit-taking and order adjustment policy decisions
+- ReconciliationService: Broker/database state synchronization
+- TradingSummaryService: Performance reporting and summaries
+
+Key Improvements (v1.2.0):
+- Extracted policy logic to dedicated services (ExecutionPolicyService, etc.)
+- Orchestrator now focuses purely on lifecycle + wiring (composition root)
+- Policy decisions delegated to services, execution remains in orchestrator
+- Integration with TaskRegistry for proper task lifecycle management
+- All background tasks are tracked and can be properly cancelled on shutdown
+- Ordered shutdown by task category (signal handlers first, infrastructure last)
 
 This refactoring follows the Single Responsibility Principle (SRP).
 """
@@ -20,6 +31,7 @@ from contextlib import asynccontextmanager
 
 # Core imports
 from src.core import ConfigurationManager, setup_logging, get_logger
+from src.core.task_registry import get_task_registry, TaskCategory
 from src.signals import TradingViewSignalListener
 from src.trading import OrderManager
 from src.broker.subsystem import BrokerSubsystem
@@ -27,7 +39,7 @@ from src.broker.interfaces import BrokerType
 from src.strategies import DCAStrategy, TrailingManager
 from src.risk import RiskManager
 from src.position import PositionManager
-from src.database import DatabaseManager
+from src.database import CosmosDBManager
 
 # Utility imports
 from src.utils import run_blocking, BoundedFetcher
@@ -38,6 +50,20 @@ from src.interfaces import IAsyncContextManager
 from src.exceptions import TradingBotException, ConfigurationException, OrderExecutionException
 from src.trading import OrderManager, ExitPlanner, TradeService, PositionMonitor
 from src.services.fill_processor import FillProcessor
+
+# Policy services (extracted from orchestrator for SRP compliance)
+from src.services.execution_policy_service import (
+    ExecutionPolicyService,
+    create_execution_policy_service,
+)
+from src.services.reconciliation_service import (
+    ReconciliationService,
+    create_reconciliation_service,
+)
+from src.services.trading_summary_service import (
+    TradingSummaryService,
+    create_trading_summary_service,
+)
 
 # Extracted components (SRP refactoring)
 from src.bot_engine.component_initializer import ComponentInitializer, InitializedComponents
@@ -52,10 +78,25 @@ class TradingBotOrchestrator(IAsyncContextManager):
     """
     Main orchestrator class that coordinates all trading bot components.
     
-    This is a thin facade that delegates to specialized components:
+    This is a pure composition root (thin facade) that delegates to specialized components:
     - ComponentInitializer: Creates and initializes all subsystems
     - ShutdownCoordinator: Handles graceful shutdown sequence
     - SignalProcessor: Routes trading signals to handlers
+    - ExecutionPolicyService: Policy decisions for profit-taking and order management
+    - ReconciliationService: Broker/database state synchronization
+    - TradingSummaryService: Performance reporting and summaries
+    
+    Orchestrator responsibilities (ONLY lifecycle + wiring):
+    - Component initialization and dependency injection
+    - Starting/stopping background tasks
+    - Signal routing to appropriate handlers
+    - Shutdown coordination
+    
+    Policy decisions are delegated to services:
+    - Whether to execute profit-taking → ExecutionPolicyService
+    - Whether to adjust orders → ExecutionPolicyService
+    - State reconciliation → ReconciliationService
+    - Performance reporting → TradingSummaryService
     
     This design follows the Single Responsibility Principle (SRP).
     """
@@ -66,14 +107,15 @@ class TradingBotOrchestrator(IAsyncContextManager):
         
         Args:
             config_file: DEPRECATED - No longer used. Configuration is loaded from
-                        config/ directory using TOML files. Kept for backward compatibility.
+                        Azure Key Vault, Azure App Configuration, or environment
+                        variables (Azure-first strategy). Kept for backward compatibility.
         """
         if config_file is not None:
             import warnings
             warnings.warn(
                 "config_file parameter is deprecated. Configuration is now loaded from "
-                "config/ directory using TOML files. Set TRADING_BOT_ENV environment "
-                "variable to switch between 'demo' and 'live' environments.",
+                "Azure Key Vault, Azure App Configuration, or environment variables "
+                "(Azure-first strategy). See docs/AZURE_DEPLOYMENT.md for setup.",
                 DeprecationWarning,
                 stacklevel=2
             )
@@ -83,8 +125,13 @@ class TradingBotOrchestrator(IAsyncContextManager):
         self._shutdown_coordinator: ShutdownCoordinator = ShutdownCoordinator()
         self._signal_processor: Optional[SignalProcessor] = None
         
+        # Policy services (extracted for SRP compliance)
+        self._execution_policy: Optional[ExecutionPolicyService] = None
+        self._reconciliation_service: Optional[ReconciliationService] = None
+        self._summary_service: Optional[TradingSummaryService] = None
+        
         self.config: Optional[ConfigurationManager] = None
-        self.is_running = False
+        self._is_running = False  # Use private var, expose via property
         
         # Track background tasks for proper cleanup
         self.background_tasks: List[asyncio.Task] = []
@@ -99,7 +146,7 @@ class TradingBotOrchestrator(IAsyncContextManager):
         self.risk_manager: Optional[RiskManager] = None
         self.trailing_manager: Optional[TrailingManager] = None
         self.dca_strategy: Optional[DCAStrategy] = None
-        self.database: Optional[DatabaseManager] = None
+        self.database: Optional[CosmosDBManager] = None
         
         # Bounded concurrency utilities
         self._price_fetcher: Optional[BoundedFetcher] = None
@@ -121,6 +168,16 @@ class TradingBotOrchestrator(IAsyncContextManager):
     def shutdown_event(self) -> asyncio.Event:
         """Get the shutdown event from ShutdownCoordinator."""
         return self._shutdown_coordinator.shutdown_event
+    
+    @property
+    def is_running(self) -> bool:
+        """Check if the bot is currently running."""
+        return self._is_running
+    
+    @is_running.setter
+    def is_running(self, value: bool) -> None:
+        """Set the running state."""
+        self._is_running = value
     
     @property
     def processed_signals(self) -> Dict[str, TradingSignal]:
@@ -218,6 +275,26 @@ class TradingBotOrchestrator(IAsyncContextManager):
             dca_strategy=self.dca_strategy
         )
         
+        # Initialize policy services (v1.2.0 - god module refactoring)
+        # These services encapsulate policy decisions, keeping the orchestrator
+        # focused purely on lifecycle management and component wiring.
+        self._execution_policy = create_execution_policy_service(
+            config=self.config,
+            exit_planner=self._exit_planner
+        )
+        
+        self._reconciliation_service = create_reconciliation_service(
+            position_manager=self.position_manager,
+            broker_provider=self.broker_subsystem,
+            trade_service=self._trade_service
+        )
+        
+        self._summary_service = create_trading_summary_service(
+            position_manager=self.position_manager,
+            market_data=self._price_fetcher,
+            database=self.database
+        )
+        
         logger.info("All components initialized successfully")
     
     async def _validate_configuration(self) -> None:
@@ -235,6 +312,9 @@ class TradingBotOrchestrator(IAsyncContextManager):
     async def _start_components(self) -> None:
         """Start all components that need to run continuously."""
         logger.info("Starting components...")
+        
+        # Get the task registry for structured task management
+        task_registry = get_task_registry()
         
         # Get webhook configuration
         webhook_host = self.config.get_config("api.webhook.host", "0.0.0.0")
@@ -264,32 +344,49 @@ class TradingBotOrchestrator(IAsyncContextManager):
             print("   See: docs/AZURE_DEPLOYMENT.md")
             print("="*60)
         
-        # Start signal listener
-        signal_task = asyncio.create_task(self.signal_listener.start())
+        # Start signal listener (category: SIGNAL_HANDLERS - stops first on shutdown)
+        signal_task = await task_registry.create_task(
+            self.signal_listener.start(),
+            name="signal_listener",
+            category=TaskCategory.SIGNAL_HANDLERS,
+            owner=self,
+            critical=True  # Signal listener failure is critical
+        )
         self.background_tasks.append(signal_task)
         
         # Start Broker Subsystem (handles market data, TT session, etc.)
         await self.broker_subsystem.start()
         
-        # Start position monitoring via PositionMonitor service
-        position_task = asyncio.create_task(
+        # Start position monitoring via PositionMonitor service (category: MONITORING)
+        position_task = await task_registry.create_task(
             self._position_monitor.start_monitoring(
                 shutdown_event=self.shutdown_event,
                 on_profit_opportunity=self._execute_profit_taking,
                 on_fill_detected=self._handle_order_fill,
                 on_status_log=self.log_position_status,
                 check_fills_callback=self.order_manager.check_and_update_fills
-            )
+            ),
+            name="position_monitor",
+            category=TaskCategory.MONITORING,
+            owner=self
         )
         self.background_tasks.append(position_task)
         
-        # Start order monitoring
-        order_task = asyncio.create_task(self._monitor_orders())
+        # Start order monitoring (category: MONITORING)
+        order_task = await task_registry.create_task(
+            self._monitor_orders(),
+            name="order_monitor",
+            category=TaskCategory.MONITORING,
+            owner=self
+        )
         self.background_tasks.append(order_task)
         
-        # Start market data updates via PositionMonitor service
-        market_task = asyncio.create_task(
-            self._position_monitor.update_market_data(shutdown_event=self.shutdown_event)
+        # Start market data updates via PositionMonitor service (category: STREAMING)
+        market_task = await task_registry.create_task(
+            self._position_monitor.update_market_data(shutdown_event=self.shutdown_event),
+            name="market_data_updater",
+            category=TaskCategory.STREAMING,
+            owner=self
         )
         self.background_tasks.append(market_task)
         
@@ -323,7 +420,10 @@ class TradingBotOrchestrator(IAsyncContextManager):
     async def _monitor_unfilled_orders_aggressively(self) -> None:
         """
         Monitor unfilled orders and aggressively adjust prices for better fill rates.
-        Implements intelligent order management with price improvements.
+        
+        This method delegates policy decisions to ExecutionPolicyService,
+        keeping the orchestrator focused on execution flow rather than
+        policy logic (timeout thresholds, price gap rules, etc.).
         """
         try:
             # Get all open orders
@@ -334,67 +434,51 @@ class TradingBotOrchestrator(IAsyncContextManager):
             
             logger.debug(f"🔍 Monitoring {len(open_orders)} open orders for aggressive management")
             
-            # Configure aggressive timeouts
-            aggressive_timeout_minutes = self.config.get_config("trading.aggressive_order_timeout_minutes", 5)  # 5 minutes default
-            price_adjustment_percent = self.config.get_config("trading.max_price_adjustment_percent", 0.3)  # 0.3% default
-            
             for order in open_orders:
                 try:
                     # Skip market orders (they should fill immediately)
                     if order.order_type != OrderType.LIMIT:
                         continue
                     
-                    # Check order age
-                    order_age_minutes = None
-                    if order.created_at:
-                        from datetime import datetime
-                        age_delta = datetime.utcnow() - order.created_at.replace(tzinfo=None)
-                        order_age_minutes = age_delta.total_seconds() / 60.0
-                    
-                    # Skip very new orders (give them a chance to fill naturally)
-                    if order_age_minutes is None or order_age_minutes < 2:
-                        continue
-                    
                     # Get current market price for comparison
                     current_market_price = await self.broker_subsystem.market_data.get_current_price(order.symbol)
                     
-                    # Log unfilled order status
-                    logger.info(f"📋 UNFILLED ORDER: {order.symbol} {order.side.value} {order.quantity} @ ${order.price:.4f}")
-                    logger.info(f"   Age: {order_age_minutes:.1f} minutes")
-                    logger.info(f"   Current Market: ${current_market_price:.4f}")
-                    price_diff = abs(order.price - current_market_price)
-                    price_diff_percent = (price_diff / current_market_price) * 100
-                    logger.info(f"   Price Gap: ${price_diff:.4f} ({price_diff_percent:.2f}%)")
+                    # Delegate policy decision to ExecutionPolicyService
+                    decision = await self._execution_policy.evaluate_order_adjustment(
+                        order=order,
+                        current_market_price=current_market_price
+                    )
                     
-                    # Decide if aggressive action is needed
-                    should_adjust = False
-                    adjustment_reason = ""
+                    # Log order status
+                    if decision.order_age_minutes is not None:
+                        logger.info(f"📋 UNFILLED ORDER: {order.symbol} {order.side.value} {order.quantity} @ ${order.price:.4f}")
+                        logger.info(f"   Age: {decision.order_age_minutes:.1f} minutes")
+                        logger.info(f"   Current Market: ${current_market_price:.4f}")
+                        logger.info(f"   Price Gap: ${decision.price_gap:.4f} ({decision.price_gap_percent:.2f}%)")
                     
-                    if order_age_minutes >= aggressive_timeout_minutes:
-                        should_adjust = True
-                        adjustment_reason = f"timeout_{order_age_minutes:.1f}min"
-                    elif price_diff_percent > 1.0:  # If price is more than 1% away from market
-                        should_adjust = True
-                        adjustment_reason = f"price_gap_{price_diff_percent:.1f}%"
-                    
-                    if should_adjust:
-                        logger.info(f"🚀 AGGRESSIVE ORDER MANAGEMENT: {order.symbol}")
-                        logger.info(f"   Reason: {adjustment_reason}")
-                        logger.info(f"   Action: Adjusting price toward market for better fill")
-                        
-                        # Attempt aggressive price adjustment
-                        new_order_id = await self.order_manager.adjust_order_price_aggressively(
-                            order.order_id, 
-                            current_market_price, 
-                            max_adjustment_percent=price_adjustment_percent
-                        )
-                        
-                        if new_order_id:
-                            logger.info(f"✅ Order aggressively adjusted: {order.order_id} → {new_order_id}")
+                    # Act on the policy decision
+                    if not decision.should_adjust:
+                        if decision.skip_reason:
+                            logger.debug(f"Order {order.order_id}: {decision.skip_reason}")
                         else:
-                            logger.debug(f"No adjustment needed/possible for order {order.order_id}")
+                            logger.debug(f"Order {order.order_id} within normal parameters, monitoring...")
+                        continue
+                    
+                    logger.info(f"🚀 AGGRESSIVE ORDER MANAGEMENT: {order.symbol}")
+                    logger.info(f"   Reason: {decision.adjustment_reason}")
+                    logger.info(f"   Action: Adjusting price toward market for better fill")
+                    
+                    # Execute the adjustment using the order manager
+                    new_order_id = await self.order_manager.adjust_order_price_aggressively(
+                        order.order_id, 
+                        current_market_price, 
+                        max_adjustment_percent=decision.max_adjustment_percent
+                    )
+                    
+                    if new_order_id:
+                        logger.info(f"✅ Order aggressively adjusted: {order.order_id} → {new_order_id}")
                     else:
-                        logger.debug(f"Order {order.order_id} within normal parameters, monitoring...")
+                        logger.debug(f"No adjustment needed/possible for order {order.order_id}")
                         
                 except Exception as order_error:
                     logger.error(f"❌ Error monitoring order {order.order_id}: {order_error}")
@@ -404,74 +488,64 @@ class TradingBotOrchestrator(IAsyncContextManager):
             logger.error(f"❌ Error in aggressive order monitoring: {str(e)}")
     
     async def _execute_profit_taking(self, position: Position, current_price: float) -> None:
-        """Execute profit taking for a position."""
+        """
+        Execute profit taking for a position.
+        
+        This method delegates policy decisions to ExecutionPolicyService and
+        reconciliation to ReconciliationService, keeping the orchestrator focused
+        on execution flow rather than policy logic.
+        
+        Args:
+            position: The position to potentially exit.
+            current_price: Current market price for the symbol.
+        """
         try:
             logger.info(f"💰 POSITION EXIT: {position.symbol}")
             logger.info(f"   Position: {position.quantity:.2f} @ ${position.avg_price:.2f}")
             logger.info(f"   Current Price: ${current_price:.2f}")
             
-            # Calculate profit percentage
-            if position.quantity > 0:  # Long position
-                profit_pct = (current_price - position.avg_price) / position.avg_price * 100
-            else:  # Short position
-                profit_pct = (position.avg_price - current_price) / position.avg_price * 100
-            
-            logger.info(f"   Profit: {profit_pct:.2f}%")
-            
-            # Determine if this is profit-taking or stop-loss
-            is_profit = profit_pct >= 0  # Include breakeven as profit-taking
-            action_type = "PROFIT TAKING" if is_profit else "STOP LOSS"
-            
-            logger.info(f"🎯 {action_type} TRIGGERED: {position.symbol}")
-            
-            # Verify actual position with broker before proceeding
-            actual_position_qty = await self.broker_subsystem.primary_account_provider.get_actual_position(position.symbol)
-            if actual_position_qty is None:
-                logger.error(f"❌ Could not verify actual position for {position.symbol}, skipping profit taking")
-                return
-            
-            # Handle position already closed externally
-            if actual_position_qty == 0:
-                await self._handle_externally_closed_position(position)
-                return
-            
-            # Check if database and broker positions match direction (sign)
-            if not self._validate_position_direction(position, actual_position_qty):
-                return
-            
-            logger.info(f"✅ Position verified - DB: {position.quantity}, Broker: {actual_position_qty}")
-            
-            # Get pending orders and calculate available quantity
+            # Get pending orders for policy evaluation
             open_orders = await self.order_manager.get_open_orders()
-            pending_qty = self._calculate_pending_quantity(position, open_orders)
             
-            # Validate exit quantity using ExitPlanner
-            available_qty, is_valid = self._exit_planner.validate_exit_quantity(
-                requested_qty=abs(position.quantity),
-                position_qty=position.quantity,
-                pending_qty=pending_qty
+            # Verify position with broker via reconciliation service
+            verification = await self._reconciliation_service.verify_position_with_broker(
+                position=position,
+                broker_provider=self.broker_subsystem.primary_account_provider
             )
             
-            if not is_valid or available_qty <= 0:
-                logger.warning(f"⚠️  NO AVAILABLE QUANTITY: {position.symbol} - pending orders cover position")
+            if not verification.is_valid:
+                if verification.broker_quantity == 0:
+                    # Position closed externally - delegate to reconciliation
+                    await self._handle_externally_closed_position(position)
+                else:
+                    logger.error(f"❌ Position verification failed: {verification.error_message}")
                 return
             
-            # Final safety check: don't exit more than we actually own in broker
-            max_available = abs(actual_position_qty)
-            if available_qty > max_available:
-                logger.warning(f"⚠️ QUANTITY ADJUSTMENT: Reducing from {available_qty} to {max_available}")
-                available_qty = max_available
+            # Delegate policy decision to ExecutionPolicyService
+            decision = await self._execution_policy.evaluate_profit_taking(
+                position=position,
+                current_price=current_price,
+                broker_provider=self.broker_subsystem.primary_account_provider,
+                open_orders=open_orders
+            )
             
-            if available_qty <= 0:
-                logger.warning(f"⚠️ NO QUANTITY TO CLOSE: {position.symbol}")
+            # Act on the policy decision
+            if not decision.should_execute:
+                logger.info(f"⚠️ Profit taking skipped: {decision.skip_reason}")
                 return
             
-            # Use ExitPlanner to build exit order
+            # Log profit/loss determination from policy
+            action_type = "PROFIT TAKING" if decision.is_profit else "STOP LOSS"
+            logger.info(f"   Profit: {decision.profit_percentage:.2f}%")
+            logger.info(f"🎯 {action_type} TRIGGERED: {position.symbol}")
+            logger.info(f"✅ Position verified - DB: {position.quantity}, Broker: {decision.broker_quantity}")
+            
+            # Use ExitPlanner to build exit order (planning, not policy)
             exit_plan = await self._exit_planner.plan_exit(
                 position,
                 reason=action_type.lower().replace(" ", "_"),
-                quantity_override=available_qty,
-                current_price=current_price  # Reuse fetched price
+                quantity_override=decision.exit_quantity,
+                current_price=current_price
             )
             
             # Submit the exit order
@@ -479,9 +553,9 @@ class TradingBotOrchestrator(IAsyncContextManager):
             order_id = await self.order_manager.place_order(order)
             
             # Log with appropriate action type
-            action_emoji = "💰" if is_profit else "🛑"
-            action_name = "PROFIT ORDER" if is_profit else "STOP LOSS ORDER"
-            logger.info(f"{action_emoji} {action_name}: {position.symbol} {order.side.value} {available_qty} shares (Order ID: {order_id})")
+            action_emoji = "💰" if decision.is_profit else "🛑"
+            action_name = "PROFIT ORDER" if decision.is_profit else "STOP LOSS ORDER"
+            logger.info(f"{action_emoji} {action_name}: {position.symbol} {order.side.value} {decision.exit_quantity} shares (Order ID: {order_id})")
             
             # Reset trailing state
             self.trailing_manager.reset_trailing_state(position.symbol)
@@ -491,28 +565,34 @@ class TradingBotOrchestrator(IAsyncContextManager):
             if "insufficient qty available" in error_msg.lower():
                 logger.error(f"❌ INSUFFICIENT QUANTITY: {position.symbol} - Cannot place order due to pending orders or insufficient shares")
                 logger.error(f"   Suggestion: Check for pending orders and cancel if necessary")
-                # Don't retry immediately - let the monitoring cycle handle it
             else:
                 logger.error(f"❌ Error executing profit taking: {error_msg}")
     
     async def _handle_externally_closed_position(self, position: Position) -> None:
-        """Handle position that was closed externally (outside the bot)."""
+        """
+        Handle position that was closed externally (outside the bot).
+        
+        Delegates to ReconciliationService for consistent handling of
+        external position changes across the system.
+        
+        Args:
+            position: The position that was detected as closed externally.
+        """
         logger.info(f"📋 POSITION ALREADY CLOSED: {position.symbol}")
         logger.info(f"   Database shows: {position.quantity} @ ${position.avg_price:.2f}")
         logger.info(f"   Broker shows: 0 (position was closed externally)")
         
-        # Use TradeService to handle trade completion
-        await self._trade_service.handle_externally_closed_position(
-            symbol=position.symbol,
-            position_quantity=position.quantity
+        # Delegate to reconciliation service for consistent handling
+        result = await self._reconciliation_service.reconcile_position(
+            position=position,
+            broker_provider=self.broker_subsystem.primary_account_provider,
+            broker_quantity=0  # Already verified as zero
         )
         
-        # Close the position in our database
-        try:
-            await self.position_manager.close_position(position.symbol)
-            logger.info(f"✅ POSITION CLOSED IN DATABASE: {position.symbol}")
-        except Exception as close_error:
-            logger.error(f"❌ Failed to close position in database: {close_error}")
+        if result.action_taken:
+            logger.info(f"✅ Reconciliation completed: {result.action_taken}")
+        if result.error_message:
+            logger.error(f"❌ Reconciliation error: {result.error_message}")
     
     def _validate_position_direction(self, position: Position, actual_position_qty: float) -> bool:
         """Validate that database and broker position directions match."""
@@ -644,95 +724,30 @@ class TradingBotOrchestrator(IAsyncContextManager):
         """
         Get comprehensive trading summary with accurate P&L tracking.
         
+        Delegates to TradingSummaryService for summary generation, keeping
+        the orchestrator focused on lifecycle management.
+        
         Returns:
-            Dictionary with current positions, open trades, recent trades, and performance
+            Dictionary with current positions, open trades, recent trades, and performance.
         """
         try:
-            # Get current positions
-            positions = await self.position_manager.get_all_positions()
-            
-            # Get open trades
-            open_trades = await self.database.get_open_trades()
-            
-            # Get recent completed trades
-            completed_trades = await self.database.get_completed_trades(limit=20)
-            
-            # Calculate performance metrics
-            total_realized_pnl = sum(trade['realized_pnl'] for trade in completed_trades if trade['realized_pnl'])
-            winning_trades = [t for t in completed_trades if t['realized_pnl'] and t['realized_pnl'] > 0]
-            losing_trades = [t for t in completed_trades if t['realized_pnl'] and t['realized_pnl'] < 0]
-            
-            win_rate = (len(winning_trades) / len(completed_trades) * 100) if completed_trades else 0
-            avg_win = sum(t['realized_pnl'] for t in winning_trades) / len(winning_trades) if winning_trades else 0
-            avg_loss = sum(t['realized_pnl'] for t in losing_trades) / len(losing_trades) if losing_trades else 0
-            
-            summary = {
-                'timestamp': datetime.utcnow().isoformat(),
-                'current_positions': [],
-                'open_trades': open_trades,
-                'recent_trades': completed_trades,
-                'performance': {
-                    'total_realized_pnl': total_realized_pnl,
-                    'total_trades': len(completed_trades),
-                    'winning_trades': len(winning_trades),
-                    'losing_trades': len(losing_trades),
-                    'win_rate_percent': win_rate,
-                    'average_win': avg_win,
-                    'average_loss': avg_loss,
-                    'profit_factor': abs(avg_win / avg_loss) if avg_loss != 0 else 0
-                }
-            }
-            
-            # Add current position details
-            for position in positions:
-                if position.quantity != 0:
-                    current_price = await self.broker_subsystem.market_data.get_current_price(position.symbol)
-                    unrealized_pnl = (current_price - position.avg_price) * position.quantity
-                    unrealized_pct = ((current_price - position.avg_price) / position.avg_price) * 100
-                    
-                    # Get position tracking info
-                    tracking = await self.database.get_position_tracking(position.symbol)
-                    
-                    position_info = {
-                        'symbol': position.symbol,
-                        'quantity': position.quantity,
-                        'avg_price': position.avg_price,
-                        'current_price': current_price,
-                        'unrealized_pnl': unrealized_pnl,
-                        'unrealized_percent': unrealized_pct,
-                        'is_trailing': tracking['is_trailing'] if tracking else False,
-                        'trailing_activation_price': tracking['trailing_activation_price'] if tracking else None,
-                        'trailing_stop_price': tracking['trailing_stop_price'] if tracking else None
-                    }
-                    
-                    summary['current_positions'].append(position_info)
-            
-            return summary
+            # Delegate to TradingSummaryService for summary generation
+            summary = await self._summary_service.get_trading_summary()
+            return summary.to_dict()
             
         except Exception as e:
             logger.error(f"Error generating trading summary: {str(e)}")
             return {'error': str(e)}
     
     async def log_position_status(self) -> None:
-        """Log detailed position status for debugging and monitoring."""
+        """
+        Log detailed position status for debugging and monitoring.
+        
+        Delegates to TradingSummaryService for consistent formatting
+        and reporting across the system.
+        """
         try:
-            summary = await self.get_trading_summary()
-            
-            logger.info("📊 TRADING SUMMARY:")
-            logger.info(f"   Total P&L: ${summary['performance']['total_realized_pnl']:.2f}")
-            logger.info(f"   Win Rate: {summary['performance']['win_rate_percent']:.1f}%")
-            logger.info(f"   Open Positions: {len(summary['current_positions'])}")
-            logger.info(f"   Open Trades: {len(summary['open_trades'])}")
-            
-            for pos in summary['current_positions']:
-                trailing_info = ""
-                if pos['is_trailing']:
-                    trailing_info = f" [TRAILING from ${pos['trailing_activation_price']:.2f}, stop @ ${pos['trailing_stop_price']:.2f}]"
-                
-                logger.info(f"   • {pos['symbol']}: {pos['quantity']} @ ${pos['avg_price']:.2f} "
-                           f"(Current: ${pos['current_price']:.2f}, "
-                           f"P&L: ${pos['unrealized_pnl']:.2f} / {pos['unrealized_percent']:.2f}%){trailing_info}")
-            
+            await self._summary_service.log_position_status()
         except Exception as e:
             logger.error(f"Error logging position status: {str(e)}")
     
@@ -874,16 +889,17 @@ if __name__ == "__main__":
     if args.validate:
         # Validate configuration using ConfigurationManager
         from src.core import ConfigurationManager
+        import os
         config = ConfigurationManager()
         # Basic validation: check if essential configs are available
-        db_config = config.get_database_config()
-        if db_config.url:
+        cosmos_endpoint = os.environ.get("COSMOS_ENDPOINT", "")
+        if cosmos_endpoint or config.get_alpaca_config().is_configured:
             print(f"✅ Configuration for '{args.env}' environment is valid!")
-            print(f"  - Database URL configured: {'Yes' if db_config.url else 'No'}")
+            print(f"  - Cosmos DB configured: {'Yes' if cosmos_endpoint else 'No'}")
             print(f"  - Alpaca configured: {'Yes' if config.get_alpaca_config().is_configured else 'No'}")
             print(f"  - Azure deployment: {'Yes' if config.is_azure_deployment() else 'No'}")
         else:
-            print(f"❌ Configuration validation failed - DATABASE_URL not set")
+            print(f"❌ Configuration validation failed - COSMOS_ENDPOINT and broker not configured")
             sys.exit(1)
     else:
         # Run the bot

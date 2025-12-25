@@ -20,6 +20,7 @@ from src.interfaces import IMarketDataProvider, IConfigurationManager, IAsyncCon
 from src.exceptions import MarketDataException
 from src.core.logging_config import get_logger
 from src.utils import run_blocking
+from src.data.market_session_provider import MarketSessionProvider
 import time
 
 logger = get_logger(__name__)
@@ -40,14 +41,16 @@ class AlpacaMarketDataProvider(IMarketDataProvider, IAsyncContextManager):
         """
         self._config = config
         
-        # Initialize Alpaca data client
-        api_key = config.get_config("api.alpaca.api_key")
-        secret_key = config.get_config("api.alpaca.secret_key")
+        # Initialize Alpaca data client using typed config method
+        alpaca_config = config.get_alpaca_config()
         
-        if not api_key or not secret_key:
+        if not alpaca_config.is_configured:
             raise MarketDataException("Alpaca API credentials not configured")
         
-        self._client = StockHistoricalDataClient(api_key, secret_key)
+        self._client = StockHistoricalDataClient(
+            alpaca_config.api_key, 
+            alpaca_config.secret_key
+        )
         self._price_cache: Dict[str, Dict] = {}
         
         # Enhanced Alpaca configuration with data plan awareness
@@ -66,6 +69,9 @@ class AlpacaMarketDataProvider(IMarketDataProvider, IAsyncContextManager):
         # Market session configuration
         self._market_tz = pytz.timezone('America/New_York')
         
+        # Initialize market session provider for calendar-aware hours
+        self._session_provider: Optional[MarketSessionProvider] = None
+        
         logger.info(f"Enhanced AlpacaMarketDataProvider initialized - Snapshot: {self._use_snapshot}, Extended Hours: {self._extended_hours}")
         
         # Warn about extended hours limitations on free tier
@@ -75,6 +81,15 @@ class AlpacaMarketDataProvider(IMarketDataProvider, IAsyncContextManager):
 
     async def start(self) -> None:
         """Start the market data provider (IAsyncContextManager implementation)."""
+        # Initialize market session provider with calendar awareness
+        try:
+            self._session_provider = MarketSessionProvider(self._config)
+            await self._session_provider.initialize()
+            logger.info("MarketSessionProvider initialized with calendar awareness")
+        except Exception as e:
+            logger.warning(f"Failed to initialize MarketSessionProvider, using fallback: {e}")
+            self._session_provider = None
+        
         logger.info("AlpacaMarketDataProvider started")
 
     async def stop(self) -> None:
@@ -685,7 +700,32 @@ class AlpacaMarketDataProvider(IMarketDataProvider, IAsyncContextManager):
             logger.info(f"✅ {symbol}: Fresh extended hours {data_type} available ({age_seconds:.0f}s old)")
 
     def _get_market_status(self) -> Dict[str, Any]:
-        """Get current market status for intelligent data handling."""
+        """
+        Get current market status for intelligent data handling.
+        
+        Uses MarketSessionProvider for calendar-aware detection when available,
+        falls back to hardcoded hours otherwise.
+        """
+        # Try to use session provider (calendar-aware) if available
+        if self._session_provider:
+            try:
+                # Use sync wrapper since this method is called synchronously
+                import asyncio
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Already in async context, create task
+                    return self._get_market_status_fallback()
+                else:
+                    return loop.run_until_complete(
+                        self._session_provider.get_market_status_dict()
+                    )
+            except Exception as e:
+                logger.debug(f"Session provider error, using fallback: {e}")
+        
+        return self._get_market_status_fallback()
+    
+    def _get_market_status_fallback(self) -> Dict[str, Any]:
+        """Fallback market status using hardcoded hours."""
         ny_tz = pytz.timezone('America/New_York')
         now_ny = datetime.now(ny_tz)
         

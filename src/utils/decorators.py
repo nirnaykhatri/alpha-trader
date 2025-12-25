@@ -5,7 +5,9 @@ This module provides common decorators to reduce code duplication and
 improve consistency across the application.
 """
 
+import asyncio
 import functools
+import random
 import time
 from typing import Callable, Any, Optional
 from fastapi import Request, HTTPException
@@ -94,8 +96,6 @@ def handle_api_errors(
         async def fetch_with_classification(symbol: str):
             return await api_client.get_data(symbol)
     """
-    import random
-    
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         async def wrapper(*args, **kwargs) -> Any:
@@ -349,7 +349,3 @@ def endpoint_policy(
         return wrapped
     
     return decorator
-
-
-# Import asyncio at the end to avoid circular imports
-import asyncio

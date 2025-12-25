@@ -22,7 +22,14 @@ logger = get_logger(__name__)
 class MonitoringRouter:
     """
     Provides monitoring and analytics endpoints for the trading bot.
-    All endpoints are localhost-only for security.
+    
+    Access Control Model:
+        - Public endpoints (no auth): /health, /ready, / (root)
+          These are required for Azure Container Apps health probes.
+        - Protected endpoints (@localhost_only): /status, /positions, /orders, etc.
+          Admin/analytics endpoints are restricted to localhost for security.
+          If remote dashboard access is needed, implement proper authentication
+          and remove localhost-only restriction for authenticated requests.
     
     Container Apps Health Probes:
         - /health: Liveness probe - returns 200 if app is running
@@ -195,35 +202,7 @@ class MonitoringRouter:
                         "data": {"positions": []}
                     })
                 
-                # Try enhanced DCA positions if available
-                if hasattr(self._bot_instance, 'enhanced_db') and hasattr(self._bot_instance, 'dca_metadata_manager'):
-                    try:
-                        from ..database.view_manager import PositionSummaryView
-                        
-                        session = self._bot_instance.enhanced_db.db._session_factory()
-                        try:
-                            positions_data = PositionSummaryView.get_position_summary(session)
-                            
-                            return JSONResponse(content={
-                                "status": "success",
-                                "timestamp": datetime.utcnow().isoformat(),
-                                "data": {
-                                    "positions": positions_data,
-                                    "summary": {
-                                        "total_positions": len(positions_data),
-                                        "total_symbols": len(set(p['symbol'] for p in positions_data)),
-                                        "positions_with_dca": len([p for p in positions_data if p['dca_details']['total_attempts'] > 0]),
-                                        "total_unrealized_pnl": sum(p['pnl']['unrealized'] for p in positions_data),
-                                        "progressive_dca_compliance": sum(1 for p in positions_data if p['dca_details']['progressive_rate'] == 100.0) / len(positions_data) * 100 if positions_data else 0
-                                    }
-                                }
-                            })
-                        finally:
-                            session.close()
-                    except Exception as enhanced_error:
-                        logger.warning(f"Enhanced DCA tracking not available: {enhanced_error}, falling back")
-                
-                # Fallback to basic positions
+                # Get positions from bot instance
                 positions = await self._bot_instance.get_positions()
                 positions_data = [
                     {
@@ -267,43 +246,8 @@ class MonitoringRouter:
                         status_code=500
                     )
                 
-                # Try enhanced tracking first
-                if hasattr(self._bot_instance, 'enhanced_db'):
-                    try:
-                        from ..database.enhanced_schema import EnhancedPositionRecord
-                        
-                        session = self._bot_instance.enhanced_db.db._session_factory()
-                        try:
-                            position = session.query(EnhancedPositionRecord).filter_by(
-                                symbol=symbol.upper(),
-                                status='active'
-                            ).first()
-                            
-                            if not position:
-                                return JSONResponse(
-                                    content={
-                                        "status": "not_found",
-                                        "message": f"No active position found for {symbol}"
-                                    },
-                                    status_code=404
-                                )
-                            
-                            # Build detailed response (simplified for now)
-                            return JSONResponse(content={
-                                "status": "success",
-                                "data": {
-                                    "symbol": position.symbol,
-                                    "direction": position.direction,
-                                    "quantity": float(position.quantity),
-                                    "avg_price": float(position.avg_entry_price)
-                                }
-                            })
-                        finally:
-                            session.close()
-                    except Exception as e:
-                        logger.warning(f"Enhanced position detail not available: {e}")
-                
-                # Fallback: simple not found
+                # Get position detail from bot instance (Cosmos DB)
+                # TODO: Implement Cosmos-based position detail lookup
                 return JSONResponse(
                     content={
                         "status": "not_found",
@@ -379,48 +323,13 @@ class MonitoringRouter:
                         "data": {"dca_orders": []}
                     })
                 
-                # Try enhanced DCA tracking
-                if hasattr(self._bot_instance, 'enhanced_db'):
-                    try:
-                        from ..database.enhanced_schema import DCAOrderRecord
-                        
-                        session = self._bot_instance.enhanced_db.db._session_factory()
-                        try:
-                            query = session.query(DCAOrderRecord)
-                            if symbol:
-                                query = query.filter_by(symbol=symbol.upper())
-                            if status:
-                                query = query.filter_by(status=status)
-                            
-                            dca_orders = query.limit(limit).all()
-                            dca_orders_data = [
-                                {
-                                    "symbol": order.symbol,
-                                    "status": order.status,
-                                    "quantity": float(order.quantity),
-                                    "target_price": float(order.target_price) if order.target_price else None
-                                }
-                                for order in dca_orders
-                            ]
-                            
-                            return JSONResponse(content={
-                                "status": "success",
-                                "data": {
-                                    "dca_orders": dca_orders_data,
-                                    "count": len(dca_orders_data)
-                                }
-                            })
-                        finally:
-                            session.close()
-                    except Exception as e:
-                        logger.warning(f"Enhanced DCA orders not available: {e}")
-                
-                # Fallback
+                # DCA orders from Cosmos DB
+                # TODO: Implement Cosmos-based DCA order retrieval
                 return JSONResponse(content={
                     "status": "success",
                     "data": {
                         "dca_orders": [],
-                        "note": "Enhanced DCA tracking not available"
+                        "note": "DCA order tracking via Cosmos DB - implementation pending"
                     }
                 })
             except Exception as e:
@@ -435,26 +344,7 @@ class MonitoringRouter:
                 if not self._bot_instance:
                     return JSONResponse(content={"status": "error"}, status_code=500)
                 
-                # Try enhanced portfolio metrics
-                if hasattr(self._bot_instance, 'enhanced_db'):
-                    try:
-                        from ..database.view_manager import PositionSummaryView
-                        
-                        session = self._bot_instance.enhanced_db.db._session_factory()
-                        try:
-                            portfolio_metrics = PositionSummaryView.get_portfolio_metrics(session)
-                            
-                            return JSONResponse(content={
-                                "status": "success",
-                                "timestamp": datetime.utcnow().isoformat(),
-                                "data": portfolio_metrics
-                            })
-                        finally:
-                            session.close()
-                    except Exception as e:
-                        logger.warning(f"Enhanced portfolio not available: {e}")
-                
-                # Fallback to basic
+                # Get portfolio summary from bot positions
                 positions = await self._bot_instance.get_positions()
                 total_unrealized = sum(pos.unrealized_pnl for pos in positions)
                 

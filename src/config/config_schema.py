@@ -188,11 +188,17 @@ class LoggingConfig(BaseModel):
 
 # Database Configuration
 class DatabaseConfig(BaseModel):
-    """Database configuration."""
-    url: str = Field(default="sqlite:///trading_bot.db")
-    echo: bool = False
-    pool_size: int = Field(default=5, ge=1)
-    max_overflow: int = Field(default=10, ge=0)
+    """
+    Database configuration for Azure Cosmos DB.
+    
+    Cosmos DB configuration is primarily managed via environment variables:
+    - COSMOS_ENDPOINT: Cosmos DB account endpoint
+    - COSMOS_KEY: Cosmos DB account key (or use Managed Identity)
+    - COSMOS_DATABASE: Database name
+    """
+    # Cosmos DB settings
+    throughput_ru: int = Field(default=400, ge=400, description="Cosmos DB throughput in RU/s")
+    consistency_level: str = Field(default="Session", description="Cosmos DB consistency level")
     
     class Config:
         extra = 'allow'
@@ -257,7 +263,8 @@ class ConfigValidator:
         
         Args:
             config_path: DEPRECATED - No longer used. Configuration is loaded
-                        from config/ directory using TOML files via ConfigurationManager.
+                        from Azure Key Vault, Azure App Configuration, or environment
+                        variables via ConfigurationManager (Azure-first strategy).
             
         Returns:
             Validated BotConfig instance
@@ -269,19 +276,19 @@ class ConfigValidator:
             import warnings
             warnings.warn(
                 "config_path parameter is deprecated. Configuration is loaded from "
-                "config/ directory using TOML files.",
+                "Azure Key Vault, Azure App Configuration, or environment variables.",
                 DeprecationWarning,
                 stacklevel=2
             )
         
-        # Load configuration from new TOML-based system
+        # Load configuration from Azure-first configuration system
         from src.core import ConfigurationManager
         config_mgr = ConfigurationManager()
         
         # Get all config as a dict for Pydantic validation
         self.config_dict = self._build_config_dict(config_mgr)
         
-        logger.info("Loaded configuration from config/ TOML files")
+        logger.info("Loaded configuration from Azure/environment variables")
         
         # Validate with Pydantic
         try:

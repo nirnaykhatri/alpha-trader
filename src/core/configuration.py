@@ -1,14 +1,30 @@
 """
-Configuration Management - Sync Wrapper for Azure-Native Configuration.
+Configuration Management - Unified Configuration Access (Azure-First).
 
-This module provides backward-compatible synchronous access to configuration
-by wrapping the AzureConfigProvider with cached values.
+This module provides the centralized configuration manager that:
+1. Implements the canonical configuration contract (single source of truth)
+2. Validates configuration at startup (fail-fast)
+3. Supports multiple sources with clear precedence (Key Vault > App Config > Env > Default)
+4. Enables runtime configuration updates WITHOUT redeployment via Azure services
 
-For new code, use the async AzureConfigProvider directly:
+CONFIGURATION STRATEGY:
+All configuration should be managed via Azure for production deployments:
+- Secrets → Azure Key Vault (API keys, passwords, connection strings)
+- Runtime config → Azure App Configuration (feature flags, settings)
+- Local dev → Environment variables (overrides)
+
+CONFIGURATION PRECEDENCE (highest to lowest):
+    1. Azure Key Vault (secrets only)
+    2. Azure App Configuration (runtime config)
+    3. Environment variables
+    4. Default values from ConfigContract
+
+NOTE: Local TOML files are NOT supported. This ensures configuration can be
+updated in production without requiring redeployment.
+
+For new async code, use the async AzureConfigProvider directly:
     from src.config.azure_config_provider import config_provider
     value = await config_provider.get_config("key")
-
-This legacy wrapper is maintained for backward compatibility with existing code.
 
 Dependency Injection Pattern:
     For testable code, use create_configuration_manager() factory:
@@ -25,6 +41,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from src.interfaces import IConfigurationManager
+from src.config.config_contract import ConfigContract, ConfigField, ConfigSource
 
 
 logger = logging.getLogger(__name__)
@@ -80,10 +97,20 @@ def create_configuration_manager(
 
 class ConfigurationManager(IConfigurationManager):
     """
-    Synchronous configuration manager for backward compatibility.
+    Unified configuration manager with contract-based validation (Azure-First).
     
-    Wraps AzureConfigProvider to provide sync access via cached values.
-    For new code, use AzureConfigProvider directly for async operations.
+    Provides sync access to configuration via cached values, with values
+    resolved according to the canonical ConfigContract precedence rules.
+    
+    CONFIGURATION CONTRACT:
+        All configuration fields are defined in src/config/config_contract.py
+        which serves as the single source of truth for field names, types,
+        required status, and validation rules.
+    
+    AZURE-FIRST STRATEGY:
+        Production deployments use Azure Key Vault (secrets) and Azure App
+        Configuration (runtime settings), enabling configuration updates
+        WITHOUT redeployment.
     
     DEPENDENCY INJECTION:
         For testable code, use the create_configuration_manager() factory
@@ -99,12 +126,11 @@ class ConfigurationManager(IConfigurationManager):
             use_singleton=False
         )
     
-    Environment Variables:
-        AZURE_KEYVAULT_URL: Key Vault URL for secrets
-        AZURE_APP_CONFIGURATION_ENDPOINT: App Config URL for runtime settings
-        
-        Fallback environment variables (for local development):
-        DATABASE_URL, LOG_LEVEL, ALPACA_API_KEY, etc.
+    Configuration Sources (by precedence):
+        1. Azure Key Vault (secrets via AZURE_KEYVAULT_URL)
+        2. Azure App Configuration (via AZURE_APP_CONFIGURATION_ENDPOINT)
+        3. Environment variables (using canonical env var names)
+        4. Default values from ConfigContract
     """
     
     _instance: Optional["ConfigurationManager"] = None
@@ -146,52 +172,137 @@ class ConfigurationManager(IConfigurationManager):
         self._azure_provider = None
         self._azure_initialized = False
         
+        # Contract reference for validation
+        self._contract = ConfigContract
+        
         ConfigurationManager._initialized = True
         
-        # Load environment variables into cache for immediate sync access
+        # Load from all available sources
         self._load_from_environment()
+        self._load_from_contract_defaults()
         
-        logger.info("ConfigurationManager initialized (sync wrapper)")
+        logger.info("ConfigurationManager initialized with contract-based configuration")
     
     def _load_from_environment(self) -> None:
-        """Load configuration from environment variables."""
-        # Database
-        if db_url := os.environ.get("DATABASE_URL"):
-            self._cache["database.url"] = db_url
-        if db_echo := os.environ.get("DATABASE_ECHO"):
-            self._cache["database.echo"] = db_echo.lower() in ("true", "1", "yes")
+        """
+        Load configuration from environment variables using canonical names from contract.
         
-        # Logging
-        if log_level := os.environ.get("LOG_LEVEL"):
-            self._cache["logging.level"] = log_level
-        if log_format := os.environ.get("LOG_FORMAT"):
-            self._cache["logging.format"] = log_format
+        This method reads environment variables using the standardized names
+        defined in ConfigContract, ensuring consistency across all config sources.
+        """
+        # Load all contract-defined fields from environment
+        for field_name, field_def in self._contract.get_all_fields().items():
+            env_var = field_def.get_env_var()
+            env_value = os.environ.get(env_var)
+            
+            if env_value is not None:
+                # Parse and cache the value
+                parsed_value = self._parse_value(env_value)
+                
+                # Store in appropriate cache
+                if field_def.secret:
+                    # Also store with Key Vault name for backward compatibility
+                    if field_def.key_vault_name:
+                        self._secrets_cache[field_def.key_vault_name] = str(parsed_value)
+                    self._secrets_cache[field_name] = str(parsed_value)
+                else:
+                    # Store with both canonical name and legacy paths for compatibility
+                    self._cache[field_name] = parsed_value
+                    if field_def.app_config_key:
+                        self._cache[field_def.app_config_key] = parsed_value
         
-        # Trading
-        if order_type := os.environ.get("TRADING_ORDER_TYPE"):
-            self._cache["trading.order_type"] = order_type
-        if paper_mode := os.environ.get("TRADING_PAPER_MODE"):
-            self._cache["trading.paper_mode"] = paper_mode.lower() in ("true", "1", "yes")
+        # Legacy mappings for backward compatibility
+        # These ensure old code using dot-notation keys still works
+        legacy_mappings = {
+            "azure.cosmos.endpoint": "cosmos_endpoint",
+            "azure.cosmos.database_name": "cosmos_database",
+            "logging.level": "log_level",
+            "logging.format": "log_format",
+            "trading.order_type": "trading_order_type",
+            "trading.paper_mode": "trading_paper_mode",
+            "api.webhook.port": "webhook_port",
+            "api.webhook.host": "webhook_host",
+            "broker.alpaca.base_url": "alpaca_base_url",
+        }
         
-        # Webhook
-        if webhook_port := os.environ.get("WEBHOOK_PORT"):
-            self._cache["api.webhook.port"] = int(webhook_port)
-        if webhook_host := os.environ.get("WEBHOOK_HOST"):
-            self._cache["api.webhook.host"] = webhook_host
+        for legacy_key, canonical_name in legacy_mappings.items():
+            if canonical_name in self._cache and legacy_key not in self._cache:
+                self._cache[legacy_key] = self._cache[canonical_name]
+    
+    def _load_from_contract_defaults(self) -> None:
+        """Load default values from contract for fields not already set."""
+        for field_name, field_def in self._contract.get_all_fields().items():
+            if field_def.default is not None:
+                # Only set if not already in cache
+                if field_name not in self._cache and not field_def.secret:
+                    self._cache[field_name] = field_def.default
+                    # Also set legacy paths
+                    if field_def.app_config_key and field_def.app_config_key not in self._cache:
+                        self._cache[field_def.app_config_key] = field_def.default
+    
+    def validate_required_config(self) -> None:
+        """
+        Validate that all required configuration is present.
         
-        # Broker URLs
-        if alpaca_url := os.environ.get("ALPACA_BASE_URL"):
-            self._cache["broker.alpaca.base_url"] = alpaca_url
+        This method checks the current configuration against the canonical
+        contract and raises ConfigurationException if required fields are missing.
         
-        # Secrets from environment (for local development)
-        if api_key := os.environ.get("ALPACA_API_KEY"):
-            self._secrets_cache["alpaca-api-key"] = api_key
-        if secret_key := os.environ.get("ALPACA_SECRET_KEY"):
-            self._secrets_cache["alpaca-secret-key"] = secret_key
-        if webhook_secret := os.environ.get("WEBHOOK_SECRET"):
-            self._secrets_cache["webhook-secret"] = webhook_secret
-        if ngrok_token := os.environ.get("NGROK_AUTH_TOKEN"):
-            self._secrets_cache["ngrok-auth-token"] = ngrok_token
+        Raises:
+            ConfigurationException: If required configuration is missing or invalid
+        """
+        from src.exceptions import ConfigurationException
+        
+        # Collect current values using canonical names
+        config_values = {}
+        
+        for field_name, field_def in self._contract.get_all_fields().items():
+            if field_def.secret:
+                # Check secrets cache
+                value = self._secrets_cache.get(field_name) or self._secrets_cache.get(field_def.key_vault_name or "")
+            else:
+                value = self._cache.get(field_name)
+            
+            if value is not None:
+                config_values[field_name] = value
+        
+        # Validate using contract
+        errors = self._contract.validate_required(config_values, check_broker=True)
+        
+        if errors:
+            error_message = self._contract.format_validation_errors(errors)
+            logger.error(error_message)
+            raise ConfigurationException(f"Configuration validation failed: {len(errors)} error(s)")
+    
+    def get_validation_status(self) -> Dict[str, Any]:
+        """
+        Get configuration validation status without raising exceptions.
+        
+        Returns:
+            Dict with 'valid', 'errors', 'warnings' keys
+        """
+        config_values = {}
+        
+        for field_name, field_def in self._contract.get_all_fields().items():
+            if field_def.secret:
+                value = self._secrets_cache.get(field_name) or self._secrets_cache.get(field_def.key_vault_name or "")
+            else:
+                value = self._cache.get(field_name)
+            
+            if value is not None:
+                config_values[field_name] = value
+        
+        errors = self._contract.validate_required(config_values, check_broker=False)
+        
+        return {
+            "valid": len(errors) == 0,
+            "errors": errors,
+            "configured_fields": list(config_values.keys()),
+            "missing_required": [
+                f.canonical_name 
+                for f in self._contract.get_required_fields()
+                if f.canonical_name not in config_values
+            ],
+        }
     
     async def _ensure_azure_initialized(self) -> None:
         """Ensure Azure provider is initialized."""
@@ -324,18 +435,12 @@ class ConfigurationManager(IConfigurationManager):
         )
     
     def get_database_config(self):
-        """Get database configuration (sync, from cache/environment)."""
+        """Get database configuration (Cosmos DB)."""
         from src.config.azure_config_provider import DatabaseConfig
         
-        # Try secret first (for connection string with credentials)
-        db_url = self.get_secret("database-connection-string")
-        if not db_url:
-            db_url = self.get_config("database.url", "sqlite:///trading_bot.db")
-        
         return DatabaseConfig(
-            url=db_url,
-            echo=bool(self.get_config("database.echo", False)),
-            pool_size=int(self.get_config("database.pool_size", 5)),
+            throughput_ru=int(self.get_config("database.throughput_ru", 400)),
+            consistency_level=self.get_config("database.consistency_level", "Session"),
         )
     
     def get_logging_config(self):

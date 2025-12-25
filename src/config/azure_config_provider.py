@@ -55,10 +55,10 @@ class ConfigKeys:
     and provide IntelliSense support.
     """
     
-    # Database
-    DATABASE_URL = "database.url"
-    DATABASE_ECHO = "database.echo"
-    DATABASE_POOL_SIZE = "database.pool_size"
+    # Database - Cosmos DB
+    # Note: Credentials via COSMOS_ENDPOINT, COSMOS_KEY env vars
+    DATABASE_THROUGHPUT_RU = "database.throughput_ru"  # Cosmos RU/s
+    DATABASE_CONSISTENCY = "database.consistency_level"  # Cosmos consistency
     
     # Logging
     LOG_LEVEL = "logging.level"
@@ -107,9 +107,6 @@ class SecretKeys:
     
     # Webhook
     WEBHOOK_SECRET = "webhook-secret"
-    
-    # Ngrok
-    NGROK_AUTH_TOKEN = "ngrok-auth-token"
     
     # Database (if using connection string with password)
     DATABASE_CONNECTION_STRING = "database-connection-string"
@@ -170,11 +167,17 @@ class WebhookConfig:
 
 @dataclass
 class DatabaseConfig:
-    """Database configuration."""
-    url: str
-    echo: bool = False
-    pool_size: int = 5
-    max_overflow: int = 10
+    """
+    Database configuration for Azure Cosmos DB.
+    
+    Cosmos DB configuration is managed via environment variables:
+    - COSMOS_ENDPOINT: Cosmos DB account endpoint
+    - COSMOS_KEY: Cosmos DB account key (or use Managed Identity)
+    - COSMOS_DATABASE: Database name
+    """
+    # Cosmos-specific settings
+    throughput_ru: int = 400  # Request Units per second
+    consistency_level: str = "Session"  # Cosmos consistency level
 
 
 @dataclass
@@ -191,10 +194,9 @@ class LoggingConfig:
 # ============================================================================
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    # Database
-    ConfigKeys.DATABASE_URL: "sqlite:///trading_bot.db",
-    ConfigKeys.DATABASE_ECHO: False,
-    ConfigKeys.DATABASE_POOL_SIZE: 5,
+    # Database - Cosmos DB (set COSMOS_ENDPOINT and COSMOS_KEY env vars)
+    ConfigKeys.DATABASE_THROUGHPUT_RU: 400,  # Cosmos RU/s (free tier minimum)
+    ConfigKeys.DATABASE_CONSISTENCY: "Session",  # Cosmos consistency level
     
     # Logging
     ConfigKeys.LOG_LEVEL: "INFO",
@@ -472,16 +474,10 @@ class AzureConfigProvider:
         )
     
     async def get_database_config(self) -> DatabaseConfig:
-        """Get database configuration."""
-        # Try secret first for connection string with credentials
-        db_url = await self.get_secret(SecretKeys.DATABASE_CONNECTION_STRING)
-        if not db_url:
-            db_url = await self.get_config(ConfigKeys.DATABASE_URL, DEFAULT_CONFIG[ConfigKeys.DATABASE_URL])
-        
+        """Get database configuration for Cosmos DB."""
         return DatabaseConfig(
-            url=db_url,
-            echo=bool(await self.get_config(ConfigKeys.DATABASE_ECHO, DEFAULT_CONFIG[ConfigKeys.DATABASE_ECHO])),
-            pool_size=int(await self.get_config(ConfigKeys.DATABASE_POOL_SIZE, DEFAULT_CONFIG[ConfigKeys.DATABASE_POOL_SIZE])),
+            throughput_ru=int(await self.get_config(ConfigKeys.DATABASE_THROUGHPUT_RU, DEFAULT_CONFIG[ConfigKeys.DATABASE_THROUGHPUT_RU])),
+            consistency_level=await self.get_config(ConfigKeys.DATABASE_CONSISTENCY, DEFAULT_CONFIG[ConfigKeys.DATABASE_CONSISTENCY]),
         )
     
     async def get_logging_config(self) -> LoggingConfig:

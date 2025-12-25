@@ -24,6 +24,7 @@ from src.signals.routers.bot_management_router import BotManagementRouter
 from src.signals.routers.config_router import ConfigRouter
 from src.signals.routers.fund_router import FundRouter
 from src.signals.routers.analytics_router import AnalyticsRouter
+from src.signals.routers.dca_preview_router import DCAPreviewRouter
 
 # Service interfaces
 try:
@@ -34,6 +35,7 @@ try:
     from src.services.config_service_interface import IConfigService
     from src.services.fund_service_interface import IFundService
     from src.services.analytics_service_interface import IAnalyticsService
+    _SERVICE_INTERFACES_AVAILABLE = True
 except ImportError:
     IOrderService = None  # type: ignore
     IPositionService = None  # type: ignore
@@ -42,9 +44,17 @@ except ImportError:
     IConfigService = None  # type: ignore
     IFundService = None  # type: ignore
     IAnalyticsService = None  # type: ignore
+    _SERVICE_INTERFACES_AVAILABLE = False
 
 
 logger = get_logger(__name__)
+
+# Log import warnings after logger is initialized
+if not _SERVICE_INTERFACES_AVAILABLE:
+    logger.warning(
+        "Service interfaces failed to import - AdminRouterComposite may have limited functionality. "
+        "Ensure all service interface modules exist in src/services/"
+    )
 
 
 class AdminRouterComposite:
@@ -153,6 +163,9 @@ class AdminRouterComposite:
             bot_instance=bot_instance
         )
         
+        # DCA Preview router (stateless, no services needed)
+        self.dca_preview_router = DCAPreviewRouter()
+        
         # Create combined router
         self.router = APIRouter()
         self._combine_routers()
@@ -168,7 +181,8 @@ class AdminRouterComposite:
             self.bot_management_router,
             self.config_router,
             self.fund_router,
-            self.analytics_router
+            self.analytics_router,
+            self.dca_preview_router,
         ]
         
         for sub_router in sub_routers:

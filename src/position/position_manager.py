@@ -212,13 +212,19 @@ class PositionManager(IPositionManager):
         """
         try:
             # Delegate pagination to database layer for efficiency
-            # Exclude zero quantity at database level to avoid loading unused records
-            active_positions = await self._database.get_all_positions(
+            # The database now returns PaginatedResult, but we extract .items for compatibility
+            # exclude_zero_quantity is now True by default at database level
+            result = await self._database.get_all_positions(
                 broker=broker,
-                limit=limit,
-                offset=offset,
+                max_items=limit if limit else 1000,
                 exclude_zero_quantity=True
             )
+            
+            # Handle both PaginatedResult and List returns for compatibility
+            if hasattr(result, 'items'):
+                active_positions = result.items
+            else:
+                active_positions = result
             
             # Update memory cache with fetched positions
             for position in active_positions:

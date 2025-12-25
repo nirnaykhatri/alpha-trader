@@ -1,6 +1,11 @@
 """
 Webhook handler module for TradingView signal processing.
 Handles incoming webhook signals with security verification.
+
+Key Improvements (v1.1.0):
+- Integration with TaskRegistry for proper task lifecycle management
+- Tasks are tracked and can be properly cancelled on shutdown
+- Deterministic exception handling for callback failures
 """
 
 import asyncio
@@ -13,6 +18,7 @@ from fastapi.responses import JSONResponse
 from src.interfaces import IConfigurationManager, IMarketDataProvider
 from src.exceptions import SignalProcessingException
 from src.core.logging_config import get_logger
+from src.core.task_registry import get_task_registry, TaskCategory
 from src import TradingSignal
 from src.constants import HTTPStatus, APIConstants
 from src.signals.signal_processor import SignalProcessor
@@ -121,10 +127,18 @@ class WebhookHandler:
                     "timestamp": datetime.utcnow().isoformat()
                 }
                 
-                # Call callback asynchronously (fire-and-forget)
+                # Call callback asynchronously with proper task tracking
                 if self._signal_callback:
-                    # Don't await - truly fire-and-forget to prevent blocking webhook response
-                    asyncio.create_task(self._call_callback_safely(signal))
+                    # Use TaskRegistry for proper lifecycle management instead of fire-and-forget
+                    registry = get_task_registry()
+                    await registry.create_task(
+                        self._call_callback_safely(signal),
+                        name=f"signal_callback_{signal.signal_id}",
+                        category=TaskCategory.PROCESSING,
+                        owner=self,
+                        critical=False,  # Callback failures shouldn't crash the system
+                        allow_cancel=True
+                    )
                 
                 logger.info(f"Signal processed successfully: {signal.signal_id} for {signal_data.get('symbol', 'unknown')}")
                 return JSONResponse(content=response_content)
@@ -216,10 +230,18 @@ class WebhookHandler:
                     "timestamp": datetime.utcnow().isoformat()
                 }
                 
-                # Call callback asynchronously (fire-and-forget)
+                # Call callback asynchronously with proper task tracking
                 if self._signal_callback:
-                    # Don't await - truly fire-and-forget to prevent blocking webhook response
-                    asyncio.create_task(self._call_callback_safely(signal))
+                    # Use TaskRegistry for proper lifecycle management instead of fire-and-forget
+                    registry = get_task_registry()
+                    await registry.create_task(
+                        self._call_callback_safely(signal),
+                        name=f"signal_callback_legacy_{signal.signal_id}",
+                        category=TaskCategory.PROCESSING,
+                        owner=self,
+                        critical=False,  # Callback failures shouldn't crash the system
+                        allow_cancel=True
+                    )
                 
                 logger.info(f"Signal processed successfully: {signal.signal_id} for {signal_data.get('symbol', 'unknown')}")
                 return JSONResponse(content=response_content)

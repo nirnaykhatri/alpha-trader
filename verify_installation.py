@@ -111,8 +111,7 @@ def main():
         ("dotenv", "Python-dotenv"),
         ("httpx", "HTTPX"),
         ("aiohttp", "AioHTTP"),
-        ("sqlalchemy", "SQLAlchemy"),
-        ("aiosqlite", "AioSQLite"),
+        ("azure.cosmos", "Azure Cosmos DB"),
         ("pytest", "Pytest"),
         ("structlog", "StructLog"),
         ("apscheduler", "APScheduler"),
@@ -166,17 +165,54 @@ def main():
         print("❌ src/ directory not found")
         print("   Make sure you're in the trading bot root directory")
     
-    # Check config file
-    if Path("config/settings.toml").exists():
-        print("✅ config/settings.toml found")
+    # Check configuration (Azure-First)
+    print("\n🔐 Checking Configuration (Azure-First):")
+    print("-" * 30)
+    
+    import os
+    config_ok = False
+    
+    # Check for Azure configuration (preferred)
+    azure_keyvault = os.getenv("AZURE_KEYVAULT_URL")
+    azure_app_config = os.getenv("AZURE_APP_CONFIGURATION_ENDPOINT")
+    
+    if azure_keyvault or azure_app_config:
+        print("✅ Azure configuration detected")
+        if azure_keyvault:
+            print(f"   • Key Vault: {azure_keyvault[:50]}...")
+        if azure_app_config:
+            print(f"   • App Configuration: {azure_app_config[:50]}...")
+        config_ok = True
     else:
-        print("❌ config/settings.toml not found")
-        print("   Check that the config directory exists with settings.toml")
+        # Check for direct environment variables (local dev fallback)
+        alpaca_key = os.getenv("ALPACA_API_KEY")
+        alpaca_secret = os.getenv("ALPACA_API_SECRET")
+        
+        if alpaca_key and alpaca_secret:
+            print("✅ Environment variables configured (local dev mode)")
+            print("   • ALPACA_API_KEY: [SET]")
+            print("   • ALPACA_API_SECRET: [SET]")
+            config_ok = True
+        else:
+            print("⚠️  No configuration detected")
+            print("")
+            print("🔧 Configure using ONE of these methods:")
+            print("")
+            print("   Option 1: Azure (Production - Recommended)")
+            print("   Set AZURE_KEYVAULT_URL and/or AZURE_APP_CONFIGURATION_ENDPOINT")
+            print("")
+            print("   Option 2: Environment Variables (Local Dev)")
+            print("   Set ALPACA_API_KEY and ALPACA_API_SECRET")
+            print("")
+            print("   See docs/AZURE_DEPLOYMENT.md for Azure setup")
     
     print("\n" + "=" * 50)
-    if not failed_dependencies and src_path.exists():
+    if not failed_dependencies and src_path.exists() and config_ok:
         print("🚀 Installation verification complete!")
         print("   You can now run: python run_bot.py")
+    elif not failed_dependencies and src_path.exists():
+        print("⚠️  Dependencies OK but configuration needed")
+        print("   Set environment variables before running the bot")
     else:
         print("🔧 Please fix the issues above before running the bot")
 

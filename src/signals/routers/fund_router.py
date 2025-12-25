@@ -24,11 +24,17 @@ from src.signals.routers.base_router import BaseAdminRouter, handle_route_errors
 # Fund service import - may not exist in older installations
 try:
     from src.services.fund_service_interface import IFundService
+    _FUND_SERVICE_AVAILABLE = True
 except ImportError:
     IFundService = None  # type: ignore
+    _FUND_SERVICE_AVAILABLE = False
 
 
 logger = get_logger(__name__)
+
+# Log import warnings after logger is initialized
+if not _FUND_SERVICE_AVAILABLE:
+    logger.warning("IFundService interface not found - fund management features may be limited")
 
 
 # =============================================================================

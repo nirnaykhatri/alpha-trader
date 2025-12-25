@@ -31,6 +31,7 @@ import {
   SelectTrigger,
   SelectValue,
   Separator,
+  ConfirmDialog,
 } from '@/components/ui'
 import {
   Plus,
@@ -300,7 +301,7 @@ function BotDetailPanel({
       <div className="p-4 border-b sticky top-0 bg-card z-10">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium text-muted-foreground">COMBO Bot details</span>
+            <span className="text-sm font-medium text-muted-foreground">{BOT_TYPE_LABELS[config.botType]} details</span>
           </div>
           <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onClose}>
             <X className="h-4 w-4" />
@@ -511,18 +512,21 @@ function BotDetailPanel({
 
 export default function BotsPage() {
   const [activeTab, setActiveTab] = useState<'active' | 'history'>('active')
-  const [stateFilter, setStateFilter] = useState<string>('')
+  const [stateFilter, setStateFilter] = useState<string>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedBot, setSelectedBot] = useState<Bot | null>(null)
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false)
   const [isOrdersDialogOpen, setIsOrdersDialogOpen] = useState(false)
   const [isModifyDialogOpen, setIsModifyDialogOpen] = useState(false)
   const [isActionLoading, setIsActionLoading] = useState(false)
+  // Delete confirmation dialog state
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null)
   const { toast } = useToast()
 
   // Hooks
   const { data: botsData, isLoading: botsLoading, refetch: refetchBots, createBot } = useBots({
-    state: stateFilter || undefined,
+    state: stateFilter === 'all' ? undefined : stateFilter,
     symbol: searchQuery || undefined,
   }, 30000) // Refresh every 30s
 
@@ -634,9 +638,22 @@ export default function BotsPage() {
     }
   }, [selectedBot, toast, refetchBots])
 
-  const handleDeleteHistory = async (historyId: string) => {
-    if (window.confirm('Are you sure you want to delete this history entry?')) {
-      await deleteEntry(historyId)
+  /**
+   * Opens confirm dialog for history deletion.
+   * Stores the pending ID and shows the confirmation dialog.
+   */
+  const handleDeleteHistoryClick = (historyId: string) => {
+    setPendingDeleteId(historyId)
+    setDeleteConfirmOpen(true)
+  }
+
+  /**
+   * Confirms and executes history deletion.
+   */
+  const handleConfirmDelete = async () => {
+    if (pendingDeleteId) {
+      await deleteEntry(pendingDeleteId)
+      setPendingDeleteId(null)
     }
   }
 
@@ -725,7 +742,7 @@ export default function BotsPage() {
                           <SelectValue placeholder="All States" />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="">All States</SelectItem>
+                          <SelectItem value="all">All States</SelectItem>
                           <SelectItem value="running">Running</SelectItem>
                           <SelectItem value="paused">Paused</SelectItem>
                           <SelectItem value="stopped">Stopped</SelectItem>
@@ -806,7 +823,7 @@ export default function BotsPage() {
                           <HistoryRow
                             key={entry.id}
                             entry={entry}
-                            onDelete={handleDeleteHistory}
+                            onDelete={handleDeleteHistoryClick}
                           />
                         ))}
                       </>
@@ -850,6 +867,17 @@ export default function BotsPage() {
             onOpenChange={setIsModifyDialogOpen}
             bot={selectedBot}
             onSave={handleModifyBot}
+          />
+
+          {/* Delete History Confirmation Dialog */}
+          <ConfirmDialog
+            open={deleteConfirmOpen}
+            onOpenChange={setDeleteConfirmOpen}
+            title="Delete History Entry"
+            description="This action cannot be undone. The history record will be permanently removed."
+            variant="danger"
+            confirmText="Delete"
+            onConfirm={handleConfirmDelete}
           />
         </div>
       </AppShell>

@@ -40,10 +40,10 @@ except ImportError:
 # Optional imports - tests mock these anyway
 try:
     from src.signals.signal_processor import SignalProcessor
-    from src.database.database_manager import DatabaseManager
+    from src.database.cosmos_manager import CosmosDBManager
 except ImportError:
     SignalProcessor = None
-    DatabaseManager = None
+    CosmosDBManager = None
 
 
 class MemoryProfiler:
@@ -301,7 +301,7 @@ async def test_database_connection_pool_stability():
     print(f"  Rate: {QUERIES_PER_SECOND} queries/second")
     
     # Mock database manager
-    # In real test, use actual DatabaseManager
+    # In real test, use actual CosmosDBManager
     query_count = 0
     error_count = 0
     

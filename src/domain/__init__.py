@@ -6,19 +6,23 @@ Pure domain objects with no external dependencies.
 
 from src.domain.decision_context import DecisionContext, PositionDirection
 from src.domain.risk_decision import RiskDecision, RiskDecisionStatus, RiskEnvelope
-from src.domain.pydantic_models import (
-    TradingSignalModel,
-    OrderModel,
-    PositionModel,
-    SupportLevelModel,
-    SupportLevelDataModel,
-    SignalType,
-    OrderType,
-    OrderStatus,
-    OrderSide,
-    from_dataclass_signal,
-    from_dataclass_order,
-    from_dataclass_position,
+
+# Bot domain models (re-exported from bot_models for convenience)
+from src.domain.bot_models import (
+    # Enums
+    BotType,
+    BotState,
+    BotOperationalPhase,
+    BotAction,
+    PositionMode,
+    MarginMode,
+    TakeProfitType,
+    # Config classes
+    BotConfiguration,
+    DCAConfig,
+    # Entity classes
+    Bot,
+    BotPerformance,
 )
 
 __all__ = [
@@ -29,19 +33,16 @@ __all__ = [
     'RiskDecision',
     'RiskDecisionStatus',
     'RiskEnvelope',
-    # Pydantic Models
-    'TradingSignalModel',
-    'OrderModel',
-    'PositionModel',
-    'SupportLevelModel',
-    'SupportLevelDataModel',
-    # Enums
-    'SignalType',
-    'OrderType',
-    'OrderStatus',
-    'OrderSide',
-    # Factory Functions
-    'from_dataclass_signal',
-    'from_dataclass_order',
-    'from_dataclass_position',
+    # Bot Domain Models
+    'BotType',
+    'BotState',
+    'BotOperationalPhase',
+    'BotAction',
+    'PositionMode',
+    'MarginMode',
+    'TakeProfitType',
+    'BotConfiguration',
+    'DCAConfig',
+    'Bot',
+    'BotPerformance',
 ]

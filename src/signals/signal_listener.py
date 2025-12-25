@@ -6,7 +6,7 @@ Refactored modular version using separated components.
 import asyncio
 from typing import Dict, Any, Callable, Optional
 from datetime import datetime
-from fastapi import FastAPI
+from fastapi import FastAPI, APIRouter
 import uvicorn
 
 from src.interfaces import ISignalListener, IConfigurationManager, IMarketDataProvider, IAsyncContextManager
@@ -18,6 +18,8 @@ from src.signals.signal_processor import SignalProcessor
 from src.signals.webhook_handlers import WebhookHandler
 from src.signals.monitoring_router import MonitoringRouter
 from src.signals.routers import AdminRouter
+from src.signals.routers.indicator_router import create_indicator_router
+from src.services.indicator_service import IndicatorService
 
 
 logger = get_logger(__name__)
@@ -66,6 +68,13 @@ class TradingViewSignalListener(ISignalListener, IAsyncContextManager):
         self._monitoring_router = MonitoringRouter(bot_instance)
         self._admin_router = AdminRouter(bot_instance, config)
         
+        # Initialize indicator service and router (if market data available)
+        self._indicator_service = None
+        self._indicator_router = None
+        if market_data:
+            self._indicator_service = IndicatorService(market_data)
+            self._indicator_router = create_indicator_router(self._indicator_service)
+        
         # Initialize FastAPI with comprehensive OpenAPI documentation
         self._app = FastAPI(
             title="TradingView Trading Bot API",
@@ -91,6 +100,10 @@ class TradingViewSignalListener(ISignalListener, IAsyncContextManager):
                     "description": "Order management and history endpoints"
                 },
                 {
+                    "name": "indicators",
+                    "description": "Technical indicator calculations (RSI, MACD, Stochastic)"
+                },
+                {
                     "name": "analytics",
                     "description": "Trading analytics and performance metrics"
                 },
@@ -113,10 +126,21 @@ class TradingViewSignalListener(ISignalListener, IAsyncContextManager):
             }
         )
         
-        # Register routers from modular components
-        self._app.include_router(self._webhook_handler.router)
-        self._app.include_router(self._monitoring_router.router)
-        self._app.include_router(self._admin_router.router)
+        # Create a versioned API router to match frontend expectations
+        # Frontend expects endpoints at /api/v1/* (see trading-terminal/lib/types/api-types.ts)
+        api_v1_router = APIRouter(prefix="/api/v1")
+        
+        # Include modular routers under the versioned prefix
+        api_v1_router.include_router(self._webhook_handler.router)
+        api_v1_router.include_router(self._monitoring_router.router)
+        api_v1_router.include_router(self._admin_router.router)
+        
+        # Include indicator router if available
+        if self._indicator_router:
+            api_v1_router.include_router(self._indicator_router)
+        
+        # Mount the versioned router on the app
+        self._app.include_router(api_v1_router)
         
         # Register dependency checks for readiness probe
         self._register_dependency_checks()
@@ -329,25 +353,26 @@ class TradingViewSignalListener(ISignalListener, IAsyncContextManager):
     def _display_endpoints(self) -> None:
         """Display available endpoints to the user."""
         base_url = f"http://{self._host}:{self._port}"
+        api_url = f"{base_url}/api/v1"
         
         print("\n" + "="*70)
-        print("📊 TRADING BOT API ENDPOINTS")
+        print("📊 TRADING BOT API ENDPOINTS (v1)")
         print("="*70)
         print("\n🔍 MONITORING (Read-Only)")
-        print(f"  🏠 Health Check:      {base_url}/health")
-        print(f"  📈 Positions:         {base_url}/positions")
-        print(f"  📋 Recent Orders:     {base_url}/orders")
-        print(f"  📊 Portfolio Summary: {base_url}/portfolio-summary")
+        print(f"  🏠 Health Check:      {api_url}/health")
+        print(f"  📈 Positions:         {api_url}/positions")
+        print(f"  📋 Recent Orders:     {api_url}/orders")
+        print(f"  📊 Portfolio Summary: {api_url}/portfolio-summary")
         print(f"  📚 API Docs:          {base_url}/docs")
         print("\n🎮 ADMIN (Trading Terminal)")
-        print(f"  📝 Place Order:       POST {base_url}/admin/orders")
-        print(f"  🚫 Cancel Order:      DELETE {base_url}/admin/orders/{{id}}")
-        print(f"  📤 Close Position:    POST {base_url}/admin/positions/{{symbol}}/close")
-        print(f"  🚀 Start Bot:         POST {base_url}/admin/bot/start")
-        print(f"  ⏸️  Pause Bot:         POST {base_url}/admin/bot/pause")
-        print(f"  🛑 Stop Bot:          POST {base_url}/admin/bot/stop")
-        print(f"  ⚙️  Get Config:        GET {base_url}/admin/config")
-        print(f"  💰 Funds Summary:     GET {base_url}/admin/funds/summary")
+        print(f"  📝 Place Order:       POST {api_url}/admin/orders")
+        print(f"  🚫 Cancel Order:      DELETE {api_url}/admin/orders/{{id}}")
+        print(f"  📤 Close Position:    POST {api_url}/admin/positions/{{symbol}}/close")
+        print(f"  🚀 Start Bot:         POST {api_url}/admin/bot/start")
+        print(f"  ⏸️  Pause Bot:         POST {api_url}/admin/bot/pause")
+        print(f"  🛑 Stop Bot:          POST {api_url}/admin/bot/stop")
+        print(f"  ⚙️  Get Config:        GET {api_url}/admin/config")
+        print(f"  💰 Funds Summary:     GET {api_url}/admin/funds/summary")
         print("="*70)
         print("💡 TIP: Use the Trading Terminal UI for easy access!")
         print("="*70 + "\n")

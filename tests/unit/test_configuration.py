@@ -35,7 +35,7 @@ def reset_config_singleton():
 def env_config():
     """Set up environment variables for testing."""
     test_env = {
-        "DATABASE_URL": "sqlite:///test.db",
+        "DATABASE_URL": "cosmos://test-account.documents.azure.com/test-db",
         "LOG_LEVEL": "DEBUG",
         "ALPACA_API_KEY": "test-api-key",
         "ALPACA_SECRET_KEY": "test-secret-key",
@@ -60,7 +60,7 @@ class TestConfigurationManager:
         ConfigurationManager.reset_instance()
         config = ConfigurationManager()
         
-        assert config.get_config("database.url") == "sqlite:///test.db"
+        assert config.get_config("database.url") == "cosmos://test-account.documents.azure.com/test-db"
         assert config.get_config("logging.level") == "DEBUG"
     
     def test_get_config_with_default(self):
@@ -109,7 +109,7 @@ class TestConfigurationManager:
         
         # Reload should restore from environment
         config.reload_config()
-        assert config.get_config("database.url") == "sqlite:///test.db"
+        assert config.get_config("database.url") == "cosmos://test-account.documents.azure.com/test-db"
     
     def test_config_thread_safety(self):
         """Test basic thread safety of configuration operations."""
@@ -215,15 +215,14 @@ class TestConfigurationManagerTypedAccess:
         assert webhook_config.security_enabled is True  # Default
     
     def test_get_database_config(self, env_config):
-        """Test getting typed database configuration."""
+        """Test getting typed database configuration for Cosmos DB."""
         ConfigurationManager.reset_instance()
         config = ConfigurationManager()
         
         db_config = config.get_database_config()
         assert db_config is not None
-        assert db_config.url == "sqlite:///test.db"
-        assert db_config.echo is False
-        assert db_config.pool_size == 5
+        assert db_config.throughput_ru == 400  # Default
+        assert db_config.consistency_level == "Session"  # Default
     
     def test_get_logging_config(self, env_config):
         """Test getting typed logging configuration."""
@@ -264,14 +263,15 @@ class TestDefaultConfiguration:
     
     def test_default_config_keys_exist(self):
         """Test that all default config keys are defined."""
-        assert ConfigKeys.DATABASE_URL in DEFAULT_CONFIG
+        # Cosmos DB keys (no DATABASE_URL - using COSMOS_ENDPOINT env var)
+        assert ConfigKeys.DATABASE_THROUGHPUT_RU in DEFAULT_CONFIG
         assert ConfigKeys.LOG_LEVEL in DEFAULT_CONFIG
         assert ConfigKeys.WEBHOOK_PORT in DEFAULT_CONFIG
         assert ConfigKeys.TRADING_ORDER_TYPE in DEFAULT_CONFIG
     
     def test_default_config_values(self):
         """Test default configuration values."""
-        assert DEFAULT_CONFIG[ConfigKeys.DATABASE_URL] == "sqlite:///trading_bot.db"
+        assert DEFAULT_CONFIG[ConfigKeys.DATABASE_THROUGHPUT_RU] == 400  # Cosmos RU/s
         assert DEFAULT_CONFIG[ConfigKeys.LOG_LEVEL] == "INFO"
         assert DEFAULT_CONFIG[ConfigKeys.WEBHOOK_PORT] == 8080
         assert DEFAULT_CONFIG[ConfigKeys.TRADING_ORDER_TYPE] == "limit"
@@ -285,4 +285,4 @@ class TestSecretKeys:
         assert SecretKeys.ALPACA_API_KEY == "alpaca-api-key"
         assert SecretKeys.ALPACA_SECRET_KEY == "alpaca-secret-key"
         assert SecretKeys.WEBHOOK_SECRET == "webhook-secret"
-        assert SecretKeys.NGROK_AUTH_TOKEN == "ngrok-auth-token"
+        # Note: NGROK_AUTH_TOKEN removed - ngrok integration deprecated

@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """
-Trading Bot Startup Script
-Simple script for users to start the trading bot with minimal configuration.
+Trading Bot Startup Script (Azure-First Configuration)
+
+This script starts the trading bot with Azure environment configuration as the
+single source of truth. Configuration is loaded from:
+1. Azure Key Vault (secrets) - when AZURE_KEYVAULT_URL is set
+2. Azure App Configuration (runtime settings) - when AZURE_APP_CONFIGURATION_ENDPOINT is set
+3. Environment variables (local dev/overrides)
+4. Default values from ConfigContract
+
+NOTE: TOML files are NOT supported in production. For local development, use
+environment variables. For testing, see tests/fixtures/ for mock configurations.
 """
 
 import asyncio
@@ -40,37 +49,71 @@ def print_banner():
     print(banner)
 
 
-def check_config_file():
-    """Check if config files exist and help user set them up."""
-    config_dir = Path(__file__).parent / "config"
-    settings_file = config_dir / "settings.toml"
-    secrets_file = config_dir / ".secrets.toml"
+def check_environment_config():
+    """
+    Check if required environment variables are configured.
     
-    if not settings_file.exists():
-        print(f"❌ Configuration file '{settings_file}' not found!")
-        print("\n🔧 To get started:")
-        print("1. The config/ directory should contain settings.toml")
-        print("2. Copy .secrets.toml.example to .secrets.toml")
-        print("3. Edit .secrets.toml with your credentials:")
-        print("   - Add your Alpaca API credentials")
-        print("   - Set your webhook secret")
-        print("4. Run this script again")
-        return False
+    Azure-First Configuration Strategy:
+    - Production: Azure Key Vault + App Configuration
+    - Local Dev: Environment variables (from .env or shell)
     
-    if not secrets_file.exists():
-        print(f"⚠️  Secrets file '{secrets_file}' not found!")
-        print("\n🔧 To configure credentials:")
-        print(f"1. Copy {config_dir}/.secrets.toml.example to .secrets.toml")
-        print("2. Edit .secrets.toml with your API keys")
-        return False
+    Returns:
+        bool: True if minimum required config is present, False otherwise.
+    """
+    # Check for Azure configuration (production)
+    azure_keyvault = os.getenv("AZURE_KEYVAULT_URL")
+    azure_app_config = os.getenv("AZURE_APP_CONFIGURATION_ENDPOINT")
     
-    return True
+    # Check for direct environment variables (local dev)
+    alpaca_key = os.getenv("ALPACA_API_KEY")
+    alpaca_secret = os.getenv("ALPACA_API_SECRET")
+    
+    has_azure = azure_keyvault or azure_app_config
+    has_direct = alpaca_key and alpaca_secret
+    
+    if has_azure:
+        print("✅ Azure configuration detected:")
+        if azure_keyvault:
+            print(f"   • Key Vault: {azure_keyvault[:50]}...")
+        if azure_app_config:
+            print(f"   • App Config: {azure_app_config[:50]}...")
+        return True
+    
+    if has_direct:
+        print("✅ Direct environment configuration detected:")
+        print("   • ALPACA_API_KEY: [configured]")
+        print("   • ALPACA_API_SECRET: [configured]")
+        return True
+    
+    # No configuration found
+    print("❌ No configuration found!")
+    print("\n🔧 Configuration Options:")
+    print("\n  Option 1: Azure (Recommended for Production)")
+    print("  ─────────────────────────────────────────────")
+    print("    Set these environment variables:")
+    print("    • AZURE_KEYVAULT_URL=https://your-keyvault.vault.azure.net/")
+    print("    • AZURE_APP_CONFIGURATION_ENDPOINT=https://your-config.azconfig.io")
+    print("")
+    print("  Option 2: Environment Variables (Local Development)")
+    print("  ────────────────────────────────────────────────────")
+    print("    Set these environment variables:")
+    print("    • ALPACA_API_KEY=your_api_key")
+    print("    • ALPACA_API_SECRET=your_api_secret")
+    print("    • ALPACA_BASE_URL=https://paper-api.alpaca.markets")
+    print("    • AZURE_COSMOS_ENDPOINT=https://your-cosmos.documents.azure.com:443/")
+    print("    • AZURE_COSMOS_KEY=your_cosmos_key")
+    print("    • AZURE_COSMOS_DATABASE=your_database_name")
+    print("")
+    print("  📄 Copy config/.env.example to .env and source it:")
+    print("     Windows: copy config\\.env.example .env && set /p < .env")
+    print("     Linux/Mac: cp config/.env.example .env && source .env")
+    return False
 
 
 def validate_config():
     """Validate configuration using centralized startup validation service."""
     try:
-        # Use centralized validation service (no file path - uses TOML config)
+        # Use centralized validation service (uses env/Azure config)
         validator = StartupValidationService()
         result = validator.validate(verbose=True)
         
@@ -85,31 +128,39 @@ def validate_config():
 
 
 def show_quick_start_guide():
-    """Show quick start guide for new users."""
-    print("\n📚 Quick Start Guide:")
-    print("=" * 50)
+    """Show quick start guide for new users (Azure-first)."""
+    print("\n📚 Quick Start Guide (Azure-First Configuration):")
+    print("=" * 55)
     
     print("\n1. 🔑 Get Alpaca API Credentials:")
     print("   • Sign up at: https://alpaca.markets/")
     print("   • Generate paper trading API keys")
-    print("   • Add them to config/.secrets.toml")
+    print("   • Set environment variables:")
+    print("     export ALPACA_API_KEY=your_key")
+    print("     export ALPACA_API_SECRET=your_secret")
     
-    print("\n2. 🔐 Generate Webhook Secret:")
+    print("\n2. 🗄️ Configure Azure Cosmos DB:")
+    print("   • Create a Cosmos DB account in Azure")
+    print("   • Set environment variables:")
+    print("     export AZURE_COSMOS_ENDPOINT=https://your-account.documents.azure.com:443/")
+    print("     export AZURE_COSMOS_KEY=your_key")
+    print("     export AZURE_COSMOS_DATABASE=trading-bot")
+    
+    print("\n3. 🔐 Generate Webhook Secret:")
     print("   • Run: openssl rand -hex 32")
-    print("   • Add the secret to config/.secrets.toml")
+    print("   • Set: export WEBHOOK_SECRET=your_secret")
     
-    print("\n3. 🌐 Automated Webhook Setup:")
-    print("   • Set 'enabled = true' in config/settings.toml [default.ngrok]")
-    print("   • Bot will automatically download and start ngrok")
-    print("   • Copy the displayed webhook URL to TradingView")
-    print("   • No manual ngrok setup required!")
+    print("\n4. 🌐 Production Configuration (Azure):")
+    print("   • Store secrets in Azure Key Vault")
+    print("   • Store runtime config in Azure App Configuration")
+    print("   • Set AZURE_KEYVAULT_URL and AZURE_APP_CONFIGURATION_ENDPOINT")
     
-    print("\n4. 📊 TradingView Setup:")
+    print("\n5. 📊 TradingView Setup:")
     print("   • Create alerts in TradingView")
     print("   • Use the webhook URL displayed when bot starts")
     print("   • Include timeframe data for better support calculations")
     
-    print("\n5. 🎯 Enhanced Signal Format:")
+    print("\n6. 🎯 Signal Format:")
     print("   Your TradingView alerts should send JSON like:")
     print("   {")
     print('     "symbol": "{{ticker}}",')
@@ -118,35 +169,29 @@ def show_quick_start_guide():
     print('     "quantity": 100,')
     print('     "timeframe": "{{interval}}"')
     print("   }")
-    print("   • The bot now supports configurable order types")
-    print("   • Advanced trailing profit with support/resistance averaging")
-    print("   • Separate long/short strategy configurations")
     
-    print("\n6. 🌍 Environment Switching:")
-    print("   • Demo (paper trading): set TRADING_BOT_ENV=demo")
-    print("   • Live (real money):    set TRADING_BOT_ENV=live")
-    print("   • Default is 'demo' for safety")
+    print("\n7. 🌍 Environment Switching:")
+    print("   • Demo (paper trading): TRADING_BOT_ENV=demo (default)")
+    print("   • Live (real money):    TRADING_BOT_ENV=live")
     
-    print("\n7. 🚀 Start Trading:")
-    print("   • Run this script to start the bot")
-    print("   • ngrok tunnel will start automatically (if enabled)")
+    print("\n8. 🚀 Start Trading:")
+    print("   • Run: python run_bot.py")
     print("   • Monitor logs for signal processing")
     print("   • Check your Alpaca account for trades")
     
     print("\n💡 Pro Tips:")
     print("   • Use paper trading first (TRADING_BOT_ENV=demo)")
-    print("   • Configure order types in config/settings.toml")
-    print("   • Risk profiles in config/profiles/ (conservative, moderate, aggressive)")
-    print("   • Get free ngrok token for better reliability")
-    print("   • Monitor webhook traffic at http://localhost:4040")
+    print("   • Use .env file for local development")
+    print("   • Deploy to Azure Container Apps for production")
+    print("   • Monitor webhook traffic at http://localhost:4040 (if ngrok enabled)")
 
 
 async def main():
     """Main startup function."""
     print_banner()
     
-    # Check for config file
-    if not check_config_file():
+    # Check for environment configuration (Azure-first)
+    if not check_environment_config():
         show_quick_start_guide()
         return
     
@@ -194,9 +239,11 @@ async def main():
             print("   • Watch for webhook URL to copy to TradingView")
             print("   • Monitor webhook traffic at: http://localhost:4040")
         else:
-            print("\n🏠 Local Mode (ngrok disabled in config):")
+            print("\n🏠 Local Mode (ngrok disabled):")
             print("   • Running without webhook tunnel")
-            print("   • Configure webhooks manually if needed")
+            print("   • Set NGROK_ENABLED=true to enable")
+    except Exception:
+        pass  # Don't fail if config check fails
     except Exception:
         pass  # Don't fail if config check fails
     

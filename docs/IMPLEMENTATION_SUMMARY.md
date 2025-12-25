@@ -3,7 +3,13 @@
 ## Overview
 This document summarizes all the professional-grade improvements made to the Trading Bot codebase based on the Principal Engineer code review.
 
-## Date: October 2, 2025
+## Date: October 2, 2025 (Updated December 2025)
+
+> ⚠️ **ARCHITECTURE UPDATE (December 2025)**
+> 
+> This document contains references to **SQLAlchemy** and **SQLite** which have been **removed**.
+> The trading bot now uses **Azure Cosmos DB** exclusively for persistence.
+> Database pooling and SQLAlchemy configurations documented below are **legacy** and no longer apply.
 
 ---
 
@@ -165,47 +171,19 @@ async def expensive_operation():
 
 ---
 
-### 5. Enhanced Database Connection Pooling
+### 5. ~~Enhanced Database Connection Pooling~~ **MIGRATED: Azure Cosmos DB**
 
-#### **File Modified:** `src/database/database_manager.py`
-
-**Changes Applied:**
-
-1. **Added imports:**
-   ```python
-   from sqlalchemy.pool import StaticPool, QueuePool
-   from ..constants import DatabaseConstants
-   ```
-
-2. **Enhanced configuration:**
-   ```python
-   self._pool_size = config.get_config("database.pool_size", DatabaseConstants.POOL_SIZE)
-   self._max_overflow = config.get_config("database.max_overflow", DatabaseConstants.POOL_MAX_OVERFLOW)
-   self._pool_timeout = config.get_config("database.pool_timeout", DatabaseConstants.POOL_TIMEOUT)
-   self._pool_recycle = config.get_config("database.pool_recycle", DatabaseConstants.POOL_RECYCLE)
-   ```
-
-3. **Improved pool configuration:**
-   ```python
-   # For PostgreSQL and other databases:
-   self._engine = create_engine(
-       self._db_url,
-       echo=self._echo,
-       poolclass=QueuePool,
-       pool_size=self._pool_size,           # 20 connections
-       max_overflow=self._max_overflow,      # 40 overflow
-       pool_timeout=self._pool_timeout,      # 30 seconds
-       pool_recycle=self._pool_recycle,      # 1 hour
-       pool_pre_ping=True                    # Verify connections
-   )
-   ```
-
-**Benefits:**
-- ✅ Better connection management
-- ✅ Improved performance under load
-- ✅ Automatic connection health checking with `pool_pre_ping`
-- ✅ Configurable pool sizes via config or constants
-- ✅ Connection recycling prevents stale connections
+> ⚠️ **MIGRATION NOTE (December 2025)**
+> 
+> This section previously documented SQLAlchemy/PostgreSQL connection pooling enhancements.
+> The trading bot has **migrated to Azure Cosmos DB** for all persistence.
+> 
+> **Current Architecture:**
+> - Database: Azure Cosmos DB (NoSQL)
+> - Client: `azure-cosmos` SDK (async)
+> - Manager: `src/database/cosmos_manager.py`
+> 
+> See [ADAPTERS_INDEX.md](ADAPTERS_INDEX.md#-3-azure-cosmos-db) for current database integration details.
 
 ---
 

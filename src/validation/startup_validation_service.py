@@ -1,8 +1,21 @@
 """
 Startup Validation Service
 
-Consolidates all startup validation logic to prevent duplication
-between run_bot.py and trading_bot.py.
+Consolidates all startup validation logic using the canonical ConfigContract.
+This ensures fail-fast behavior with actionable error messages when
+configuration is missing or invalid.
+
+USAGE:
+    validator = StartupValidationService()
+    result = validator.validate()
+    
+    if result.has_errors():
+        print("Startup blocked due to errors")
+        sys.exit(1)
+
+This module integrates with:
+- src/config/config_contract.py (canonical field definitions)
+- src/config/config_validation_service.py (validation logic)
 """
 
 import logging
@@ -12,6 +25,7 @@ from enum import Enum
 
 from src.core import ConfigurationManager
 from src.config.config_schema import ConfigValidator, ValidationSeverity
+from src.config.config_contract import ConfigContract
 from src.exceptions import ConfigurationException
 
 logger = logging.getLogger(__name__)
@@ -54,11 +68,16 @@ class StartupValidationService:
     """
     Centralized startup validation service.
     
-    Performs all necessary validation checks before bot startup,
-    consolidating logic from run_bot.py and trading_bot.py.
+    Performs all necessary validation checks before bot startup using
+    the canonical ConfigContract for field definitions and validation.
+    
+    This service implements FAIL-FAST behavior:
+    - Critical errors block startup with actionable messages
+    - Warnings are logged but don't block startup
+    - Info messages provide operational context
     
     Example:
-        validator = StartupValidationService()  # Uses TOML config from config/
+        validator = StartupValidationService()
         result = validator.validate()
         
         if result.has_errors():
@@ -72,21 +91,29 @@ class StartupValidationService:
         
         Args:
             config_file: DEPRECATED - No longer used. Configuration is loaded
-                        from config/ directory using TOML files.
+                        via ConfigContract from environment/Azure.
         """
         if config_file is not None:
             import warnings
             warnings.warn(
                 "config_file parameter is deprecated. Configuration is now loaded from "
-                "config/ directory using TOML files.",
+                "environment variables and Azure services.",
                 DeprecationWarning,
                 stacklevel=2
             )
         self.issues: List[ValidationIssue] = []
+        self._contract = ConfigContract
     
     def validate(self, verbose: bool = True) -> ValidationResult:
         """
         Perform comprehensive startup validation.
+        
+        This method validates:
+        1. Required configuration fields (per ConfigContract)
+        2. Configuration value constraints
+        3. Broker credentials (at least one configured)
+        4. Webhook security settings
+        5. Production safety checks
         
         Args:
             verbose: Whether to print detailed output
@@ -96,10 +123,13 @@ class StartupValidationService:
         """
         self.issues = []
         
-        # Schema validation
+        # Contract-based validation (primary)
+        self._validate_contract()
+        
+        # Schema validation (Pydantic models)
         self._validate_schema()
         
-        # Configuration validation
+        # Configuration validation via ConfigurationManager
         self._validate_configuration()
         
         # API credentials validation
@@ -107,6 +137,9 @@ class StartupValidationService:
         
         # Webhook security validation
         self._validate_webhook_security()
+        
+        # Production safety checks
+        self._validate_production_safety()
         
         # Compile results
         result = self._compile_results()
@@ -116,6 +149,33 @@ class StartupValidationService:
             self._print_validation_results(result)
         
         return result
+    
+    def _validate_contract(self) -> None:
+        """Validate configuration against canonical contract."""
+        import os
+        
+        # Collect values from environment using contract definitions
+        config_values = {}
+        
+        for field_name, field_def in self._contract.get_all_fields().items():
+            env_var = field_def.get_env_var()
+            value = os.environ.get(env_var)
+            
+            if value is not None:
+                config_values[field_name] = value
+            elif field_def.default is not None:
+                config_values[field_name] = field_def.default
+        
+        # Validate required fields using contract
+        errors = self._contract.validate_required(config_values, check_broker=True)
+        
+        for error in errors:
+            self.issues.append(ValidationIssue(
+                level=ValidationLevel.ERROR,
+                message=error,
+                component="contract",
+                suggestion="Check environment variables or Azure configuration"
+            ))
     
     def _validate_schema(self) -> None:
         """Validate configuration schema."""
@@ -265,6 +325,63 @@ class StartupValidationService:
                 
         except Exception as e:
             logger.debug(f"Error validating webhook security: {e}")
+    
+    def _validate_production_safety(self) -> None:
+        """
+        Validate production safety settings.
+        
+        Checks for potentially dangerous configurations that could
+        lead to unexpected trading behavior or security issues.
+        """
+        import os
+        
+        try:
+            config_mgr = ConfigurationManager()
+            
+            # Check live vs paper trading consistency
+            alpaca_url = config_mgr.get_config("broker.alpaca.base_url", "")
+            if not alpaca_url:
+                alpaca_url = os.environ.get("ALPACA_BASE_URL", "")
+            
+            paper_mode = config_mgr.get_config("trading_paper_mode", True)
+            is_live_url = alpaca_url and "paper" not in alpaca_url.lower()
+            
+            if is_live_url and paper_mode:
+                self.issues.append(ValidationIssue(
+                    level=ValidationLevel.WARNING,
+                    message="Configuration mismatch: paper_mode=True but using live Alpaca URL",
+                    component="safety",
+                    suggestion="Set TRADING_PAPER_MODE=false for live trading, or use paper API URL"
+                ))
+            
+            # Check webhook security in live mode
+            security_enabled = config_mgr.get_config("webhook_security_enabled", True)
+            webhook_secret = config_mgr.get_secret("webhook-secret", "")
+            
+            if is_live_url and (not security_enabled or not webhook_secret):
+                self.issues.append(ValidationIssue(
+                    level=ValidationLevel.WARNING,
+                    message="Webhook security disabled in live trading mode",
+                    component="safety",
+                    suggestion="Enable webhook security: set WEBHOOK_SECURITY_ENABLED=true and WEBHOOK_SECRET"
+                ))
+            
+            # Check for Azure configuration in production
+            is_azure = bool(
+                os.environ.get("AZURE_KEYVAULT_URL") or 
+                os.environ.get("AZURE_APP_CONFIGURATION_ENDPOINT")
+            )
+            
+            if is_live_url and not is_azure:
+                self.issues.append(ValidationIssue(
+                    level=ValidationLevel.INFO,
+                    message="Live trading without Azure configuration services",
+                    component="safety",
+                    suggestion="Consider using Azure Key Vault and App Configuration for production"
+                ))
+            
+        except Exception as e:
+            logger.debug(f"Error validating production safety: {e}")
     
     def _compile_results(self) -> ValidationResult:
         """Compile validation results."""

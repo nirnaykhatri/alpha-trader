@@ -30,7 +30,6 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Switch } from '@/components/ui/switch'
 import { Slider } from '@/components/ui/slider'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -39,16 +38,14 @@ import {
   TrendingDown,
   Settings,
   DollarSign,
-  Percent,
-  Layers,
   AlertTriangle,
   Grid3X3,
-  ArrowDownCircle,
   RefreshCw,
   Repeat,
   ChevronLeft,
   ChevronRight,
   ExternalLink,
+  Layers,
 } from 'lucide-react'
 import type {
   BotType,
@@ -60,6 +57,7 @@ import type {
 import { DEFAULT_DCA_CONFIG } from '@/lib/types/bot'
 import { AssetClass } from '@/lib/types/asset'
 import { DCABotConfigDialog } from './dca-bot-config-dialog'
+import { DCAFuturesBotConfigDialog } from './dca-futures-bot-config-dialog'
 
 // ============================================================================
 // Types
@@ -114,42 +112,55 @@ const EXCHANGES = [
 ]
 
 const BOT_TYPE_OPTIONS: BotTypeOption[] = [
+  // ---- SPOT BOTS ----
   {
     value: 'grid',
     label: 'GRID Bot',
-    description: 'The proven grid strategy bot maximizes your returns on the slightest price changes.',
+    description: 'Profit from every price movement. Generate gains from small price fluctuations in sideways markets.',
     icon: <Grid3X3 className="h-5 w-5" />,
-    badges: [{ label: 'Sideways', variant: 'info' }],
+    badges: [{ label: 'Sideways', variant: 'info' }, { label: 'Spot', variant: 'success' }],
+    spotOnly: true,
   },
   {
     value: 'dca',
     label: 'DCA Bot',
-    description: 'The Dollar cost Averaging bot multiplies your gains and reduces risks in volatile markets.',
+    description: 'Low-risk earnings in volatile markets. Buy at multiple price levels to reduce average cost.',
     icon: <Layers className="h-5 w-5" />,
-    badges: [{ label: 'Grid included', variant: 'success' }],
+    badges: [{ label: 'Long', variant: 'success' }, { label: 'Spot', variant: 'success' }],
+    spotOnly: true,
   },
   {
-    value: 'combo',
-    label: 'COMBO Bot',
-    description: 'A combined DCA + Grid strategy that automatically opens positions and trades within a range.',
-    icon: <RefreshCw className="h-5 w-5" />,
-    badges: [{ label: 'Long', variant: 'success' }, { label: 'New', variant: 'info' }],
-  },
-  {
-    value: 'futures_dca',
+    value: 'btd',
     label: 'BTD Bot',
-    description: 'The Buy the Dip bot follows the falling price and allows you to earn on the downtrend.',
-    icon: <ArrowDownCircle className="h-5 w-5" />,
-    badges: [{ label: 'Short', variant: 'warning' }],
-    futuresOnly: true,
+    description: 'Rising yields from falling prices. Automatically buy the dip and profit when markets recover.',
+    icon: <TrendingDown className="h-5 w-5" />,
+    badges: [{ label: 'Dip Buyer', variant: 'warning' }, { label: 'Spot', variant: 'success' }],
+    spotOnly: true,
   },
   {
     value: 'spot_loop',
     label: 'LOOP Bot',
-    description: 'The LOOP bot amplifies earnings by reinvesting profits from trades within a defined price range.',
+    description: 'Profit both ways and amplify growth. Earn in both currencies and auto-reinvest for compounding gains.',
     icon: <Repeat className="h-5 w-5" />,
-    badges: [{ label: 'Grid included', variant: 'success' }, { label: 'Sideways', variant: 'info' }, { label: 'New', variant: 'info' }],
+    badges: [{ label: 'Sideways', variant: 'info' }, { label: 'Reinvest', variant: 'success' }, { label: 'Spot', variant: 'success' }],
     spotOnly: true,
+  },
+  // ---- FUTURES BOTS ----
+  {
+    value: 'futures_dca',
+    label: 'DCA Futures Bot',
+    description: 'Structured gains from futures volatility. Use DCA strategy with up to 10x leverage.',
+    icon: <Layers className="h-5 w-5" />,
+    badges: [{ label: 'Futures', variant: 'warning' }, { label: 'Leverage', variant: 'info' }],
+    futuresOnly: true,
+  },
+  {
+    value: 'futures_combo',
+    label: 'COMBO Bot',
+    description: 'High risks & returns in futures trading. Combines GRID + DCA strategies with up to 10x leverage.',
+    icon: <RefreshCw className="h-5 w-5" />,
+    badges: [{ label: 'Futures', variant: 'warning' }, { label: 'High Risk', variant: 'warning' }, { label: 'Leverage', variant: 'info' }],
+    futuresOnly: true,
   },
 ]
 
@@ -237,6 +248,7 @@ export function BotConfigDialog({
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [showDcaDialog, setShowDcaDialog] = useState(false)
+  const [showDcaFuturesDialog, setShowDcaFuturesDialog] = useState(false)
   
   const [form, setForm] = useState<FormState>({
     name: '',
@@ -266,15 +278,9 @@ export function BotConfigDialog({
     setError(null)
   }, [])
 
-  const updateDcaConfig = useCallback(<K extends keyof DCAConfig>(
-    key: K,
-    value: DCAConfig[K]
-  ) => {
-    setForm(prev => ({
-      ...prev,
-      dcaConfig: { ...prev.dcaConfig, [key]: value },
-    }))
-  }, [])
+  // Note: updateDcaConfig removed - DCA/Futures DCA bots route to
+  // specialized dialogs (DCABotConfigDialog, DCAFuturesBotConfigDialog)
+  // which have their own proper DCA configuration handling.
 
   const handleSelectBotType = (botType: BotType) => {
     updateForm('botType', botType)
@@ -289,6 +295,9 @@ export function BotConfigDialog({
     if (form.botType === 'dca') {
       onOpenChange(false) // Close the type selection dialog
       setShowDcaDialog(true) // Open DCA config dialog
+    } else if (form.botType === 'futures_dca') {
+      onOpenChange(false) // Close the type selection dialog
+      setShowDcaFuturesDialog(true) // Open DCA Futures config dialog
     } else {
       setStep(2) // For other bot types, proceed to generic config
     }
@@ -302,9 +311,23 @@ export function BotConfigDialog({
     }
   }
 
+  const handleDcaFuturesDialogClose = (open: boolean) => {
+    setShowDcaFuturesDialog(open)
+    if (!open) {
+      // Reset the main dialog state when DCA Futures dialog closes
+      setStep(1)
+    }
+  }
+
   const handleDcaSubmit = async (request: CreateBotRequest) => {
     await onSubmit(request)
     setShowDcaDialog(false)
+    setStep(1)
+  }
+
+  const handleDcaFuturesSubmit = async (request: CreateBotRequest) => {
+    await onSubmit(request)
+    setShowDcaFuturesDialog(false)
     setStep(1)
   }
 
@@ -320,6 +343,7 @@ export function BotConfigDialog({
       setStep(1)
       setError(null)
       setShowDcaDialog(false)
+      setShowDcaFuturesDialog(false)
       setForm({
         name: '',
         symbol: '',
@@ -390,6 +414,16 @@ export function BotConfigDialog({
         availableBalance={availableBalance}
       />
 
+      {/* DCA Futures Bot Configuration Dialog */}
+      <DCAFuturesBotConfigDialog
+        open={showDcaFuturesDialog}
+        onOpenChange={handleDcaFuturesDialogClose}
+        onSubmit={handleDcaFuturesSubmit}
+        initialSymbol={form.symbol}
+        initialExchange="binance_futures"
+        availableBalance={availableBalance}
+      />
+
       {/* Main Bot Type Selection Dialog */}
       <Dialog open={open} onOpenChange={handleClose}>
         <DialogContent className={`${step === 1 ? 'max-w-lg' : 'max-w-2xl'} max-h-[90vh] overflow-hidden flex flex-col`}>
@@ -436,9 +470,8 @@ export function BotConfigDialog({
             {/* Learn More Link */}
             <div className="mt-6 text-center">
               <a
-                href="#"
+                href="/strategies"
                 className="text-sm text-primary hover:underline inline-flex items-center gap-1"
-                onClick={(e) => e.preventDefault()}
               >
                 Learn more about different bot strategies
                 <ExternalLink className="h-3 w-3" />
@@ -609,138 +642,15 @@ export function BotConfigDialog({
               </CardContent>
             </Card>
 
-            {/* DCA Configuration */}
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Layers className="h-4 w-4" />
-                  DCA Settings
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label>Max DCA Layers</Label>
-                    <Select
-                      value={String(form.dcaConfig.maxLayers)}
-                      onValueChange={(v) => updateDcaConfig('maxLayers', parseInt(v))}
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {[1, 2, 3, 4, 5, 7, 10, 15].map((n) => (
-                          <SelectItem key={n} value={String(n)}>
-                            {n} layer{n > 1 ? 's' : ''}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Layer Multiplier</Label>
-                    <Input
-                      type="number"
-                      min="1"
-                      max="5"
-                      step="0.1"
-                      value={form.dcaConfig.layerMultiplier}
-                      onChange={(e) =>
-                        updateDcaConfig('layerMultiplier', parseFloat(e.target.value) || 1)
-                      }
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label className="flex items-center gap-1">
-                      <Percent className="h-3 w-3" />
-                      Take Profit %
-                    </Label>
-                    <Input
-                      type="number"
-                      min="0.5"
-                      max="50"
-                      step="0.5"
-                      value={form.dcaConfig.takeProfitPercent}
-                      onChange={(e) =>
-                        updateDcaConfig('takeProfitPercent', parseFloat(e.target.value) || 3)
-                      }
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label className="flex items-center gap-1">
-                      <Percent className="h-3 w-3" />
-                      Price Deviation %
-                    </Label>
-                    <Input
-                      type="number"
-                      min="0.5"
-                      max="20"
-                      step="0.5"
-                      value={form.dcaConfig.priceDeviationPercent}
-                      onChange={(e) =>
-                        updateDcaConfig('priceDeviationPercent', parseFloat(e.target.value) || 2)
-                      }
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <Label className="flex items-center gap-1">
-                    Stop Loss % (optional)
-                  </Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    max="50"
-                    step="0.5"
-                    placeholder="No stop loss"
-                    value={form.dcaConfig.stopLossPercent ?? ''}
-                    onChange={(e) =>
-                      updateDcaConfig(
-                        'stopLossPercent',
-                        e.target.value ? parseFloat(e.target.value) : null
-                      )
-                    }
-                  />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label>Martingale Mode</Label>
-                    <p className="text-xs text-muted-foreground">
-                      Increase order size after losses
-                    </p>
-                  </div>
-                  <Switch
-                    checked={form.dcaConfig.useMartingale}
-                    onCheckedChange={(checked) => updateDcaConfig('useMartingale', checked)}
-                  />
-                </div>
-
-                {form.dcaConfig.useMartingale && (
-                  <div className="space-y-2">
-                    <Label>Martingale Multiplier</Label>
-                    <Input
-                      type="number"
-                      min="1"
-                      max="3"
-                      step="0.1"
-                      value={form.dcaConfig.martingaleMultiplier}
-                      onChange={(e) =>
-                        updateDcaConfig('martingaleMultiplier', parseFloat(e.target.value) || 1)
-                      }
-                    />
-                    <div className="flex items-center gap-1 text-xs text-yellow-500">
-                      <AlertTriangle className="h-3 w-3" />
-                      Martingale increases risk significantly
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
+            {/* Note: DCA Settings removed from Step 2 
+                DCA and Futures DCA bots route to specialized dialogs:
+                - DCABotConfigDialog for DCA bots
+                - DCAFuturesBotConfigDialog for Futures DCA bots
+                
+                This Step 2 is only used for GRID, COMBO, and LOOP bots
+                which will have their own specialized configuration dialogs
+                implemented in the future.
+            */}
 
             {/* Error Display */}
             {error && (

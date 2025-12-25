@@ -43,11 +43,13 @@ import {
   XCircle,
   AlertCircle,
 } from 'lucide-react'
+import { BotState } from '@/lib/types/api-types'
 
-export type BotStatus = 'running' | 'paused' | 'stopped' | 'error' | 'starting' | 'stopping'
+/** UI-displayable bot states (subset of BotState used in controls) */
+type DisplayableBotState = 'running' | 'paused' | 'stopped' | 'error' | 'starting' | 'stopping' | 'created' | 'completed'
 
 interface BotStatusInfo {
-  status: BotStatus
+  status: DisplayableBotState
   uptime: string
   lastSignal: string
   activePositions: number
@@ -60,19 +62,25 @@ interface BotStatusInfo {
 }
 
 interface BotControlsProps {
-  status: BotStatusInfo
-  onStart: () => Promise<void>
-  onPause: () => Promise<void>
-  onStop: () => Promise<void>
-  onEmergencyStop: () => Promise<void>
-  onRestart: () => Promise<void>
+  status?: BotStatusInfo
+  onStart?: () => Promise<void>
+  onPause?: () => Promise<void>
+  onStop?: () => Promise<void>
+  onEmergencyStop?: () => Promise<void>
+  onRestart?: () => Promise<void>
   isLoading?: boolean
 }
 
 const statusConfig: Record<
-  BotStatus,
+  DisplayableBotState,
   { label: string; color: string; icon: React.ReactNode; bgColor: string }
 > = {
+  created: {
+    label: 'Created',
+    color: 'text-muted-foreground',
+    icon: <Clock className="h-5 w-5" />,
+    bgColor: 'bg-muted',
+  },
   running: {
     label: 'Running',
     color: 'text-profit',
@@ -85,11 +93,23 @@ const statusConfig: Record<
     icon: <Pause className="h-5 w-5" />,
     bgColor: 'bg-warning/10',
   },
+  stopping: {
+    label: 'Stopping...',
+    color: 'text-warning',
+    icon: <RefreshCw className="h-5 w-5 animate-spin" />,
+    bgColor: 'bg-warning/10',
+  },
   stopped: {
     label: 'Stopped',
     color: 'text-muted-foreground',
     icon: <Square className="h-5 w-5" />,
     bgColor: 'bg-muted',
+  },
+  completed: {
+    label: 'Completed',
+    color: 'text-profit',
+    icon: <CheckCircle className="h-5 w-5" />,
+    bgColor: 'bg-profit/10',
   },
   error: {
     label: 'Error',
@@ -103,18 +123,12 @@ const statusConfig: Record<
     icon: <RefreshCw className="h-5 w-5 animate-spin" />,
     bgColor: 'bg-primary/10',
   },
-  stopping: {
-    label: 'Stopping...',
-    color: 'text-warning',
-    icon: <RefreshCw className="h-5 w-5 animate-spin" />,
-    bgColor: 'bg-warning/10',
-  },
 }
 
 /**
  * Status Indicator Badge
  */
-function StatusBadge({ status }: { status: BotStatus }) {
+function StatusBadge({ status }: { status: DisplayableBotState }) {
   const config = statusConfig[status]
   return (
     <div className={cn('flex items-center gap-2 px-3 py-1.5 rounded-full', config.bgColor)}>
@@ -241,10 +255,33 @@ export function BotControls({
   onRestart,
   isLoading = false,
 }: BotControlsProps): JSX.Element {
-  const isRunning = status.status === 'running'
-  const isPaused = status.status === 'paused'
-  const isStopped = status.status === 'stopped'
-  const isTransitioning = status.status === 'starting' || status.status === 'stopping'
+  // No-op async function for optional handlers
+  const noop = async () => {}
+  
+  // Safe handlers with defaults
+  const handleStart = onStart ?? noop
+  const handlePause = onPause ?? noop
+  const handleStop = onStop ?? noop
+  const handleEmergencyStop = onEmergencyStop ?? noop
+  const handleRestart = onRestart ?? noop
+
+  // Default status if not provided (defensive coding)
+  const safeStatus: BotStatusInfo = status ?? {
+    status: 'stopped',
+    uptime: '0h 0m',
+    lastSignal: 'N/A',
+    activePositions: 0,
+    pendingOrders: 0,
+    todayTrades: 0,
+    todayPnL: 0,
+    isConnected: false,
+    signalrConnected: false,
+  }
+
+  const isRunning = safeStatus.status === 'running'
+  const isPaused = safeStatus.status === 'paused'
+  const isStopped = safeStatus.status === 'stopped'
+  const isTransitioning = safeStatus.status === 'starting' || safeStatus.status === 'stopping'
 
   return (
     <div className="space-y-6">
@@ -256,7 +293,7 @@ export function BotControls({
               <CardTitle className="text-2xl">Bot Status</CardTitle>
               <CardDescription>Monitor and control trading bot operations</CardDescription>
             </div>
-            <StatusBadge status={status.status} />
+            <StatusBadge status={safeStatus.status} />
           </div>
         </CardHeader>
         <CardContent className="space-y-6">
@@ -265,65 +302,65 @@ export function BotControls({
             <div
               className={cn(
                 'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm',
-                status.isConnected ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'
+                safeStatus.isConnected ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'
               )}
             >
-              {status.isConnected ? (
+              {safeStatus.isConnected ? (
                 <Wifi className="h-4 w-4" />
               ) : (
                 <WifiOff className="h-4 w-4" />
               )}
-              <span>{status.isConnected ? 'API Connected' : 'API Disconnected'}</span>
+              <span>{safeStatus.isConnected ? 'API Connected' : 'API Disconnected'}</span>
             </div>
             <div
               className={cn(
                 'flex items-center gap-2 px-3 py-1.5 rounded-full text-sm',
-                status.signalrConnected ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'
+                safeStatus.signalrConnected ? 'bg-profit/10 text-profit' : 'bg-loss/10 text-loss'
               )}
             >
               <Activity className="h-4 w-4" />
-              <span>{status.signalrConnected ? 'SignalR Live' : 'SignalR Offline'}</span>
+              <span>{safeStatus.signalrConnected ? 'SignalR Live' : 'SignalR Offline'}</span>
             </div>
           </div>
 
           {/* Metrics Grid */}
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-            <MetricCard label="Uptime" value={status.uptime} icon={<Clock className="h-4 w-4" />} />
+            <MetricCard label="Uptime" value={safeStatus.uptime} icon={<Clock className="h-4 w-4" />} />
             <MetricCard
               label="Last Signal"
-              value={status.lastSignal}
+              value={safeStatus.lastSignal}
               icon={<Zap className="h-4 w-4" />}
             />
             <MetricCard
               label="Positions"
-              value={status.activePositions}
+              value={safeStatus.activePositions}
               icon={<Activity className="h-4 w-4" />}
             />
             <MetricCard
               label="Pending"
-              value={status.pendingOrders}
+              value={safeStatus.pendingOrders}
               icon={<Clock className="h-4 w-4" />}
             />
             <MetricCard
               label="Today's Trades"
-              value={status.todayTrades}
+              value={safeStatus.todayTrades}
               icon={<Activity className="h-4 w-4" />}
             />
             <MetricCard
               label="Today's P&L"
-              value={`$${status.todayPnL.toLocaleString()}`}
+              value={`$${safeStatus.todayPnL.toLocaleString()}`}
               icon={<Activity className="h-4 w-4" />}
-              trend={status.todayPnL >= 0 ? 'up' : 'down'}
+              trend={safeStatus.todayPnL >= 0 ? 'up' : 'down'}
             />
           </div>
 
           {/* Error Message */}
-          {status.errorMessage && (
+          {safeStatus.errorMessage && (
             <div className="flex items-start gap-3 rounded-lg bg-loss/10 border border-loss/20 p-4">
               <AlertTriangle className="h-5 w-5 text-loss shrink-0 mt-0.5" />
               <div>
                 <p className="font-medium text-loss">Error Detected</p>
-                <p className="text-sm text-loss/80">{status.errorMessage}</p>
+                <p className="text-sm text-loss/80">{safeStatus.errorMessage}</p>
               </div>
             </div>
           )}
@@ -338,7 +375,7 @@ export function BotControls({
                 variant="success"
                 size="lg"
                 className="h-14 gap-2 min-w-[140px] shadow-lg"
-                onClick={onStart}
+                onClick={handleStart}
                 disabled={isLoading || isTransitioning}
               >
                 <Play className="h-5 w-5" />
@@ -352,7 +389,7 @@ export function BotControls({
                 variant="outline"
                 size="lg"
                 className="h-14 gap-2 min-w-[140px] border-warning text-warning hover:bg-warning hover:text-warning-foreground"
-                onClick={onPause}
+                onClick={handlePause}
                 disabled={isLoading || isTransitioning}
               >
                 <Pause className="h-5 w-5" />
@@ -366,7 +403,7 @@ export function BotControls({
                 variant="outline"
                 size="lg"
                 className="h-14 gap-2 min-w-[140px]"
-                onClick={onStop}
+                onClick={handleStop}
                 disabled={isLoading || isTransitioning}
               >
                 <Square className="h-5 w-5" />
@@ -380,7 +417,7 @@ export function BotControls({
                 variant="outline"
                 size="lg"
                 className="h-14 gap-2 min-w-[140px]"
-                onClick={onRestart}
+                onClick={handleRestart}
                 disabled={isLoading || isTransitioning}
               >
                 <RefreshCw className="h-5 w-5" />
@@ -391,7 +428,7 @@ export function BotControls({
             <div className="flex-1" />
 
             {/* Emergency Stop */}
-            <EmergencyStopDialog onConfirm={onEmergencyStop} isLoading={isLoading} />
+            <EmergencyStopDialog onConfirm={handleEmergencyStop} isLoading={isLoading} />
           </div>
         </CardContent>
       </Card>

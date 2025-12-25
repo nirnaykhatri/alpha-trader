@@ -42,7 +42,7 @@ from src.bot_engine.exceptions import (
 from src.bot_engine.bot_runner import BotRunner, BotRunnerContext
 
 if TYPE_CHECKING:
-    from src.database.bot_repository import BotRepository
+    from src.database.database_interface import IBotRepository
     from src.interfaces import IOrderManager, IMarketDataProvider, IRiskManager, IPositionManager
 
 logger = get_logger(__name__)
@@ -94,7 +94,7 @@ class BotEngineManager(IBotEngineManager):
         market_data_hub: IMarketDataHub,
         signal_router: ISignalRouter,
         broker_pool: IBrokerConnectionPool,
-        bot_repository: "BotRepository",
+        bot_repository: "IBotRepository",
         order_manager: Optional["IOrderManager"] = None,
         market_data: Optional["IMarketDataProvider"] = None,
         risk_manager: Optional["IRiskManager"] = None,

@@ -6,13 +6,14 @@ ITradingStrategy methods that placeholder strategies can inherit.
 
 This module contains:
 - BaseStrategy: Abstract base with common functionality
+- NotImplementedStrategy: Base for placeholder strategies
 - Placeholder implementations for strategies not yet implemented
 
 Author: Trading Bot Team
-Version: 1.0.0
+Version: 1.1.0
 """
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from typing import Dict, Optional, Any
 from src.interfaces import (
     IOrderManager, IMarketDataProvider, IRiskManager, ITradingStrategy,
@@ -31,16 +32,27 @@ class BaseStrategy(ITradingStrategy, ABC):
     Provides common functionality such as:
     - Configuration management
     - State tracking
-    - Default implementations for common methods
+    - Default implementations for lifecycle methods
     
-    Subclasses must implement:
-    - execute_tick()
-    - handle_signal()
-    - evaluate_entry()
-    - evaluate_exit()
-    - evaluate_dca()
-    - name property
-    - bot_type property
+    Subclasses MUST implement these abstract methods:
+    - evaluate_entry() - Evaluate new position entry
+    - evaluate_exit() - Evaluate position exit
+    - evaluate_dca() - Evaluate DCA/averaging opportunity
+    - execute_tick() - Main strategy tick execution
+    - handle_signal() - Handle incoming signals
+    
+    Subclasses SHOULD override these class attributes:
+    - STRATEGY_NAME: Unique strategy identifier
+    - BOT_TYPE: Corresponding BotType enum value
+    
+    Example:
+        class MyStrategy(BaseStrategy):
+            STRATEGY_NAME = "my_strategy"
+            BOT_TYPE = BotType.DCA
+            
+            async def evaluate_entry(self, signal, position, context):
+                # Implementation required
+                ...
     """
     
     # Override in subclasses
@@ -66,6 +78,9 @@ class BaseStrategy(ITradingStrategy, ABC):
             bot_config: Bot's configuration from database
             position_manager: Position tracking manager
             resilience_tracker: Resilience tracking service
+            
+        Raises:
+            ValueError: If bot_config is None
         """
         if bot_config is None:
             raise ValueError("bot_config is required - configuration must come from database")
@@ -98,6 +113,108 @@ class BaseStrategy(ITradingStrategy, ABC):
         self._is_initialized = False
         logger.info(f"✅ {self.name} strategy closed")
     
+    # =========================================================================
+    # Abstract Methods - MUST be implemented by subclasses
+    # =========================================================================
+    
+    @abstractmethod
+    async def evaluate_entry(
+        self,
+        signal: TradingSignal,
+        position: Optional[Position] = None,
+        market_context: Optional[Dict[str, Any]] = None
+    ) -> StrategyEvaluation:
+        """
+        Evaluate whether to enter a new position or add to existing.
+        
+        Args:
+            signal: The incoming trading signal
+            position: Existing position if any (for DCA evaluation)
+            market_context: Additional market data
+            
+        Returns:
+            StrategyEvaluation with entry decision and recommended size
+        """
+        pass
+    
+    @abstractmethod
+    async def evaluate_exit(
+        self,
+        position: Position,
+        current_price: float,
+        market_context: Optional[Dict[str, Any]] = None
+    ) -> StrategyEvaluation:
+        """
+        Evaluate whether to exit an existing position.
+        
+        Args:
+            position: The current position to evaluate
+            current_price: Current market price
+            market_context: Additional market data
+            
+        Returns:
+            StrategyEvaluation with exit decision
+        """
+        pass
+    
+    @abstractmethod
+    async def evaluate_dca(
+        self,
+        position: Position,
+        current_price: float,
+        market_context: Optional[Dict[str, Any]] = None
+    ) -> StrategyEvaluation:
+        """
+        Evaluate whether to execute a DCA (Dollar Cost Average) order.
+        
+        Args:
+            position: The current position to average into
+            current_price: Current market price
+            market_context: Additional market data
+            
+        Returns:
+            StrategyEvaluation with DCA decision
+        """
+        pass
+    
+    @abstractmethod
+    async def execute_tick(
+        self,
+        current_price: float,
+        market_context: Optional[Dict[str, Any]] = None
+    ) -> Optional[StrategyEvaluation]:
+        """
+        Execute one tick of the strategy's main loop.
+        
+        Args:
+            current_price: Current market price
+            market_context: Additional market data
+            
+        Returns:
+            StrategyEvaluation if action needed, None otherwise
+        """
+        pass
+    
+    @abstractmethod
+    async def handle_signal(
+        self,
+        signal: Dict[str, Any]
+    ) -> Optional[StrategyEvaluation]:
+        """
+        Handle an incoming trading signal.
+        
+        Args:
+            signal: Signal data with action, symbol, price, etc.
+            
+        Returns:
+            StrategyEvaluation if action should be taken
+        """
+        pass
+    
+    # =========================================================================
+    # Concrete Methods - Shared implementation for all strategies
+    # =========================================================================
+    
     def get_state(self) -> Dict[str, Any]:
         """Get the current state of the strategy."""
         return {
@@ -105,8 +222,8 @@ class BaseStrategy(ITradingStrategy, ABC):
             'bot_type': self.bot_type.value,
             'is_active': self.is_active,
             'is_initialized': self._is_initialized,
-            'implemented': False,  # Placeholder indicator
-            'message': f"{self.name} is not yet implemented"
+            'implemented': False,  # Override in concrete implementations
+            'message': f"{self.name} base state"
         }
     
     @property
