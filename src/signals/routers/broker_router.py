@@ -376,10 +376,12 @@ class BrokerRouter(BaseAdminRouter):
         Args:
             force_refresh: If True, reload from DB even if cache is loaded.
                          If False, skip reload if cache is already populated.
+        
+        Note: Always reloads from DB on each request to ensure fresh data.
+        The cache is primarily for within-request consistency, not cross-request caching.
         """
-        if self._cache_loaded and not force_refresh:
-            logger.debug("Using cached broker connections (skipping DB reload)")
-            return
+        # Always reload from DB to ensure we have the latest data
+        # The _cache_loaded flag is now only used within a single request context
         
         logger.info("Loading broker connections from DB...")
         await self._ensure_repo_initialized()
@@ -406,7 +408,7 @@ class BrokerRouter(BaseAdminRouter):
             
         except Exception as e:
             logger.error(f"Failed to load connections from DB: {e}", exc_info=True)
-            # Continue with empty cache - env brokers will still work
+            # Continue with empty cache
     
     def _doc_to_connection_info(
         self, 
@@ -490,11 +492,8 @@ class BrokerRouter(BaseAdminRouter):
             """List all broker connections."""
             await self.validate_auth(request, authorization)
             
-            # Load connections from database
+            # Load connections from database (all user-added brokers)
             await self._load_connections_from_db()
-            
-            # Sync any env-configured brokers (checks DB for disabled status)
-            await self._sync_configured_brokers()
             
             connections = list(self._connections_cache.values())
             
@@ -1060,14 +1059,11 @@ class BrokerRouter(BaseAdminRouter):
             request: Request,
             authorization: Optional[str] = Header(None),
         ) -> BrokersListResponse:
-            """Force refresh broker connections from DB and env configuration."""
+            """Force refresh broker connections from DB."""
             await self.validate_auth(request, authorization)
             
             # Force reload from database
             await self._load_connections_from_db(force_refresh=True)
-            
-            # Force re-sync env brokers (this will make broker API calls)
-            await self._sync_configured_brokers(force_refresh=True)
             
             connections = list(self._connections_cache.values())
             
