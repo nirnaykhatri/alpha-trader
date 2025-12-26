@@ -95,8 +95,26 @@ class PositionRouter(BaseAdminRouter):
             
             logger.info(f"📤 Admin close position request: {symbol}")
             
-            positions = await self._bot_instance.get_positions()
-            position = next((p for p in positions if p.symbol == symbol), None)
+            # Use broker subsystem to get positions (same source as listing)
+            broker_subsystem = getattr(self._bot_instance, 'broker_subsystem', None)
+            position = None
+            
+            if broker_subsystem and hasattr(broker_subsystem, 'account_providers'):
+                for broker_type, account_provider in broker_subsystem.account_providers.items():
+                    if hasattr(account_provider, 'get_positions'):
+                        try:
+                            broker_positions = await account_provider.get_positions()
+                            position = next((p for p in broker_positions if p.symbol == symbol), None)
+                            if position:
+                                logger.info(f"Found position {symbol} at broker {broker_type.value}")
+                                break
+                        except Exception as e:
+                            logger.warning(f"Error checking positions at {broker_type}: {e}")
+            
+            # Fallback to legacy bot method if broker subsystem unavailable
+            if not position:
+                positions = await self._bot_instance.get_positions()
+                position = next((p for p in positions if p.symbol == symbol), None)
             
             if not position:
                 raise HTTPException(
@@ -159,7 +177,22 @@ class PositionRouter(BaseAdminRouter):
             
             logger.warning("🚨 Admin close ALL positions request")
             
-            positions = await self._bot_instance.get_positions()
+            # Use broker subsystem to get positions (same source as listing)
+            positions = []
+            broker_subsystem = getattr(self._bot_instance, 'broker_subsystem', None)
+            
+            if broker_subsystem and hasattr(broker_subsystem, 'account_providers'):
+                for broker_type, account_provider in broker_subsystem.account_providers.items():
+                    if hasattr(account_provider, 'get_positions'):
+                        try:
+                            broker_positions = await account_provider.get_positions()
+                            positions.extend(broker_positions)
+                        except Exception as e:
+                            logger.error(f"Error fetching positions from {broker_type}: {e}")
+            
+            # Fallback to legacy bot method if broker subsystem unavailable
+            if not positions:
+                positions = await self._bot_instance.get_positions()
             
             if not positions:
                 return JSONResponse(content={
@@ -213,24 +246,50 @@ class PositionRouter(BaseAdminRouter):
             request: Request,
             authorization: Optional[str] = Header(None)
         ):
-            """Get all current positions."""
+            """
+            Get all current positions from the connected broker(s).
+            
+            Returns actual broker positions (e.g., from Alpaca), not just bot-managed positions.
+            This ensures users see all their holdings, including positions opened outside the bot.
+            """
             await self.validate_auth(request, authorization)
             
             if not self._bot_instance:
                 return JSONResponse(content={"status": "success", "positions": []})
             
-            positions = await self._bot_instance.get_positions()
-            positions_data = [
-                {
-                    "symbol": p.symbol,
-                    "quantity": float(p.quantity),
-                    "avg_price": float(p.avg_price),
-                    "current_price": float(p.current_price) if hasattr(p, 'current_price') else None,
-                    "unrealized_pnl": float(p.unrealized_pnl) if hasattr(p, 'unrealized_pnl') else None,
-                    "side": "long" if p.quantity > 0 else "short"
-                }
-                for p in positions
-            ]
+            # Fetch positions directly from broker subsystem
+            broker_subsystem = getattr(self._bot_instance, 'broker_subsystem', None)
+            positions_data = []
+            
+            if broker_subsystem and hasattr(broker_subsystem, 'account_providers'):
+                for broker_type, account_provider in broker_subsystem.account_providers.items():
+                    if hasattr(account_provider, 'get_positions'):
+                        try:
+                            broker_positions = await account_provider.get_positions()
+                            logger.info(f"📊 Fetched {len(broker_positions)} positions from {broker_type.value}")
+                            
+                            for p in broker_positions:
+                                qty = float(p.quantity)
+                                avg_price = float(p.avg_price)
+                                current_price = float(p.current_price) if hasattr(p, 'current_price') else avg_price
+                                unrealized_pnl = float(p.unrealized_pnl) if hasattr(p, 'unrealized_pnl') else 0.0
+                                cost_basis = abs(qty) * avg_price
+                                unrealized_pnl_pct = (unrealized_pnl / cost_basis * 100) if cost_basis > 0 else 0.0
+                                market_value = abs(qty) * current_price
+                                
+                                positions_data.append({
+                                    "symbol": p.symbol,
+                                    "quantity": abs(qty),  # Always absolute, use side for direction
+                                    "avg_price": avg_price,
+                                    "current_price": current_price,
+                                    "market_value": market_value,
+                                    "unrealized_pnl": unrealized_pnl,
+                                    "unrealized_pnl_pct": unrealized_pnl_pct,
+                                    "side": "long" if qty > 0 else "short",
+                                    "broker": broker_type.value if hasattr(broker_type, 'value') else str(broker_type)
+                                })
+                        except Exception as e:
+                            logger.error(f"Error fetching positions from {broker_type}: {e}")
             
             return JSONResponse(content={
                 "status": "success",

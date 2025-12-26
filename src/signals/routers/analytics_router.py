@@ -220,3 +220,119 @@ class AnalyticsRouter(BaseAdminRouter):
                 symbol=symbol
             )
             return JSONResponse(content={"pnl": pnl})
+        
+        @self.router.get("/portfolio")
+        @handle_route_errors(operation_name="get_portfolio")
+        async def get_portfolio(
+            request: Request,
+            authorization: Optional[str] = Header(None)
+        ):
+            """
+            Get comprehensive portfolio data including positions, allocations, and summary.
+            
+            Fetches positions directly from the connected broker (e.g., Alpaca) rather than
+            the bot's internal position manager. This shows ALL positions in the broker account,
+            not just those managed by the DCA strategy.
+            
+            Returns data matching the frontend PortfolioData interface:
+            - positions: List of asset positions with full details
+            - allocations: Asset allocations by category
+            - summary: Portfolio value, P&L, and buying power
+            """
+            await self.validate_auth(request, authorization)
+            
+            positions_data = []
+            total_value = 0.0
+            total_unrealized_pnl = 0.0
+            total_cost = 0.0
+            buying_power = 0.0
+            equity = 0.0
+            
+            if self._bot_instance:
+                try:
+                    # Fetch positions directly from broker subsystem's account providers
+                    # This gets ALL positions from the broker (e.g., Alpaca), not just bot-managed ones
+                    broker_subsystem = getattr(self._bot_instance, 'broker_subsystem', None)
+                    
+                    if broker_subsystem and hasattr(broker_subsystem, 'account_providers'):
+                        # Get positions from all connected brokers
+                        for broker_type, account_provider in broker_subsystem.account_providers.items():
+                            if hasattr(account_provider, 'get_positions'):
+                                broker_positions = await account_provider.get_positions()
+                                logger.info(f"📊 Fetched {len(broker_positions)} positions from {broker_type.value}")
+                                
+                                for p in broker_positions:
+                                    qty = float(p.quantity)
+                                    avg_price = float(p.avg_price)
+                                    current_price = float(p.current_price) if hasattr(p, 'current_price') else avg_price
+                                    market_value = abs(qty) * current_price
+                                    cost_basis = abs(qty) * avg_price
+                                    unrealized_pnl = float(p.unrealized_pnl) if hasattr(p, 'unrealized_pnl') else 0.0
+                                    pnl_percent = (unrealized_pnl / cost_basis * 100) if cost_basis > 0 else 0.0
+                                    
+                                    positions_data.append({
+                                        "symbol": p.symbol,
+                                        "quantity": abs(qty),  # Always absolute, use side for direction
+                                        "avgPrice": avg_price,
+                                        "currentPrice": current_price,
+                                        "marketValue": market_value,
+                                        "costBasis": cost_basis,
+                                        "unrealizedPnL": unrealized_pnl,
+                                        "unrealizedPnLPercent": pnl_percent,
+                                        "dayPnL": 0.0,  # Would need historical data
+                                        "dayPnLPercent": 0.0,
+                                        "side": "long" if qty > 0 else "short",
+                                        "assetClass": "stock",  # Default, could be enhanced
+                                        "broker": broker_type.value if hasattr(broker_type, 'value') else str(broker_type),
+                                    })
+                                    
+                                    total_value += market_value
+                                    total_unrealized_pnl += unrealized_pnl
+                                    total_cost += cost_basis
+                    
+                        # Get account info for buying power and equity from primary account provider
+                        if broker_subsystem.primary_account_provider:
+                            try:
+                                buying_power = await broker_subsystem.primary_account_provider.get_buying_power()
+                                equity = await broker_subsystem.primary_account_provider.get_account_value()
+                                logger.info(f"📊 Account: equity=${equity:,.2f}, buying_power=${buying_power:,.2f}")
+                            except Exception as e:
+                                logger.warning(f"Could not fetch account info: {e}")
+                        
+                except Exception as e:
+                    logger.error(f"Error fetching portfolio from broker: {e}")
+            
+            # Calculate allocations by asset class (simple grouping)
+            allocations = []
+            if positions_data:
+                # Group by asset class
+                by_class: Dict[str, float] = {}
+                for pos in positions_data:
+                    asset_class = pos.get("assetClass", "stock")
+                    by_class[asset_class] = by_class.get(asset_class, 0) + pos["marketValue"]
+                
+                for asset_class, value in by_class.items():
+                    allocations.append({
+                        "assetClass": asset_class,
+                        "value": value,
+                        "percentage": (value / total_value * 100) if total_value > 0 else 0
+                    })
+            
+            # Calculate summary
+            total_pnl_percent = (total_unrealized_pnl / total_cost * 100) if total_cost > 0 else 0.0
+            
+            return JSONResponse(content={
+                "status": "success",
+                "data": {
+                    "positions": positions_data,
+                    "allocations": allocations,
+                    "summary": {
+                        "totalValue": total_value or equity,
+                        "totalPnL": total_unrealized_pnl,
+                        "totalPnLPercent": total_pnl_percent,
+                        "dayPnL": 0.0,  # Would need historical data
+                        "dayPnLPercent": 0.0,
+                        "buyingPower": buying_power
+                    }
+                }
+            })
