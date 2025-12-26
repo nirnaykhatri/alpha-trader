@@ -9,6 +9,7 @@ Also provides TaskRegistry for structured concurrency and proper task lifecycle 
 
 from src.core.configuration import ConfigurationManager, create_configuration_manager
 from src.core.logging_config import setup_logging, get_logger
+from src.core.startup_mode import StartupMode
 
 # Azure-native async configuration (preferred for new code)
 from src.config.azure_config_provider import (
@@ -40,6 +41,9 @@ __all__ = [
     # Logging
     "setup_logging",
     "get_logger",
+    
+    # Startup mode policy (single source of truth)
+    "StartupMode",
     
     # Azure-native async configuration
     "AzureConfigProvider",

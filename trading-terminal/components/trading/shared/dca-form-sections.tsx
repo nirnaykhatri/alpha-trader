@@ -119,6 +119,8 @@ export interface AveragingOrdersSectionProps {
   isShort?: boolean
   /** Asset class - determines if fractional units are allowed */
   assetClass?: 'crypto' | 'stock' | 'forex' | 'commodity' | 'etf' | 'index'
+  /** Trading symbol (e.g., 'AAPL', 'BTC/USD') - required for API preview */
+  symbol: string
 }
 
 /**
@@ -136,12 +138,14 @@ export function AveragingOrdersSection({
   baseOrderAmount = 0,
   isShort = false,
   assetClass = 'crypto',
+  symbol,
 }: AveragingOrdersSectionProps) {
-  // Handler to fix invalid configuration
-  const handleFixConfig = React.useCallback((newOrdersCount: number) => {
+  // Handler to fix invalid configuration using API-provided suggested fix
+  const handleFixConfig = React.useCallback((newOrdersCount: number, newStepPercent: number) => {
     onConfigUpdate('averagingOrders', {
       ...dcaConfig.averagingOrders!,
       ordersCount: newOrdersCount,
+      stepPercent: newStepPercent,
     })
   }, [dcaConfig.averagingOrders, onConfigUpdate])
   return (
@@ -248,6 +252,7 @@ export function AveragingOrdersSection({
 
         {/* DCA Order Preview Table */}
         <DCAOrderPreview
+          symbol={symbol}
           baseOrderAmount={baseOrderAmount}
           averagingOrdersAmount={dcaConfig.averagingOrders?.totalAmount || 0}
           ordersCount={dcaConfig.averagingOrders?.ordersCount || 4}

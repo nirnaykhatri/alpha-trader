@@ -714,6 +714,7 @@ export function DCAFuturesBotConfigDialog({
             baseOrderAmount={form.investmentAmount}
             isShort={form.strategy === 'short'}
             assetClass={form.assetClass}
+            symbol={form.symbol}
           />
 
           <Separator />

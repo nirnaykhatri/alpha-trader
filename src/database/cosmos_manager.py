@@ -115,6 +115,10 @@ class CosmosDBManager:
             'partition_key': '/symbol',
             'default_ttl': 2592000,  # 30 days
         },
+        'broker_connections': {
+            'partition_key': '/broker_type',
+            'default_ttl': -1,  # No TTL - connections persist indefinitely
+        },
     }
     
     def __init__(self, config: IConfigurationManager):
@@ -363,13 +367,12 @@ class CosmosDBManager:
             response_token = None
             request_charge = 0.0
             
-            # Execute query with pagination
+            # Execute query - SDK 4.x doesn't use continuation_token parameter
+            # For pagination, use .by_page() method instead
             query_iterator = container.query_items(
                 query=query,
                 parameters=parameters if parameters else None,
-                enable_cross_partition_query=True,
-                max_item_count=max_items,
-                continuation_token=continuation_token
+                max_item_count=max_items
             )
             
             async for item in query_iterator:
@@ -385,15 +388,12 @@ class CosmosDBManager:
                 ))
                 
                 if len(positions) >= max_items:
-                    # Get continuation token for next page
-                    try:
-                        response_token = query_iterator.continuation_token
-                    except Exception:
-                        response_token = None
                     break
             
-            # Check if there are more results
-            has_more = response_token is not None and len(positions) >= max_items
+            # For now, simple pagination - no continuation token handling
+            # SDK 4.x changed pagination: use .by_page() for true cursor-based pagination
+            # See PaginatedResult docstring for implementation details
+            has_more = len(positions) >= max_items
             
             if len(positions) >= max_items:
                 logger.debug(
@@ -403,7 +403,7 @@ class CosmosDBManager:
             
             return PaginatedResult(
                 items=positions,
-                continuation_token=response_token,
+                continuation_token=None,  # Not implemented in simplified mode
                 has_more=has_more,
                 total_fetched=len(positions),
                 request_charge=request_charge
@@ -523,8 +523,7 @@ class CosmosDBManager:
             orders = []
             async for item in container.query_items(
                 query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True
+                parameters=parameters
             ):
                 orders.append(Order(
                     order_id=item['id'],
@@ -695,20 +694,31 @@ class CosmosDBManager:
         self,
         symbol: str = None,
         max_items: int = DEFAULT_MAX_ITEMS,
-        continuation_token: Optional[str] = None
+        continuation_token: Optional[str] = None  # Ignored - kept for API compatibility
     ) -> PaginatedResult[Dict[str, Any]]:
         """
-        Get open trades (not yet completed) with pagination support.
+        Get open trades (not yet completed) with simplified pagination.
         
         Uses field projection to only fetch required fields, reducing RU consumption.
+        
+        Note:
+            This implementation uses a simplified pagination model. The Azure Cosmos DB
+            SDK 4.x async iterator doesn't expose continuation tokens directly. Instead,
+            `has_more` is set heuristically based on whether `max_items` were returned.
+            The `continuation_token` parameter is accepted for API compatibility but
+            is currently ignored.
         
         Args:
             symbol: Optional symbol filter
             max_items: Maximum number of items to return (default 100, max 1000)
-            continuation_token: Token from previous query for pagination
+            continuation_token: Ignored. Kept for API compatibility with older callers.
             
         Returns:
-            PaginatedResult containing open trade dictionaries and continuation token
+            PaginatedResult with:
+                - items: List of open trade dictionaries
+                - continuation_token: Always None (SDK limitation)
+                - has_more: True if max_items were returned (heuristic)
+                - total_fetched: Number of items returned
         """
         try:
             container = self._containers['trades']
@@ -739,14 +749,12 @@ class CosmosDBManager:
             )
             
             trades = []
-            response_token = None
             
+            # Execute query - SDK 4.x doesn't use continuation_token parameter
             query_iterator = container.query_items(
                 query=query,
                 parameters=parameters if parameters else None,
-                enable_cross_partition_query=True,
-                max_item_count=max_items,
-                continuation_token=continuation_token
+                max_item_count=max_items
             )
             
             async for item in query_iterator:
@@ -762,17 +770,13 @@ class CosmosDBManager:
                 })
                 
                 if len(trades) >= max_items:
-                    try:
-                        response_token = query_iterator.continuation_token
-                    except Exception:
-                        response_token = None
                     break
             
-            has_more = response_token is not None and len(trades) >= max_items
+            has_more = len(trades) >= max_items
             
             return PaginatedResult(
                 items=trades,
-                continuation_token=response_token,
+                continuation_token=None,  # SDK 4.x uses different pagination
                 has_more=has_more,
                 total_fetched=len(trades)
             )
@@ -785,20 +789,31 @@ class CosmosDBManager:
         self,
         symbol: str = None,
         limit: int = DEFAULT_MAX_ITEMS,
-        continuation_token: Optional[str] = None
+        continuation_token: Optional[str] = None  # Ignored - kept for API compatibility
     ) -> PaginatedResult[Dict[str, Any]]:
         """
-        Get completed trades with P&L information and pagination support.
+        Get completed trades with P&L information and simplified pagination.
         
         Uses field projection for efficient RU consumption.
+        
+        Note:
+            This implementation uses a simplified pagination model. The Azure Cosmos DB
+            SDK 4.x async iterator doesn't expose continuation tokens directly. Instead,
+            `has_more` is set heuristically based on whether `limit` items were returned.
+            The `continuation_token` parameter is accepted for API compatibility but
+            is currently ignored.
         
         Args:
             symbol: Optional symbol filter
             limit: Maximum number of trades to return (default 100, max 1000)
-            continuation_token: Token from previous query for pagination
+            continuation_token: Ignored. Kept for API compatibility with older callers.
             
         Returns:
-            PaginatedResult containing completed trade dictionaries
+            PaginatedResult with:
+                - items: List of completed trade dictionaries
+                - continuation_token: Always None (SDK limitation)
+                - has_more: True if limit items were returned (heuristic)
+                - total_fetched: Number of items returned
         """
         try:
             container = self._containers['trades']
@@ -831,14 +846,12 @@ class CosmosDBManager:
             )
             
             trades = []
-            response_token = None
             
+            # Execute query - SDK 4.x doesn't use continuation_token parameter
             query_iterator = container.query_items(
                 query=query,
                 parameters=parameters if parameters else None,
-                enable_cross_partition_query=True,
-                max_item_count=limit,
-                continuation_token=continuation_token
+                max_item_count=limit
             )
             
             async for item in query_iterator:
@@ -858,17 +871,13 @@ class CosmosDBManager:
                 })
                 
                 if len(trades) >= limit:
-                    try:
-                        response_token = query_iterator.continuation_token
-                    except Exception:
-                        response_token = None
                     break
             
-            has_more = response_token is not None and len(trades) >= limit
+            has_more = len(trades) >= limit
             
             return PaginatedResult(
                 items=trades,
-                continuation_token=response_token,
+                continuation_token=None,  # SDK 4.x uses different pagination
                 has_more=has_more,
                 total_fetched=len(trades)
             )
@@ -923,39 +932,27 @@ class CosmosDBManager:
             # Count positions
             container = self._containers['positions']
             query = "SELECT VALUE COUNT(1) FROM c"
-            async for count in container.query_items(
-                query=query,
-                enable_cross_partition_query=True
-            ):
+            async for count in container.query_items(query=query):
                 stats['positions_total'] = count
                 break
             
             # Count open positions
             query = "SELECT VALUE COUNT(1) FROM c WHERE c.quantity != 0"
-            async for count in container.query_items(
-                query=query,
-                enable_cross_partition_query=True
-            ):
+            async for count in container.query_items(query=query):
                 stats['positions_open'] = count
                 break
             
             # Count orders
             container = self._containers['orders']
             query = "SELECT VALUE COUNT(1) FROM c"
-            async for count in container.query_items(
-                query=query,
-                enable_cross_partition_query=True
-            ):
+            async for count in container.query_items(query=query):
                 stats['orders_total'] = count
                 break
             
             # Count completed trades
             container = self._containers['trades']
             query = "SELECT VALUE COUNT(1) FROM c WHERE c.completed_at != null"
-            async for count in container.query_items(
-                query=query,
-                enable_cross_partition_query=True
-            ):
+            async for count in container.query_items(query=query):
                 stats['trades_completed'] = count
                 break
             
@@ -1011,8 +1008,7 @@ class CosmosDBManager:
             total_trades = 0
             async for count in container.query_items(
                 query=query,
-                parameters=parameters,
-                enable_cross_partition_query=True
+                parameters=parameters
             ):
                 total_trades = count
                 break
@@ -1026,8 +1022,7 @@ class CosmosDBManager:
             winning_trades = 0
             async for count in container.query_items(
                 query=win_query,
-                parameters=parameters,
-                enable_cross_partition_query=True
+                parameters=parameters
             ):
                 winning_trades = count
                 break

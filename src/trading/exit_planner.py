@@ -12,6 +12,21 @@ This service handles:
 - Order side determination based on position direction
 - Price rounding for broker compliance
 
+Fallback Behavior:
+    When the configured order type is LIMIT but no market data is available
+    (i.e., no IMarketDataProvider was injected and no current_price was passed),
+    the service automatically falls back to a MARKET order. This ensures positions
+    can always be exited even when price data is unavailable, prioritizing 
+    execution over price optimization.
+    
+    This fallback is logged as a warning for operational visibility:
+        "No market data provider available for limit order on {symbol}. 
+         Falling back to MARKET order."
+    
+    To guarantee limit orders, ensure either:
+    1. A valid IMarketDataProvider is passed to the constructor, OR
+    2. A current_price is explicitly passed to plan_exit()
+
 Thread-Safety: This service is stateless and safe for concurrent use.
 """
 
@@ -77,14 +92,14 @@ class ExitPlanner:
     def __init__(
         self,
         config: IConfigurationManager,
-        market_data: IMarketDataProvider
+        market_data: Optional[IMarketDataProvider]
     ) -> None:
         """
         Initialize the exit planner.
         
         Args:
             config: Configuration provider for trading settings
-            market_data: Market data provider for price lookups
+            market_data: Market data provider for price lookups (optional, can be None if no broker configured)
         """
         self._config = config
         self._market_data = market_data
@@ -130,8 +145,18 @@ class ExitPlanner:
         price = None
         if order_type == OrderType.LIMIT:
             if current_price is None:
-                current_price = await self._market_data.get_current_price(position.symbol)
-            price = self._calculate_limit_price(current_price, order_side)
+                if self._market_data is None:
+                    # Cannot place limit order without price data - fall back to market order
+                    logger.warning(
+                        f"No market data provider available for limit order on {position.symbol}. "
+                        f"Falling back to MARKET order."
+                    )
+                    order_type = OrderType.MARKET
+                else:
+                    current_price = await self._market_data.get_current_price(position.symbol)
+                    price = self._calculate_limit_price(current_price, order_side)
+            else:
+                price = self._calculate_limit_price(current_price, order_side)
         
         plan = ExitOrderPlan(
             symbol=position.symbol,

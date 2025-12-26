@@ -28,6 +28,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Protocol
 
 from src.interfaces import IPositionManager, IMarketDataProvider
+from src.database.pagination import extract_items
 
 logger = logging.getLogger(__name__)
 
@@ -229,10 +230,14 @@ class TradingSummaryService:
         try:
             # Get raw data
             positions = await self._position_manager.get_all_positions()
-            open_trades = await self._database.get_open_trades()
-            completed_trades = await self._database.get_completed_trades(
+            open_trades_result = await self._database.get_open_trades()
+            completed_trades_result = await self._database.get_completed_trades(
                 limit=recent_trades_limit
             )
+            
+            # Extract items from PaginatedResult objects using helper
+            open_trades = extract_items(open_trades_result)
+            completed_trades = extract_items(completed_trades_result)
             
             # Calculate performance metrics
             performance = self._calculate_performance_metrics(completed_trades)

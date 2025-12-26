@@ -25,6 +25,7 @@ from src.signals.routers.config_router import ConfigRouter
 from src.signals.routers.fund_router import FundRouter
 from src.signals.routers.analytics_router import AnalyticsRouter
 from src.signals.routers.dca_preview_router import DCAPreviewRouter
+from src.signals.routers.broker_router import BrokerRouter
 
 # Service interfaces
 try:
@@ -166,6 +167,12 @@ class AdminRouterComposite:
         # DCA Preview router (stateless, no services needed)
         self.dca_preview_router = DCAPreviewRouter()
         
+        # Broker management router (for adding/removing brokers via UI)
+        self.broker_router = BrokerRouter(
+            auth_service=auth_service,
+            bot_instance=bot_instance
+        )
+        
         # Create combined router
         self.router = APIRouter()
         self._combine_routers()
@@ -183,6 +190,7 @@ class AdminRouterComposite:
             self.fund_router,
             self.analytics_router,
             self.dca_preview_router,
+            self.broker_router,
         ]
         
         for sub_router in sub_routers:

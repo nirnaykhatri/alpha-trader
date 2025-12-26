@@ -14,8 +14,19 @@ USAGE:
         sys.exit(1)
 
 This module integrates with:
+- src/core/startup_mode.py (canonical startup mode policy)
 - src/config/config_contract.py (canonical field definitions)
 - src/config/config_validation_service.py (validation logic)
+
+STARTUP MODES:
+    See src/core/startup_mode.py for the canonical definition.
+    The bot supports two startup modes controlled by STARTUP_MODE environment variable:
+    
+    - "headless" (default for production):
+        Requires broker credentials at startup. Fail-fast if no broker configured.
+        
+    - "ui-config" (default for development):
+        Broker credentials are optional at startup. Users can add brokers via web UI.
 """
 
 import logging
@@ -27,6 +38,9 @@ from src.core import ConfigurationManager
 from src.config.config_schema import ConfigValidator, ValidationSeverity
 from src.config.config_contract import ConfigContract
 from src.exceptions import ConfigurationException
+
+# Import StartupMode from its canonical location and re-export for backward compatibility
+from src.core.startup_mode import StartupMode
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +90,10 @@ class StartupValidationService:
     - Warnings are logged but don't block startup
     - Info messages provide operational context
     
+    Startup Modes:
+        - HEADLESS: Requires broker at startup (production)
+        - UI_CONFIG: Broker optional (development/demo)
+    
     Example:
         validator = StartupValidationService()
         result = validator.validate()
@@ -103,6 +121,7 @@ class StartupValidationService:
             )
         self.issues: List[ValidationIssue] = []
         self._contract = ConfigContract
+        self._startup_mode = StartupMode.from_env()
     
     def validate(self, verbose: bool = True) -> ValidationResult:
         """
@@ -167,7 +186,11 @@ class StartupValidationService:
                 config_values[field_name] = field_def.default
         
         # Validate required fields using contract
-        errors = self._contract.validate_required(config_values, check_broker=True)
+        # Broker requirement depends on startup mode:
+        #   - HEADLESS: broker required (production)
+        #   - UI_CONFIG: broker optional (development)
+        check_broker = self._startup_mode.requires_broker_at_startup
+        errors = self._contract.validate_required(config_values, check_broker=check_broker)
         
         for error in errors:
             self.issues.append(ValidationIssue(
@@ -237,60 +260,76 @@ class StartupValidationService:
             ))
     
     def _validate_api_credentials(self) -> None:
-        """Validate API credentials."""
+        """
+        Validate API credentials based on startup mode.
+        
+        In HEADLESS mode: Broker credentials are REQUIRED - blocks startup if missing.
+        In UI_CONFIG mode: Broker credentials are optional - users can add via UI.
+        """
         try:
             config_mgr = ConfigurationManager()  # Singleton, loads from config/
             
             # Alpaca API key
             api_key = config_mgr.get_config("api.alpaca.api_key", "")
-            if not api_key:
-                self.issues.append(ValidationIssue(
-                    level=ValidationLevel.ERROR,
-                    message="Alpaca API key is missing",
-                    component="credentials",
-                    suggestion="Get API keys from https://app.alpaca.markets/"
-                ))
-            elif len(api_key) < 10:
-                self.issues.append(ValidationIssue(
-                    level=ValidationLevel.WARNING,
-                    message="Alpaca API key looks too short",
-                    component="credentials"
-                ))
-            
-            # Alpaca secret key
             secret_key = config_mgr.get_config("api.alpaca.secret_key", "")
-            if not secret_key:
-                self.issues.append(ValidationIssue(
-                    level=ValidationLevel.ERROR,
-                    message="Alpaca secret key is missing",
-                    component="credentials",
-                    suggestion="Get API keys from https://app.alpaca.markets/"
-                ))
-            elif len(secret_key) < 20:
-                self.issues.append(ValidationIssue(
-                    level=ValidationLevel.WARNING,
-                    message="Alpaca secret key looks too short",
-                    component="credentials"
-                ))
             
-            # Check if paper trading
-            base_url = config_mgr.get_config("api.alpaca.base_url", "")
-            if "paper" in base_url:
-                self.issues.append(ValidationIssue(
-                    level=ValidationLevel.INFO,
-                    message="Using paper trading environment",
-                    component="credentials"
-                ))
+            # Tastytrade check
+            tastytrade_token = config_mgr.get_config("api.tastytrade.refresh_token", "")
+            
+            has_broker = bool((api_key and secret_key) or tastytrade_token)
+            
+            if has_broker:
+                # Alpaca is pre-configured
+                if api_key and secret_key:
+                    if len(api_key) < 10 or len(secret_key) < 20:
+                        self.issues.append(ValidationIssue(
+                            level=ValidationLevel.WARNING,
+                            message="Alpaca credentials look too short - verify they are correct",
+                            component="broker"
+                        ))
+                    else:
+                        # Check if paper trading
+                        base_url = config_mgr.get_config("api.alpaca.base_url", "")
+                        if "paper" in base_url:
+                            self.issues.append(ValidationIssue(
+                                level=ValidationLevel.INFO,
+                                message="Alpaca broker pre-configured (paper trading)",
+                                component="broker"
+                            ))
+                        else:
+                            self.issues.append(ValidationIssue(
+                                level=ValidationLevel.WARNING,
+                                message="Alpaca broker pre-configured (LIVE trading mode)",
+                                component="broker",
+                                suggestion="Use paper trading for testing"
+                            ))
+                            
+                if tastytrade_token:
+                    self.issues.append(ValidationIssue(
+                        level=ValidationLevel.INFO,
+                        message="Tastytrade broker pre-configured",
+                        component="broker"
+                    ))
             else:
-                self.issues.append(ValidationIssue(
-                    level=ValidationLevel.WARNING,
-                    message="Live trading mode detected - ensure you intend to use real funds",
-                    component="credentials",
-                    suggestion="Use paper trading for testing"
-                ))
+                # No broker pre-configured
+                if self._startup_mode == StartupMode.HEADLESS:
+                    # HEADLESS mode: broker is required - fail-fast
+                    self.issues.append(ValidationIssue(
+                        level=ValidationLevel.ERROR,
+                        message="No broker configured (STARTUP_MODE=headless requires broker credentials)",
+                        component="broker",
+                        suggestion="Set ALPACA_API_KEY and ALPACA_SECRET_KEY, or set STARTUP_MODE=ui-config"
+                    ))
+                else:
+                    # UI_CONFIG mode: broker is optional
+                    self.issues.append(ValidationIssue(
+                        level=ValidationLevel.INFO,
+                        message=f"No broker pre-configured (STARTUP_MODE={self._startup_mode.value}) - add brokers via web UI at /brokers",
+                        component="broker"
+                    ))
                 
         except Exception as e:
-            logger.debug(f"Error validating credentials: {e}")
+            logger.debug(f"Error checking broker credentials: {e}")
     
     def _validate_webhook_security(self) -> None:
         """Validate webhook security configuration."""

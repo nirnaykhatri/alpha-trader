@@ -4,9 +4,11 @@ Refactored modular version using separated components.
 """
 
 import asyncio
+import os
 from typing import Dict, Any, Callable, Optional
 from datetime import datetime
 from fastapi import FastAPI, APIRouter
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from src.interfaces import ISignalListener, IConfigurationManager, IMarketDataProvider, IAsyncContextManager
@@ -126,6 +128,23 @@ class TradingViewSignalListener(ISignalListener, IAsyncContextManager):
             }
         )
         
+        # Add CORS middleware to allow frontend requests
+        # Origins are configurable via CORS_ORIGINS env var (comma-separated)
+        # Default: localhost for development; configure for production
+        cors_origins_str = config.get_config(
+            "api.cors.origins", 
+            os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+        )
+        cors_origins = [origin.strip() for origin in cors_origins_str.split(",") if origin.strip()]
+        
+        self._app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        
         # Create a versioned API router to match frontend expectations
         # Frontend expects endpoints at /api/v1/* (see trading-terminal/lib/types/api-types.ts)
         api_v1_router = APIRouter(prefix="/api/v1")
@@ -141,6 +160,19 @@ class TradingViewSignalListener(ISignalListener, IAsyncContextManager):
         
         # Mount the versioned router on the app
         self._app.include_router(api_v1_router)
+        
+        # DUAL MOUNT: Also include the monitoring router at root level for container health checks.
+        # 
+        # Why dual mounting?
+        # 1. The /api/v1/health endpoint is the canonical API endpoint for frontend clients
+        # 2. The root-level /health endpoint is for infrastructure health checks:
+        #    - Azure Container Apps readiness/liveness probes expect /health at root
+        #    - Kubernetes health probes typically check root-level endpoints
+        #    - Load balancers (Azure Front Door, Application Gateway) check root paths
+        # 
+        # This follows the "same logic, multiple entry points" pattern common in
+        # containerized applications where infrastructure needs differ from API design.
+        self._app.include_router(self._monitoring_router.router)
         
         # Register dependency checks for readiness probe
         self._register_dependency_checks()

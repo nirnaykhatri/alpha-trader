@@ -193,18 +193,52 @@ class CosmosConnectionPool:
             try:
                 # Lazy import Azure SDK - only when actually connecting
                 from azure.cosmos.aio import CosmosClient
-                from azure.identity.aio import DefaultAzureCredential
                 
                 logger.info(f"Initializing Cosmos DB connection pool: {endpoint}")
                 
-                # Create credential
-                self._credential = credential or DefaultAzureCredential()
+                # Check for explicit key (required for emulator, optional for Azure)
+                import os
+                cosmos_key = os.environ.get("AZURE_COSMOS_KEY")
                 
-                # Create client
-                self._client = CosmosClient(
-                    url=endpoint,
-                    credential=self._credential
-                )
+                # Detect if using emulator - prefer explicit flag over URL heuristics
+                # AZURE_COSMOS_EMULATOR=true is the recommended way to indicate emulator usage
+                is_emulator = os.environ.get("AZURE_COSMOS_EMULATOR", "").lower() == "true"
+                if not is_emulator:
+                    # Fallback: detect by URL (for backward compatibility)
+                    # This is less reliable than explicit config but preserves existing behavior
+                    is_emulator = "localhost" in endpoint.lower() or "127.0.0.1" in endpoint
+                    if is_emulator:
+                        logger.warning(
+                            "Detected Cosmos DB Emulator via URL heuristics. "
+                            "Set AZURE_COSMOS_EMULATOR=true for explicit configuration."
+                        )
+                
+                if cosmos_key:
+                    # Use key-based authentication (emulator or explicit key)
+                    logger.info("Using key-based authentication for Cosmos DB")
+                    self._credential = cosmos_key
+                elif credential:
+                    # Use provided credential
+                    self._credential = credential
+                else:
+                    # Fall back to DefaultAzureCredential (Managed Identity)
+                    from azure.identity.aio import DefaultAzureCredential
+                    logger.info("Using DefaultAzureCredential for Cosmos DB")
+                    self._credential = DefaultAzureCredential()
+                
+                # Create client with emulator-specific settings if needed
+                if is_emulator:
+                    logger.info("Cosmos DB Emulator mode - SSL verification disabled")
+                    self._client = CosmosClient(
+                        url=endpoint,
+                        credential=self._credential,
+                        connection_verify=False  # Disable SSL for emulator
+                    )
+                else:
+                    self._client = CosmosClient(
+                        url=endpoint,
+                        credential=self._credential
+                    )
                 
                 # Get or create database
                 self._database = await self._client.create_database_if_not_exists(
@@ -233,9 +267,10 @@ class CosmosConnectionPool:
             if self._client:
                 await self._client.close()
                 self._client = None
-            if self._credential:
+            # Only close credential if it's an object with close method (not a string key)
+            if self._credential and hasattr(self._credential, 'close'):
                 await self._credential.close()
-                self._credential = None
+            self._credential = None
             self._database = None
             self._initialized = False
             logger.info("Cosmos DB connection pool closed")
@@ -466,8 +501,8 @@ class CosmosBaseRepository(ABC):
             query_options["parameters"] = parameters
         if max_items:
             query_options["max_item_count"] = max_items
-        if not partition_key:
-            query_options["enable_cross_partition_query"] = True
+        # Note: enable_cross_partition_query is deprecated in SDK 4.x+
+        # Cross-partition queries are now enabled by default
         
         items = []
         async for item in container.query_items(query=query, **query_options):
