@@ -1354,8 +1354,70 @@ class BrokerRouter(BaseAdminRouter):
             self._config.set_config("api.alpaca.base_url", base_url)
             
             logger.info(f"Updated Alpaca configuration (paper={is_paper}, session-only)")
+            
+            # Also register with broker subsystem for position/account queries
+            await self._register_broker_with_subsystem(broker_type, api_key, api_secret, is_paper)
         
         elif broker_type == "tastytrade":
             # Tastytrade uses different credential structure
             self._config.set_config("api.tastytrade.refresh_token", api_secret)
             logger.info("Updated Tastytrade configuration (session-only)")
+    
+    async def _register_broker_with_subsystem(
+        self,
+        broker_type: str,
+        api_key: str,
+        api_secret: str,
+        is_paper: bool
+    ) -> None:
+        """
+        Register broker with the broker subsystem for position/account queries.
+        
+        This ensures that newly added brokers are immediately available for
+        portfolio/position queries without requiring a restart.
+        
+        Args:
+            broker_type: Type of broker ('alpaca', 'tastytrade')
+            api_key: Broker API key
+            api_secret: Broker API secret
+            is_paper: Whether to use paper/sandbox mode
+        """
+        if not self.bot:
+            logger.warning("No bot instance available to register broker with subsystem")
+            return
+        
+        broker_subsystem = getattr(self.bot, 'broker_subsystem', None)
+        if not broker_subsystem:
+            logger.warning("No broker subsystem available to register broker")
+            return
+        
+        try:
+            if broker_type == "alpaca":
+                from alpaca.trading.client import TradingClient
+                from src.trading.alpaca_account_provider import AlpacaAccountProvider
+                from src.broker.alpaca_order_executor import AlpacaOrderExecutor
+                from src.broker.interfaces import BrokerType
+                
+                # Create Alpaca trading client
+                trading_client = TradingClient(
+                    api_key=api_key,
+                    secret_key=api_secret,
+                    paper=is_paper
+                )
+                
+                # Create and register account provider
+                account_provider = AlpacaAccountProvider(trading_client)
+                broker_subsystem.account_providers[BrokerType.ALPACA] = account_provider
+                
+                # Create and register order executor
+                order_executor = AlpacaOrderExecutor(trading_client, self._config)
+                broker_subsystem.executors[BrokerType.ALPACA] = order_executor
+                
+                # Set as primary if not already set
+                if not broker_subsystem.primary_account_provider:
+                    broker_subsystem.primary_account_provider = account_provider
+                
+                logger.info(f"✅ Registered Alpaca with broker subsystem (paper={is_paper})")
+                
+        except Exception as e:
+            logger.error(f"Failed to register broker with subsystem: {e}")
