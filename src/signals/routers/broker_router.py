@@ -22,6 +22,7 @@ Author: Trading Bot Team
 Version: 2.0.0
 """
 
+import os
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import hashlib
@@ -105,7 +106,14 @@ class BrokerConnectionInfo(BaseModel):
     name: str = Field(..., description="Connection display name")
     type: str = Field(default="broker", description="Connection type")
     broker_type: str = Field(..., description="Broker identifier (e.g., 'alpaca')")
-    status: str = Field(..., description="Connection status: connected, disconnected, error, pending")
+    status: str = Field(
+        ..., 
+        description="Connection status: connected, pending_verification, disconnected, error, needs_reauth"
+    )
+    source: str = Field(
+        default="user", 
+        description="Connection source: 'env' (environment configured) or 'user' (UI added)"
+    )
     supported_assets: List[str] = Field(default_factory=list)
     balance: float = Field(default=0.0)
     buying_power: float = Field(default=0.0)
@@ -158,6 +166,68 @@ class TestConnectionResponse(BaseModel):
     broker_type: str
     latency_ms: Optional[float] = None
     account_status: Optional[str] = None
+    message: str
+
+
+class UpdateBrokerCredentials(BaseModel):
+    """Credentials for updating a broker connection.
+    
+    Unlike BrokerCredentials, this does NOT include is_paper since
+    changing paper/live mode is not allowed during updates.
+    """
+    
+    api_key: str = Field(..., min_length=1, description="Broker API key")
+    api_secret: str = Field(..., min_length=1, description="Broker API secret")
+    
+    @field_validator('api_key', 'api_secret')
+    @classmethod
+    def strip_whitespace(cls, v: str) -> str:
+        """Remove leading/trailing whitespace from credentials."""
+        return v.strip()
+
+
+class UpdateBrokerRequest(BaseModel):
+    """Request model for updating a broker connection.
+    
+    Allows updating display name and optionally credentials.
+    Note: Changing broker_type or is_paper mode is NOT supported
+    as these fundamentally change the connection identity.
+    """
+    
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
+    
+    name: Optional[str] = Field(
+        default=None,
+        description="New display name for this connection",
+        max_length=100
+    )
+    credentials: Optional[UpdateBrokerCredentials] = Field(
+        default=None,
+        description="New API credentials (if updating). Does not include is_paper."
+    )
+    
+    @field_validator('name', mode='before')
+    @classmethod
+    def strip_name(cls, v: Optional[str]) -> Optional[str]:
+        """Strip whitespace from name."""
+        if v:
+            return v.strip()
+        return v
+
+
+class UpdateBrokerResponse(BaseModel):
+    """Response model for updating a broker connection."""
+    
+    model_config = ConfigDict(
+        alias_generator=to_camel,
+        populate_by_name=True,
+    )
+    
+    success: bool
+    connection: Optional[BrokerConnectionInfo] = None
     message: str
 
 
@@ -244,9 +314,11 @@ class BrokerRouter(BaseAdminRouter):
     Provides endpoints for:
     - GET /admin/brokers - List all broker connections
     - POST /admin/brokers - Add a new broker connection
+    - PATCH /admin/brokers/{connection_id} - Update broker display name or credentials
     - DELETE /admin/brokers/{connection_id} - Remove a broker connection
     - POST /admin/brokers/{connection_id}/test - Test broker connectivity
     - GET /admin/brokers/available - List available broker types
+    - POST /admin/brokers/refresh - Force refresh all broker connections from DB/env
     
     Persistence:
         Uses CosmosBrokerRepository to persist broker connections to Cosmos DB.
@@ -309,24 +381,31 @@ class BrokerRouter(BaseAdminRouter):
             logger.debug("Using cached broker connections (skipping DB reload)")
             return
         
+        logger.info("Loading broker connections from DB...")
         await self._ensure_repo_initialized()
         
         try:
             # Get all active (non-disabled) connections from DB
+            logger.debug("Calling get_active_connections()...")
             db_connections = await self._broker_repo.get_active_connections()
+            logger.info(f"get_active_connections() returned {len(db_connections)} documents")
             
             self._connections_cache.clear()
             for doc in db_connections:
+                logger.debug(f"Processing doc: id={doc.id}, broker_type={doc.broker_type}")
                 # Convert document to BrokerConnectionInfo
                 connection = self._doc_to_connection_info(doc)
                 if connection:
                     self._connections_cache[connection.id] = connection
+                    logger.debug(f"Added connection: {connection.id}")
+                else:
+                    logger.warning(f"_doc_to_connection_info returned None for doc: {doc.id}")
             
             self._cache_loaded = True
-            logger.debug(f"Loaded {len(self._connections_cache)} connections from DB")
+            logger.info(f"Loaded {len(self._connections_cache)} connections from DB into cache")
             
         except Exception as e:
-            logger.error(f"Failed to load connections from DB: {e}")
+            logger.error(f"Failed to load connections from DB: {e}", exc_info=True)
             # Continue with empty cache - env brokers will still work
     
     def _doc_to_connection_info(
@@ -345,6 +424,7 @@ class BrokerRouter(BaseAdminRouter):
             type="broker",
             broker_type=doc.broker_type,
             status=doc.status if not doc.is_disabled else "disabled",
+            source=doc.source,
             supported_assets=doc.supported_assets or metadata.get("supported_assets", []),
             balance=doc.balance,
             buying_power=doc.buying_power,
@@ -465,6 +545,24 @@ class BrokerRouter(BaseAdminRouter):
                             f"{'(Paper mode)' if broker_request.credentials.is_paper else '(Live mode)'}"
                 )
             
+            # Also check for env-configured brokers (they don't have api_key_hash)
+            # Compare by masked key to detect if user is adding same credentials as env config
+            masked_key = mask_api_key(broker_request.credentials.api_key)
+            env_duplicate = await self._broker_repo.connection_exists_by_masked_key(
+                broker_type=broker_type,
+                is_paper=broker_request.credentials.is_paper,
+                api_key_masked=masked_key,
+                source="env"
+            )
+            
+            if env_duplicate:
+                return AddBrokerResponse(
+                    success=False,
+                    connection=None,
+                    message=f"This {metadata['name']} account is already configured via environment variables. "
+                            f"Remove the environment configuration first, or use a different account."
+                )
+            
             # Generate connection ID
             import uuid
             connection_id = f"{broker_type}-{str(uuid.uuid4())[:8]}"
@@ -491,6 +589,7 @@ class BrokerRouter(BaseAdminRouter):
                 type="broker",
                 broker_type=broker_type,
                 status="connected",
+                source="user",
                 supported_assets=metadata["supported_assets"],
                 balance=test_result.get("balance", 0.0),
                 buying_power=test_result.get("buying_power", 0.0),
@@ -578,11 +677,21 @@ class BrokerRouter(BaseAdminRouter):
             # For env-configured brokers, use soft delete (disable)
             # This persists the "disabled" state so we don't re-sync them
             if is_env_broker:
-                await self._broker_repo.disable_connection(connection_id)
+                success = await self._broker_repo.disable_connection(connection_id)
+                if not success:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Failed to disable broker connection. Please try again."
+                    )
                 logger.info(f"Disabled env broker connection: {connection_id}")
             else:
                 # For user-added brokers, do hard delete
-                await self._broker_repo.delete_connection(connection_id)
+                success = await self._broker_repo.delete_connection(connection_id)
+                if not success:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Failed to delete broker connection. Please try again."
+                    )
                 logger.info(f"Deleted broker connection: {connection_id}")
             
             # Remove from cache
@@ -591,6 +700,144 @@ class BrokerRouter(BaseAdminRouter):
             return JSONResponse(
                 status_code=HTTPStatus.OK,
                 content={"success": True, "message": "Connection removed"}
+            )
+        
+        @self.router.patch(
+            "/{connection_id}",
+            response_model=UpdateBrokerResponse,
+            summary="Update broker connection",
+            description="Update a broker connection's display name or credentials."
+        )
+        @handle_route_errors("update_broker")
+        async def update_broker(
+            request: Request,
+            connection_id: str,
+            update_request: UpdateBrokerRequest,
+            authorization: Optional[str] = Header(None),
+        ) -> UpdateBrokerResponse:
+            """Update a broker connection.
+            
+            Allows updating:
+            - Display name (rename the connection)
+            - API credentials (requires re-validation)
+            
+            Does NOT allow changing:
+            - Broker type (would require deleting and re-adding)
+            - Paper/live mode (bot has its own demo/live mode)
+            
+            Args:
+                connection_id: The unique connection ID.
+                update_request: Fields to update.
+            
+            Returns:
+                UpdateBrokerResponse with updated connection info.
+            """
+            await self.validate_auth(request, authorization)
+            await self._ensure_repo_initialized()
+            
+            # Fetch existing connection
+            connection_doc = await self._broker_repo.get_connection(connection_id)
+            if not connection_doc:
+                raise HTTPException(
+                    status_code=HTTPStatus.NOT_FOUND,
+                    detail=f"Connection not found: {connection_id}"
+                )
+            
+            connection = self._doc_to_connection_info(connection_doc)
+            broker_type = connection.broker_type
+            metadata = BROKER_METADATA.get(broker_type, {})
+            
+            # Track what was updated
+            updates_made = []
+            account_data_updated = False  # Track if we should update last_sync
+            
+            # Update display name if provided
+            if update_request.name is not None:
+                new_name = update_request.name.strip()
+                if new_name:
+                    connection_doc.name = new_name
+                    updates_made.append("display name")
+            
+            # Update credentials if provided
+            if update_request.credentials is not None:
+                creds = update_request.credentials
+                
+                # Check for duplicate credentials (same broker type + paper mode + api key)
+                new_api_key_hash = hash_api_key(creds.api_key)
+                duplicate_exists = await self._broker_repo.connection_exists_by_hash(
+                    broker_type=broker_type,
+                    is_paper=connection.is_paper,
+                    api_key_hash=new_api_key_hash,
+                    exclude_connection_id=connection_id
+                )
+                
+                if duplicate_exists:
+                    raise HTTPException(
+                        status_code=HTTPStatus.CONFLICT,
+                        detail="These credentials are already used by another connection."
+                    )
+                
+                # Test new credentials before accepting them
+                test_result = await self._test_broker_connection(
+                    broker_type,
+                    creds.api_key,
+                    creds.api_secret,
+                    connection.is_paper  # Keep same paper/live mode
+                )
+                
+                if not test_result["success"]:
+                    raise HTTPException(
+                        status_code=HTTPStatus.BAD_REQUEST,
+                        detail=f"Credential validation failed: {test_result['message']}"
+                    )
+                
+                # Update credential-related fields
+                connection_doc.api_key_hash = new_api_key_hash
+                connection_doc.api_key_masked = mask_api_key(creds.api_key)
+                
+                # Update account data from test result
+                connection_doc.balance = test_result.get("balance", connection_doc.balance)
+                connection_doc.buying_power = test_result.get("buying_power", connection_doc.buying_power)
+                connection_doc.portfolio_value = test_result.get("portfolio_value", connection_doc.portfolio_value)
+                connection_doc.open_positions = test_result.get("open_positions", connection_doc.open_positions)
+                connection_doc.status = "connected"
+                
+                # Update runtime configuration with new credentials
+                await self._configure_broker_runtime(
+                    broker_type,
+                    creds.api_key,
+                    creds.api_secret,
+                    connection.is_paper
+                )
+                
+                updates_made.append("API credentials")
+                account_data_updated = True  # Credentials update includes account data refresh
+            
+            # Check if any updates were made
+            if not updates_made:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    detail="No updates provided. Specify 'name' or 'credentials' to update."
+                )
+            
+            # Only update last_sync when account data was actually refreshed
+            if account_data_updated:
+                connection_doc.last_sync = datetime.utcnow().isoformat()
+            
+            # Persist changes to Cosmos DB
+            await self._broker_repo.save_connection(connection_doc)
+            
+            # Update cache
+            updated_connection = self._doc_to_connection_info(connection_doc)
+            self._connections_cache[connection_id] = updated_connection
+            
+            updates_str = " and ".join(updates_made)
+            logger.info(f"Updated broker connection {connection_id}: {updates_str}")
+            
+            return UpdateBrokerResponse(
+                success=True,
+                connection=updated_connection,
+                message=f"Successfully updated {updates_str} for {metadata.get('name', broker_type)}"
             )
         
         @self.router.post(
@@ -733,6 +980,75 @@ class BrokerRouter(BaseAdminRouter):
             
             return JSONResponse(content={"brokers": available})
         
+        @self.router.get(
+            "/debug",
+            summary="Debug broker connections",
+            description="Debug endpoint to directly query Cosmos DB and return raw data. "
+                       "Only available when ENABLE_ADMIN_DEBUG_ENDPOINTS=true."
+        )
+        @handle_route_errors("debug_brokers")
+        async def debug_brokers(
+            request: Request,
+            authorization: Optional[str] = Header(None),
+        ) -> JSONResponse:
+            """Debug endpoint to see raw Cosmos data. Gated by env var."""
+            # Gate behind explicit environment flag for production safety
+            if not os.environ.get("ENABLE_ADMIN_DEBUG_ENDPOINTS", "").lower() in ("true", "1", "yes"):
+                raise HTTPException(
+                    status_code=404,
+                    detail="Not found"
+                )
+            
+            await self.validate_auth(request, authorization)
+            await self._ensure_repo_initialized()
+            
+            debug_info = {
+                "cache_loaded": self._cache_loaded,
+                "env_brokers_synced": self._env_brokers_synced,
+                "cache_size": len(self._connections_cache),
+                "cache_keys": list(self._connections_cache.keys()),
+            }
+            
+            # Try to get all connections directly
+            try:
+                all_connections = await self._broker_repo.get_all_connections()
+                debug_info["all_connections_count"] = len(all_connections)
+                debug_info["all_connections"] = [
+                    {
+                        "id": c.id,
+                        "broker_type": c.broker_type,
+                        "name": c.name,
+                        "status": c.status,
+                        "is_disabled": c.is_disabled,
+                        "is_paper": c.is_paper,
+                        "source": c.source,
+                    }
+                    for c in all_connections
+                ]
+            except Exception as e:
+                debug_info["all_connections_error"] = str(e)
+            
+            # Try to get active connections
+            try:
+                active_connections = await self._broker_repo.get_active_connections()
+                debug_info["active_connections_count"] = len(active_connections)
+                debug_info["active_connections"] = [
+                    {
+                        "id": c.id,
+                        "broker_type": c.broker_type,
+                        "name": c.name,
+                        "status": c.status,
+                        "is_disabled": c.is_disabled,
+                        "is_paper": c.is_paper,
+                        "source": c.source,
+                    }
+                    for c in active_connections
+                ]
+            except Exception as e:
+                debug_info["active_connections_error"] = str(e)
+            
+            return JSONResponse(content=debug_info)
+        
         @self.router.post(
             "/refresh",
             summary="Refresh broker connections",
@@ -817,6 +1133,22 @@ class BrokerRouter(BaseAdminRouter):
                         logger.debug(f"Loaded {connection_id} from DB into cache")
                         should_skip_alpaca = True
             
+            # Check if a user-added broker with the same API key already exists
+            # This prevents duplicates when user adds broker via UI with same env credentials
+            if not should_skip_alpaca:
+                base_url = self._config.get_config("api.alpaca.base_url", "")
+                is_paper = "paper" in base_url.lower()
+                api_key_hash = hash_api_key(alpaca_key)
+                
+                duplicate_exists = await self._broker_repo.connection_exists_by_hash(
+                    broker_type="alpaca",
+                    is_paper=is_paper,
+                    api_key_hash=api_key_hash
+                )
+                if duplicate_exists:
+                    logger.debug(f"Skipping {connection_id} - user-added broker with same API key exists")
+                    should_skip_alpaca = True
+            
             # Truly new - create with real account data if not skipped
             if not should_skip_alpaca:
                 base_url = self._config.get_config("api.alpaca.base_url", "")
@@ -833,6 +1165,7 @@ class BrokerRouter(BaseAdminRouter):
                     type="broker",
                     broker_type="alpaca",
                     status="connected" if test_result.get("success") else "error",
+                    source="env",
                     supported_assets=["stock", "etf", "crypto"],
                     balance=test_result.get("balance", 0.0),
                     buying_power=test_result.get("buying_power", 0.0),
@@ -877,7 +1210,8 @@ class BrokerRouter(BaseAdminRouter):
                     name="Tastytrade",
                     type="broker",
                     broker_type="tastytrade",
-                    status="connected",
+                    status="pending_verification",  # Not verified - connectivity test not implemented
+                    source="env",
                     supported_assets=["stock", "etf"],
                     api_key_masked="****",
                     is_paper=False,
