@@ -266,7 +266,11 @@ class ConfigurationManager(IConfigurationManager):
                 config_values[field_name] = value
         
         # Validate using contract
-        errors = self._contract.validate_required(config_values, check_broker=True)
+        # Broker requirement depends on startup mode (HEADLESS=required, UI_CONFIG=optional)
+        from src.core.startup_mode import StartupMode
+        startup_mode = StartupMode.from_env()
+        check_broker = startup_mode.requires_broker_at_startup
+        errors = self._contract.validate_required(config_values, check_broker=check_broker)
         
         if errors:
             error_message = self._contract.format_validation_errors(errors)

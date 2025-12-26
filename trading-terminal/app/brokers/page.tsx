@@ -38,6 +38,7 @@ import {
   SelectTrigger,
   SelectValue,
   Skeleton,
+  useToast,
 } from '@/components/ui'
 import {
   Plus,
@@ -64,6 +65,7 @@ import {
 import { formatCurrency, formatRelativeTime, cn } from '@/lib/utils'
 import { BrokerConnection, AssetClass, ASSET_CLASS_CONFIG } from '@/lib/types/asset'
 import { useBrokers, BrokersData } from '@/lib/hooks'
+import { getAuthHeaders } from '@/lib/admin-api'
 
 // Mock broker connections data (fallback when API unavailable)
 const mockBrokers: BrokerConnection[] = [
@@ -164,18 +166,71 @@ function StatusBadge({ status }: { status: BrokerConnection['status'] }) {
 /**
  * Add Broker Dialog
  */
-function AddBrokerDialog() {
+function AddBrokerDialog({ onBrokerAdded }: { onBrokerAdded?: () => void }) {
   const [isOpen, setIsOpen] = useState(false)
   const [selectedBroker, setSelectedBroker] = useState<string>('')
   const [isPaper, setIsPaper] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
   const [apiKey, setApiKey] = useState('')
   const [apiSecret, setApiSecret] = useState('')
+  const [isConnecting, setIsConnecting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const broker = availableBrokers.find(b => b.id === selectedBroker)
 
+  const handleConnect = async () => {
+    if (!selectedBroker || !apiKey || !apiSecret) return
+    
+    setIsConnecting(true)
+    setError(null)
+    
+    try {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+      const headers = await getAuthHeaders()
+      const response = await fetch(`${API_URL}/api/v1/admin/brokers`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          broker_type: selectedBroker,
+          name: broker?.name + (isPaper ? ' (Paper)' : ''),
+          credentials: {
+            api_key: apiKey,
+            api_secret: apiSecret,
+            is_paper: isPaper,
+          },
+        }),
+      })
+      
+      const data = await response.json()
+      
+      if (data.success) {
+        // Success - close dialog and refresh list
+        setIsOpen(false)
+        setSelectedBroker('')
+        setApiKey('')
+        setApiSecret('')
+        setIsPaper(false)
+        onBrokerAdded?.()
+      } else {
+        setError(data.message || 'Failed to connect broker')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Connection failed')
+    } finally {
+      setIsConnecting(false)
+    }
+  }
+
+  const resetForm = () => {
+    setSelectedBroker('')
+    setApiKey('')
+    setApiSecret('')
+    setIsPaper(false)
+    setError(null)
+  }
+
   return (
-    <Dialog open={isOpen} onOpenChange={setIsOpen}>
+    <Dialog open={isOpen} onOpenChange={(open) => { setIsOpen(open); if (!open) resetForm(); }}>
       <DialogTrigger asChild>
         <Button className="gap-2">
           <Plus className="h-4 w-4" />
@@ -290,22 +345,43 @@ function AddBrokerDialog() {
               <div className="flex items-start gap-3 p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
                 <Shield className="h-5 w-5 text-blue-500 shrink-0 mt-0.5" />
                 <div>
-                  <p className="text-sm font-medium text-blue-500">Secure Storage</p>
+                  <p className="text-sm font-medium text-blue-500">Session-Only Storage</p>
                   <p className="text-xs text-muted-foreground">
-                    API credentials are encrypted and stored securely in Azure Key Vault
+                    Credentials are stored in memory for this session only. On restart, re-enter credentials or configure via environment variables.
                   </p>
                 </div>
               </div>
+
+              {/* Error Display */}
+              {error && (
+                <div className="flex items-start gap-3 p-3 rounded-lg bg-red-500/10 border border-red-500/20">
+                  <AlertTriangle className="h-5 w-5 text-red-500 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-medium text-red-500">Connection Failed</p>
+                    <p className="text-xs text-muted-foreground">{error}</p>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => setIsOpen(false)}>
+          <Button variant="outline" onClick={() => setIsOpen(false)} disabled={isConnecting}>
             Cancel
           </Button>
-          <Button disabled={!selectedBroker || !apiKey || !apiSecret}>
-            Connect Broker
+          <Button 
+            disabled={!selectedBroker || !apiKey || !apiSecret || isConnecting}
+            onClick={handleConnect}
+          >
+            {isConnecting ? (
+              <>
+                <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                Connecting...
+              </>
+            ) : (
+              'Connect Broker'
+            )}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -316,13 +392,56 @@ function AddBrokerDialog() {
 /**
  * Broker Card Component
  */
-function BrokerCard({ broker }: { broker: BrokerConnection }) {
+function BrokerCard({ broker, onDeleted }: { broker: BrokerConnection; onDeleted?: () => void }) {
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const { toast } = useToast()
 
   const handleRefresh = async () => {
     setIsRefreshing(true)
     await new Promise(resolve => setTimeout(resolve, 1500))
     setIsRefreshing(false)
+  }
+
+  const handleDelete = async () => {
+    setIsDeleting(true)
+    try {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+      const deleteUrl = `${API_URL}/api/v1/admin/brokers/${broker.id}`
+      const headers = await getAuthHeaders()
+      
+      const response = await fetch(deleteUrl, {
+        method: 'DELETE',
+        headers,
+      })
+      
+      const responseData = await response.json().catch(() => null)
+      
+      if (response.ok) {
+        setShowDeleteConfirm(false)
+        toast({
+          title: 'Broker Disconnected',
+          description: `Successfully disconnected ${broker.name}`,
+        })
+        onDeleted?.()
+      } else {
+        const errorMessage = responseData?.detail || responseData?.message || 'Unknown error'
+        toast({
+          title: 'Disconnect Failed',
+          description: errorMessage,
+          variant: 'destructive',
+        })
+      }
+    } catch (err) {
+      toast({
+        title: 'Connection Error',
+        description: err instanceof Error ? err.message : 'Failed to connect to server',
+        variant: 'destructive',
+      })
+    } finally {
+      setIsDeleting(false)
+    }
   }
 
   return (
@@ -374,8 +493,9 @@ function BrokerCard({ broker }: { broker: BrokerConnection }) {
       <CardContent className="space-y-4">
         {/* Supported Assets */}
         <div className="flex flex-wrap gap-1">
-          {broker.supportedAssets.map((asset) => {
+          {(broker.supportedAssets || []).map((asset) => {
             const config = ASSET_CLASS_CONFIG[asset]
+            if (!config) return null
             return (
               <Badge key={asset} variant="secondary" className={cn('text-xs gap-1', config.color)}>
                 <span>{config.icon}</span>
@@ -441,9 +561,39 @@ function BrokerCard({ broker }: { broker: BrokerConnection }) {
               <Copy className="h-3 w-3" />
             </Button>
           </div>
-          <Button variant="ghost" size="sm" className="text-red-500 hover:text-red-600 hover:bg-red-500/10">
-            <Trash2 className="h-4 w-4" />
-          </Button>
+          <Dialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+            <DialogTrigger asChild>
+              <Button variant="ghost" size="sm" className="text-red-500 hover:text-red-600 hover:bg-red-500/10">
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Disconnect Broker</DialogTitle>
+                <DialogDescription>
+                  Are you sure you want to disconnect {broker.name}? This will remove the connection from your account.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setShowDeleteConfirm(false)} disabled={isDeleting}>
+                  Cancel
+                </Button>
+                <Button variant="destructive" onClick={handleDelete} disabled={isDeleting}>
+                  {isDeleting ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                      Disconnecting...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="h-4 w-4 mr-2" />
+                      Disconnect
+                    </>
+                  )}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
       </CardContent>
     </Card>
@@ -455,13 +605,13 @@ function BrokerCard({ broker }: { broker: BrokerConnection }) {
  */
 function BrokersSummary({ brokers }: { brokers: BrokerConnection[] }) {
   const connectedBrokers = brokers.filter(b => b.status === 'connected')
-  const totalPortfolioValue = connectedBrokers.reduce((sum, b) => sum + b.portfolioValue, 0)
-  const totalBuyingPower = connectedBrokers.reduce((sum, b) => sum + b.buyingPower, 0)
-  const totalPositions = connectedBrokers.reduce((sum, b) => sum + b.openPositions, 0)
+  const totalPortfolioValue = connectedBrokers.reduce((sum, b) => sum + (b.portfolioValue || 0), 0)
+  const totalBuyingPower = connectedBrokers.reduce((sum, b) => sum + (b.buyingPower || 0), 0)
+  const totalPositions = connectedBrokers.reduce((sum, b) => sum + (b.openPositions || 0), 0)
 
   // Collect all unique supported assets
   const allAssets = new Set<AssetClass>()
-  connectedBrokers.forEach(b => b.supportedAssets.forEach(a => allAssets.add(a)))
+  connectedBrokers.forEach(b => (b.supportedAssets || []).forEach(a => allAssets.add(a)))
 
   return (
     <div className="grid gap-4 md:grid-cols-4">
@@ -730,7 +880,7 @@ export default function BrokersPage() {
                     Live
                   </Badge>
                 )}
-                <AddBrokerDialog />
+                <AddBrokerDialog onBrokerAdded={refetch} />
               </div>
             </div>
 
@@ -762,7 +912,7 @@ export default function BrokersPage() {
               <SectionErrorBoundary sectionName="Broker Connections">
                 <div className="grid gap-4 md:grid-cols-2">
                   {brokers.map((broker) => (
-                    <BrokerCard key={broker.id} broker={broker} />
+                    <BrokerCard key={broker.id} broker={broker} onDeleted={refetch} />
                   ))}
                 </div>
               </SectionErrorBoundary>

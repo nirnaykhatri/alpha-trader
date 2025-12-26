@@ -2,35 +2,45 @@
 Cosmos DB Pagination Helpers.
 
 Provides reusable pagination patterns for Cosmos DB queries to prevent
-unbounded scans and memory issues. Implements continuation token support
-and efficient query patterns.
+unbounded scans and memory issues.
 
 Key Features:
-    - Continuation token support for cursor-based pagination
+    - Bounded result sets with configurable limits (TOP/LIMIT)
     - Field projection to reduce RU consumption
     - Active-only filters to reduce result sets
-    - Bounded result sets with configurable limits
+    - Helper utilities for consistent query building
+
+Note on SDK 4.x Pagination:
+    The Azure Cosmos DB SDK 4.x changed pagination behavior. The older
+    `continuation_token` parameter-based approach is deprecated.
+    
+    This module uses SIMPLIFIED pagination:
+    - Returns items up to `max_items` limit using TOP clause
+    - Sets `has_more=True` heuristically (when result count = max_items)
+    - Does NOT populate continuation_token (returns None)
+    
+    For true cursor-based pagination with large datasets, implement
+    using `query_items(...).by_page()` with async iteration.
 
 Usage:
     from src.database.pagination import (
         PaginatedResult,
-        PaginationOptions,
         build_paginated_query,
         POSITION_FIELDS,
     )
     
-    # Create pagination options
-    options = PaginationOptions(
-        max_items=100,
-        continuation_token=None,
-        fields=POSITION_FIELDS
+    # Build bounded query
+    query = build_paginated_query(
+        fields=POSITION_FIELDS,
+        order_by="created_at",
+        descending=True
     )
     
-    # Execute paginated query
-    result = await execute_paginated_query(container, query, options)
+    # Execute with limit
+    # Note: continuation_token is not supported in simplified mode
 
 Author: Trading Bot Team
-Version: 1.0.0
+Version: 1.1.0
 """
 
 from __future__ import annotations
@@ -115,17 +125,21 @@ PROJECTION_FIELDS: Dict[QueryProjection, List[str]] = {
 @dataclass
 class PaginationOptions:
     """
-    Options for paginated Cosmos DB queries.
+    Options for paginated Cosmos DB queries (simplified mode).
+    
+    Note:
+        continuation_token is retained for API compatibility but is NOT
+        used in the current simplified pagination implementation.
     
     Attributes:
         max_items: Maximum number of items to return per page.
                    Capped at ABSOLUTE_MAX_ITEMS for safety.
-        continuation_token: Token from previous query for cursor-based pagination.
+        continuation_token: DEPRECATED - Not used in simplified mode. Retained for compatibility.
         projection: Optional field projection to reduce data transfer.
         partition_key: Optional partition key for single-partition queries (more efficient).
     """
     max_items: int = DEFAULT_MAX_ITEMS
-    continuation_token: Optional[str] = None
+    continuation_token: Optional[str] = None  # Not used in simplified mode
     projection: Optional[QueryProjection] = None
     partition_key: Optional[str] = None
     
@@ -152,17 +166,36 @@ T = TypeVar('T')
 @dataclass
 class PaginatedResult(Generic[T]):
     """
-    Result of a paginated query with continuation support.
+    Result of a paginated query using simplified mode.
+    
+    Simplified Pagination (SDK 4.x):
+        This implementation uses a simplified pagination approach:
+        - Returns items up to `max_items` limit using TOP clause
+        - Sets `has_more=True` heuristically when count equals max_items
+        - Does NOT populate continuation_token (always None)
+        
+        This is suitable for:
+        - Small to medium result sets (<1000 items)
+        - UI pagination with reasonable page sizes
+        - Cases where approximate "has more" is acceptable
+        
+        For true cursor-based pagination with large datasets:
+        ```python
+        pager = container.query_items(query).by_page(max_item_count=50)
+        async for page in pager:
+            items = [item async for item in page]
+            # page.continuation_token available here for next request
+        ```
     
     Attributes:
         items: List of items in this page
-        continuation_token: Token for fetching next page, None if no more pages
-        has_more: Whether more pages exist
+        continuation_token: Always None in simplified mode
+        has_more: True if result count equals max_items (heuristic, may have false positives)
         total_fetched: Number of items fetched in this request
         request_charge: RU consumed by this query (if available)
     """
     items: List[T] = field(default_factory=list)
-    continuation_token: Optional[str] = None
+    continuation_token: Optional[str] = None  # Not supported in simplified mode
     has_more: bool = False
     total_fetched: int = 0
     request_charge: Optional[float] = None
@@ -356,6 +389,7 @@ __all__ = [
     "build_select_clause",
     "build_where_clause",
     "build_order_by_clause",
+    "extract_items",
     "POSITION_FIELDS_MINIMAL",
     "POSITION_FIELDS_FULL",
     "ORDER_FIELDS_MINIMAL",
@@ -365,3 +399,46 @@ __all__ = [
     "DEFAULT_MAX_ITEMS",
     "ABSOLUTE_MAX_ITEMS",
 ]
+
+
+def extract_items(result: Any) -> List[Any]:
+    """
+    Extract items from a PaginatedResult or return the result if already a list.
+    
+    This helper function provides a clean abstraction for services that need to
+    handle both PaginatedResult objects and raw lists from the database layer.
+    
+    Transitional Pattern:
+        This helper exists because some CosmosDBManager methods return
+        PaginatedResult while others return List directly. Prefer using
+        PaginatedResult consistently in new code. This helper allows
+        gradual migration without breaking existing callers.
+        
+        Target state: All list methods return PaginatedResult, then this
+        helper becomes unnecessary.
+    
+    Args:
+        result: Either a PaginatedResult object with .items attribute, or a list
+        
+    Returns:
+        List of items extracted from the result
+        
+    Examples:
+        >>> extract_items(PaginatedResult(items=[1, 2, 3]))
+        [1, 2, 3]
+        >>> extract_items([1, 2, 3])
+        [1, 2, 3]
+    """
+    if hasattr(result, 'items'):
+        return result.items
+    if isinstance(result, list):
+        return result
+    
+    # Unexpected type - log warning and return empty list to prevent crashes
+    # This indicates a bug in the calling code or database layer
+    logger.warning(
+        f"extract_items received unexpected type {type(result).__name__}, "
+        f"expected PaginatedResult or list. Returning empty list. "
+        f"Value preview: {str(result)[:100]}"
+    )
+    return []

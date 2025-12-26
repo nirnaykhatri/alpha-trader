@@ -55,6 +55,9 @@ _lazy_imports = {
     "CosmosBaseRepository": "src.database.cosmos_base",
     "CosmosDBManager": "src.database.cosmos_manager",
     "CosmosBotRepository": "src.database.cosmos_bot_repository",
+    "CosmosBrokerRepository": "src.database.cosmos_broker_repository",
+    "BrokerConnectionDocument": "src.database.cosmos_broker_repository",
+    "IBrokerRepository": "src.database.cosmos_broker_repository",
     "Bot": "src.database.cosmos_bot_repository",
     "BotOrder": "src.database.cosmos_bot_repository",
     "BotHistory": "src.database.cosmos_bot_repository",
@@ -90,10 +93,13 @@ __all__ = [
     "COSMOS_SYSTEM_PROPERTIES",
     # Interfaces (safe to import)
     "IBotRepository",
+    "IBrokerRepository",
     "IDatabaseManager",
     # Core managers (lazy loaded)
     "CosmosDBManager",
     "CosmosBotRepository",
+    "CosmosBrokerRepository",
+    "BrokerConnectionDocument",
     # Bot models (lazy loaded)
     "Bot",
     "BotOrder",

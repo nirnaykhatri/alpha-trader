@@ -580,6 +580,7 @@ export function DCABotConfigDialog({
             baseOrderAmount={form.dcaConfig.startSettings?.baseOrderAmount || form.investmentAmount * 0.2}
             isShort={form.strategy === 'short'}
             assetClass={form.assetClass}
+            symbol={form.symbol}
           />
 
           <Separator />

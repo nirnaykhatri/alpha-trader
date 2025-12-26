@@ -33,6 +33,9 @@ from alpaca.data.historical import StockHistoricalDataClient
 # Exceptions
 from src.exceptions import ConfigurationException
 
+# Startup mode for consistent broker requirement enforcement
+from src.core import StartupMode
+
 logger = get_logger(__name__)
 
 
@@ -113,14 +116,33 @@ class BrokerSubsystem(IAsyncContextManager):
         logger.info("Broker Subsystem initialized successfully")
 
     async def _initialize_alpaca(self) -> None:
-        """Initialize Alpaca components."""
+        """
+        Initialize Alpaca components if configured.
+        
+        NOTE: Alpaca is now OPTIONAL at startup. Users can add broker
+        credentials via the web UI after the bot starts. If not configured,
+        this method logs a warning and returns gracefully.
+        """
         logger.info("Initializing Alpaca components...")
         
         # Use typed config method for consistency
         alpaca_config = self.config.get_alpaca_config()
         
         if not alpaca_config.is_configured:
-            raise ConfigurationException("Alpaca API credentials are required")
+            startup_mode = StartupMode.from_env()
+            if startup_mode.requires_broker_at_startup:
+                # HEADLESS mode: broker is required - fail-fast
+                raise ConfigurationException(
+                    "Alpaca API credentials not configured (STARTUP_MODE=headless requires broker). "
+                    "Set ALPACA_API_KEY and ALPACA_SECRET_KEY, or use STARTUP_MODE=ui-config."
+                )
+            else:
+                # UI_CONFIG mode: broker is optional
+                logger.warning(
+                    "Alpaca API credentials not configured. "
+                    "You can add broker credentials via the web UI at /brokers"
+                )
+                return  # Skip initialization - broker can be added later via UI
         
         # Initialize clients
         self.alpaca_trading_client = TradingClient(

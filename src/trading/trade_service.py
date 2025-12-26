@@ -24,6 +24,7 @@ from datetime import datetime
 
 from src import Order, OrderStatus, OrderSide
 from src.database.cosmos_manager import CosmosDBManager
+from src.database.pagination import extract_items
 from src.interfaces import IOrderManager
 
 logger = logging.getLogger(__name__)
@@ -102,7 +103,8 @@ class TradeService:
             ```
         """
         try:
-            open_trades = await self.database.get_open_trades()
+            open_trades_result = await self.database.get_open_trades()
+            open_trades = extract_items(open_trades_result)
             for trade in open_trades:
                 if trade['symbol'] == symbol:
                     logger.debug(f"Found matching trade for {symbol}: {trade['trade_id']}")
@@ -232,7 +234,8 @@ class TradeService:
             ```
         """
         try:
-            return await self.database.get_open_trades()
+            result = await self.database.get_open_trades()
+            return extract_items(result)
         except Exception as e:
             logger.error(f"Error getting open trades: {e}")
             return []

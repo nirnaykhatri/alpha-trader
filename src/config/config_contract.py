@@ -255,8 +255,9 @@ COSMOS_ENDPOINT = _register_field(ConfigField(
     env_var="AZURE_COSMOS_ENDPOINT",  # Standardized name
     app_config_key="database.cosmos.endpoint",
     description="Azure Cosmos DB account endpoint",
-    error_hint="Find in Azure Portal > Cosmos DB > Keys. Format: https://<account>.documents.azure.com:443/",
-    validator=lambda v: v and v.startswith("https://") and "documents.azure.com" in v,
+    error_hint="Find in Azure Portal > Cosmos DB > Keys. Format: https://<account>.documents.azure.com:443/ or use emulator at https://localhost:8081",
+    # Accept both Azure Cosmos DB and local emulator endpoints
+    validator=lambda v: v and v.startswith("https://") and ("documents.azure.com" in v or "localhost" in v),
 ))
 
 COSMOS_KEY = _register_field(ConfigField(

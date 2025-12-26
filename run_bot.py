@@ -57,57 +57,66 @@ def check_environment_config():
     - Production: Azure Key Vault + App Configuration
     - Local Dev: Environment variables (from .env or shell)
     
+    REQUIRED at startup:
+    - Cosmos DB (database for bot state)
+    - Webhook port (API server)
+    
+    OPTIONAL at startup (can be added via UI later):
+    - Broker credentials (Alpaca, Tastytrade, etc.)
+    
     Returns:
         bool: True if minimum required config is present, False otherwise.
     """
-    # Check for Azure configuration (production)
+    # Check for database configuration (REQUIRED)
+    cosmos_endpoint = os.getenv("AZURE_COSMOS_ENDPOINT")
+    cosmos_database = os.getenv("AZURE_COSMOS_DATABASE")
+    
+    # Check for Azure configuration services (optional, for production)
     azure_keyvault = os.getenv("AZURE_KEYVAULT_URL")
     azure_app_config = os.getenv("AZURE_APP_CONFIGURATION_ENDPOINT")
     
-    # Check for direct environment variables (local dev)
+    # Check for broker credentials (OPTIONAL - can be added via UI)
     alpaca_key = os.getenv("ALPACA_API_KEY")
-    alpaca_secret = os.getenv("ALPACA_API_SECRET")
+    alpaca_secret = os.getenv("ALPACA_API_SECRET") or os.getenv("ALPACA_SECRET_KEY")
     
-    has_azure = azure_keyvault or azure_app_config
-    has_direct = alpaca_key and alpaca_secret
+    has_azure_services = azure_keyvault or azure_app_config
+    has_cosmos = cosmos_endpoint and cosmos_database
+    has_broker = alpaca_key and alpaca_secret
     
-    if has_azure:
-        print("✅ Azure configuration detected:")
+    print("\n📋 Configuration Status:")
+    print("   ─────────────────────")
+    
+    # Database status (required)
+    if has_cosmos:
+        print(f"   ✅ Database: Cosmos DB configured")
+        if "localhost" in cosmos_endpoint:
+            print(f"      └─ Using Cosmos DB Emulator")
+    else:
+        print("   ❌ Database: Cosmos DB NOT configured (required)")
+        print("\n🔧 To fix, set these environment variables:")
+        print("    • AZURE_COSMOS_ENDPOINT=https://localhost:8081  (emulator)")
+        print("    • AZURE_COSMOS_DATABASE=trading_bot")
+        print("    • AZURE_COSMOS_KEY=<your_key>")
+        return False
+    
+    # Azure services status (optional)
+    if has_azure_services:
+        print("   ✅ Azure Services: Configured")
         if azure_keyvault:
-            print(f"   • Key Vault: {azure_keyvault[:50]}...")
+            print(f"      └─ Key Vault: {azure_keyvault[:40]}...")
         if azure_app_config:
-            print(f"   • App Config: {azure_app_config[:50]}...")
-        return True
+            print(f"      └─ App Config: {azure_app_config[:40]}...")
+    else:
+        print("   ℹ️  Azure Services: Not configured (optional)")
     
-    if has_direct:
-        print("✅ Direct environment configuration detected:")
-        print("   • ALPACA_API_KEY: [configured]")
-        print("   • ALPACA_API_SECRET: [configured]")
-        return True
+    # Broker status (optional - can be added via UI)
+    if has_broker:
+        print("   ✅ Broker: Alpaca pre-configured")
+    else:
+        print("   ℹ️  Broker: None pre-configured (add via UI)")
     
-    # No configuration found
-    print("❌ No configuration found!")
-    print("\n🔧 Configuration Options:")
-    print("\n  Option 1: Azure (Recommended for Production)")
-    print("  ─────────────────────────────────────────────")
-    print("    Set these environment variables:")
-    print("    • AZURE_KEYVAULT_URL=https://your-keyvault.vault.azure.net/")
-    print("    • AZURE_APP_CONFIGURATION_ENDPOINT=https://your-config.azconfig.io")
     print("")
-    print("  Option 2: Environment Variables (Local Development)")
-    print("  ────────────────────────────────────────────────────")
-    print("    Set these environment variables:")
-    print("    • ALPACA_API_KEY=your_api_key")
-    print("    • ALPACA_API_SECRET=your_api_secret")
-    print("    • ALPACA_BASE_URL=https://paper-api.alpaca.markets")
-    print("    • AZURE_COSMOS_ENDPOINT=https://your-cosmos.documents.azure.com:443/")
-    print("    • AZURE_COSMOS_KEY=your_cosmos_key")
-    print("    • AZURE_COSMOS_DATABASE=your_database_name")
-    print("")
-    print("  📄 Copy config/.env.example to .env and source it:")
-    print("     Windows: copy config\\.env.example .env && set /p < .env")
-    print("     Linux/Mac: cp config/.env.example .env && source .env")
-    return False
+    return True  # Only Cosmos DB is required now
 
 
 def validate_config():
@@ -242,8 +251,6 @@ async def main():
             print("\n🏠 Local Mode (ngrok disabled):")
             print("   • Running without webhook tunnel")
             print("   • Set NGROK_ENABLED=true to enable")
-    except Exception:
-        pass  # Don't fail if config check fails
     except Exception:
         pass  # Don't fail if config check fails
     

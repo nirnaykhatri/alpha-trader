@@ -16,8 +16,9 @@ import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Slider } from '@/components/ui/slider'
 import { CollapsibleTrigger } from '@/components/ui/collapsible'
-import { ChevronDown, ChevronRight, Minus, Plus, AlertTriangle, Info } from 'lucide-react'
-import { useDebouncedNumericInput } from '@/lib/hooks'
+import { ChevronDown, ChevronRight, Minus, Plus, AlertTriangle, Info, Loader2 } from 'lucide-react'
+import { useDebouncedNumericInput, useDCAPreview } from '@/lib/hooks'
+import type { AssetClass, Strategy } from '@/lib/types/dca-preview'
 
 // ============================================================================
 // SectionHeader - Collapsible section toggle
@@ -464,6 +465,8 @@ export function ToggleRow({
 // ============================================================================
 
 export interface DCAOrderPreviewProps {
+  /** Trading symbol (e.g., 'AAPL', 'BTC/USD') */
+  symbol: string
   /** Base order amount */
   baseOrderAmount: number
   /** Total amount for averaging orders */
@@ -489,314 +492,25 @@ export interface DCAOrderPreviewProps {
   /** Callback to fix invalid configuration */
   onFixConfig?: (newOrdersCount: number, newStepPercent: number) => void
   /** Asset class - determines if fractional units are allowed */
-  assetClass?: 'crypto' | 'stock' | 'forex' | 'commodity' | 'etf' | 'index'
-}
-
-/** Validation result for DCA order configuration */
-interface DCAValidationResult {
-  isValid: boolean
-  maxValidOrdersCount: number
-  maxSafeDeviation: number
-  invalidOrderIndex: number | null
-}
-
-interface OrderPreviewRow {
-  orderNumber: number
-  orderLabel: string
-  amount: number
-  /** Actual amount after rounding for whole shares (stocks only) */
-  adjustedAmount: number
-  priceDeviation: number
-  targetPrice: number
-  cumulativeAmount: number
-  cumulativeUnits: number
-  averagePrice: number
-  isInvalid?: boolean
-  /** Number of units/shares for this order */
-  units: number
-  /** Whether the order had to be adjusted for whole shares */
-  wasAdjusted?: boolean
-  /** Whether this order has insufficient shares (would be 0) */
-  hasInsufficientShares?: boolean
-}
-
-/**
- * Validates DCA configuration to ensure no orders would result in negative prices.
- * For long positions, total deviation must stay below 100%.
- */
-function validateDCAConfig({
-  ordersCount,
-  stepPercent,
-  stepMultiplier,
-  stepMultiplierEnabled,
-  isShort = false,
-}: {
-  ordersCount: number
-  stepPercent: number
-  stepMultiplier: number
-  stepMultiplierEnabled: boolean
-  isShort?: boolean
-}): DCAValidationResult {
-  // Short positions don't have this constraint (price going up is fine)
-  if (isShort) {
-    return { isValid: true, maxValidOrdersCount: ordersCount, maxSafeDeviation: 100, invalidOrderIndex: null }
-  }
-
-  const effectiveStepMult = stepMultiplierEnabled ? stepMultiplier : 1.0
-  let currentStepPercent = stepPercent
-  let totalDeviation = 0
-  let maxValidOrders = 0
-  let invalidIndex: number | null = null
-
-  for (let i = 0; i < ordersCount; i++) {
-    if (i === 0) {
-      totalDeviation = stepPercent
-    } else {
-      totalDeviation += currentStepPercent
-      if (stepMultiplierEnabled) {
-        currentStepPercent *= effectiveStepMult
-      }
-    }
-    
-    // Check if this order would result in negative/zero price (deviation >= 100%)
-    if (totalDeviation >= 100) {
-      invalidIndex = i
-      break
-    }
-    maxValidOrders = i + 1
-  }
-
-  // Calculate max safe deviation (leave some buffer)
-  const maxSafeDeviation = 95 // 95% max to leave some buffer
-
-  return {
-    isValid: invalidIndex === null,
-    maxValidOrdersCount: maxValidOrders,
-    maxSafeDeviation,
-    invalidOrderIndex: invalidIndex,
-  }
-}
-
-/**
- * Calculates the DCA order preview data for visualization.
- * Shows investment per order, average price, and price deviation.
- * Marks orders as invalid if they would result in negative prices.
- * For stocks, adjusts amounts to buy whole shares only.
- */
-function calculateDCAOrders({
-  baseOrderAmount,
-  averagingOrdersAmount,
-  ordersCount,
-  stepPercent,
-  amountMultiplier,
-  amountMultiplierEnabled,
-  stepMultiplier,
-  stepMultiplierEnabled,
-  currentPrice,
-  isShort = false,
-  assetClass = 'crypto',
-}: Omit<DCAOrderPreviewProps, 'currency' | 'onFixConfig'>): OrderPreviewRow[] {
-  const orders: OrderPreviewRow[] = []
-  
-  if (currentPrice <= 0 || ordersCount < 1) {
-    return orders
-  }
-
-  // Determine if we need whole shares (stocks/etf only - not crypto)
-  const requiresWholeShares = assetClass === 'stock' || assetClass === 'etf'
-
-  // Calculate individual averaging order amounts
-  const effectiveAmountMult = amountMultiplierEnabled ? amountMultiplier : 1.0
-  const effectiveStepMult = stepMultiplierEnabled ? stepMultiplier : 1.0
-  
-  // Calculate the first averaging order amount and total weighted sum
-  // If multiplier enabled: amounts are baseAmt, baseAmt*mult, baseAmt*mult^2, ...
-  // Total = baseAmt * (1 + mult + mult^2 + ... + mult^(n-1))
-  let totalMultiplierWeight = 0
-  for (let i = 0; i < ordersCount; i++) {
-    totalMultiplierWeight += Math.pow(effectiveAmountMult, i)
-  }
-  const firstAvgOrderAmount = totalMultiplierWeight > 0 
-    ? averagingOrdersAmount / totalMultiplierWeight 
-    : averagingOrdersAmount / ordersCount
-
-  // Track cumulative values
-  let cumulativeAmount = 0
-  let cumulativeUnits = 0
-  let currentStepPercent = stepPercent
-  let currentDeviation = 0
-
-  // For stocks:
-  // - Long: input is USD, need to calculate shares
-  // - Short: input is already in shares/units (base currency) for ALL asset types
-  const inputIsUnits = isShort
-
-  // Base Order (Order #0)
-  let baseUnits: number
-  let adjustedBaseAmount: number
-  let baseWasAdjusted = false
-  let baseHasInsufficientShares = false
-  
-  if (inputIsUnits) {
-    // Short positions: input is units (shares for stocks, coins for crypto)
-    const rawUnits = baseOrderAmount
-    if (requiresWholeShares) {
-      // Stocks: round to whole shares
-      baseUnits = Math.round(rawUnits)
-      // Mark as insufficient if rounds to 0
-      if (baseUnits < 1 && rawUnits > 0) {
-        baseHasInsufficientShares = true
-        baseUnits = 0
-      }
-      baseWasAdjusted = baseUnits !== rawUnits
-    } else {
-      // Crypto/forex: keep fractional units as-is
-      baseUnits = rawUnits
-    }
-    adjustedBaseAmount = baseUnits * currentPrice
-  } else if (requiresWholeShares && currentPrice > 0) {
-    // Long stocks: input is USD, calculate shares and round
-    const rawUnits = baseOrderAmount / currentPrice
-    baseUnits = Math.round(rawUnits)
-    // Mark as insufficient if rounds to 0
-    if (baseUnits < 1 && rawUnits > 0) {
-      baseHasInsufficientShares = true
-      baseUnits = 0
-    }
-    adjustedBaseAmount = baseUnits * currentPrice
-    baseWasAdjusted = baseUnits !== rawUnits
-  } else {
-    // Long crypto/forex: input is USD, calculate units
-    baseUnits = currentPrice > 0 ? baseOrderAmount / currentPrice : 0
-    adjustedBaseAmount = baseOrderAmount
-  }
-  
-  cumulativeAmount = adjustedBaseAmount
-  cumulativeUnits = baseUnits
-  
-  orders.push({
-    orderNumber: 0,
-    orderLabel: 'Base Order',
-    amount: baseOrderAmount,
-    adjustedAmount: Math.round(adjustedBaseAmount * 100) / 100,
-    priceDeviation: 0,
-    targetPrice: currentPrice,
-    cumulativeAmount: Math.round(cumulativeAmount * 100) / 100,
-    cumulativeUnits: Math.round(cumulativeUnits * 10000) / 10000,
-    averagePrice: currentPrice,
-    isInvalid: false,
-    units: baseUnits,
-    wasAdjusted: baseWasAdjusted,
-    hasInsufficientShares: baseHasInsufficientShares,
-  })
-
-  // Averaging Orders (Safety Orders)
-  let currentOrderAmount = firstAvgOrderAmount
-  
-  for (let i = 0; i < ordersCount; i++) {
-    // Calculate deviation for this order
-    if (i === 0) {
-      currentDeviation = stepPercent
-    } else {
-      currentDeviation += currentStepPercent
-      if (stepMultiplierEnabled) {
-        currentStepPercent *= effectiveStepMult
-      }
-    }
-    
-    // Check if deviation would result in invalid price (for long positions)
-    const isInvalidOrder = !isShort && currentDeviation >= 100
-    
-    // Calculate target price (down for long, up for short)
-    const priceMultiplier = isShort 
-      ? (1 + currentDeviation / 100) 
-      : (1 - currentDeviation / 100)
-    const targetPrice = Math.max(0, currentPrice * priceMultiplier)
-    
-    // Calculate units and amount based on input type
-    let units: number
-    let adjustedAmount: number
-    let wasAdjusted = false
-    let hasInsufficientShares = false
-    
-    if (inputIsUnits) {
-      // Short positions: input is units (shares for stocks, coins for crypto)
-      const rawUnits = currentOrderAmount
-      if (requiresWholeShares) {
-        // Stocks: round to whole shares
-        units = Math.round(rawUnits)
-        // Mark as insufficient if rounds to 0
-        if (units < 1 && rawUnits > 0) {
-          hasInsufficientShares = true
-          units = 0
-        }
-        wasAdjusted = units !== rawUnits
-      } else {
-        // Crypto/forex: keep fractional units as-is
-        units = rawUnits
-      }
-      adjustedAmount = units * targetPrice
-    } else if (requiresWholeShares && targetPrice > 0 && !isInvalidOrder) {
-      // Long stocks: input is USD, calculate shares and round
-      const rawUnits = currentOrderAmount / targetPrice
-      units = Math.round(rawUnits)
-      // Mark as insufficient if rounds to 0
-      if (units < 1 && rawUnits > 0) {
-        hasInsufficientShares = true
-        units = 0
-      }
-      adjustedAmount = units * targetPrice
-      wasAdjusted = units !== rawUnits
-    } else {
-      // Long crypto/forex: input is USD, calculate units
-      units = targetPrice > 0 ? currentOrderAmount / targetPrice : 0
-      adjustedAmount = currentOrderAmount
-    }
-    
-    // Update cumulative values
-    cumulativeAmount += adjustedAmount
-    cumulativeUnits += units
-    
-    // Calculate new average price
-    const averagePrice = cumulativeUnits > 0 ? cumulativeAmount / cumulativeUnits : 0
-    
-    orders.push({
-      orderNumber: i + 1,
-      orderLabel: `SO ${i + 1}`,
-      amount: Math.round(currentOrderAmount * 100) / 100,
-      adjustedAmount: Math.round(adjustedAmount * 100) / 100,
-      priceDeviation: Math.round(currentDeviation * 100) / 100,
-      targetPrice: Math.round(targetPrice * 100) / 100,
-      cumulativeAmount: Math.round(cumulativeAmount * 100) / 100,
-      cumulativeUnits: Math.round(cumulativeUnits * 10000) / 10000,
-      averagePrice: Math.round(averagePrice * 100) / 100,
-      isInvalid: isInvalidOrder,
-      units: units,
-      wasAdjusted: wasAdjusted,
-      hasInsufficientShares: hasInsufficientShares,
-    })
-    
-    // Apply amount multiplier for next order
-    if (amountMultiplierEnabled) {
-      currentOrderAmount *= effectiveAmountMult
-    }
-  }
-  
-  return orders
+  assetClass?: AssetClass
 }
 
 /**
  * DCA Order Preview Table Component.
- * Displays a visual breakdown of all DCA orders showing:
- * - Investment amount per order
- * - Target price and deviation from current price
- * - Running average price after each order
  * 
- * Shows validation errors when configuration would result in negative prices.
+ * Fetches order preview data from the backend API using the useDCAPreview hook.
+ * The backend is the single source of truth for all DCA calculations.
+ * 
+ * Features:
+ * - Live updates with debounced API calls (300ms)
+ * - Stale-while-revalidate pattern for smooth UX
+ * - Request cancellation for rapid changes
+ * - Validation errors and suggested fixes from API
  * 
  * @example
  * ```tsx
  * <DCAOrderPreview
+ *   symbol="AAPL"
  *   baseOrderAmount={100}
  *   averagingOrdersAmount={500}
  *   ordersCount={5}
@@ -812,6 +526,7 @@ function calculateDCAOrders({
  * ```
  */
 export function DCAOrderPreview({
+  symbol,
   baseOrderAmount,
   averagingOrdersAmount,
   ordersCount,
@@ -826,8 +541,15 @@ export function DCAOrderPreview({
   onFixConfig,
   assetClass = 'crypto',
 }: DCAOrderPreviewProps) {
-  const orders = React.useMemo(
-    () => calculateDCAOrders({
+  // Fetch preview from backend API using the hook
+  // Gate API calls - only fetch when we have a valid price
+  const strategy: Strategy = isShort ? 'short' : 'long'
+  const { data, isLoading, error, isStale } = useDCAPreview(
+    {
+      symbol,
+      assetClass,
+      strategy,
+      currentPrice,
       baseOrderAmount,
       averagingOrdersAmount,
       ordersCount,
@@ -836,110 +558,32 @@ export function DCAOrderPreview({
       amountMultiplierEnabled,
       stepMultiplier,
       stepMultiplierEnabled,
-      currentPrice,
-      isShort,
-      assetClass,
-    }),
-    [
-      baseOrderAmount,
-      averagingOrdersAmount,
-      ordersCount,
-      stepPercent,
-      amountMultiplier,
-      amountMultiplierEnabled,
-      stepMultiplier,
-      stepMultiplierEnabled,
-      currentPrice,
-      isShort,
-      assetClass,
-    ]
+    },
+    { enabled: currentPrice > 0 }
   )
 
-  // Check if any orders were adjusted for whole shares
-  const hasAdjustedOrders = orders.some(o => o.wasAdjusted && !o.hasInsufficientShares)
+  // Derive display properties
   const requiresWholeShares = assetClass === 'stock' || assetClass === 'etf'
   
-  // Check for insufficient shares (orders that would be 0 shares)
-  const ordersWithInsufficientShares = orders.filter(o => o.hasInsufficientShares)
-  const hasInsufficientShares = ordersWithInsufficientShares.length > 0
-  const firstInsufficientOrder = ordersWithInsufficientShares[0]
-  
-  // Calculate max valid orders count for insufficient shares fix
-  // Count how many orders have at least 1 share
-  const maxOrdersWithShares = orders.filter(o => o.units >= 1 && o.orderNumber > 0).length
-
-  // For stocks with share input (short), check if total shares exceed budget
-  const inputIsShares = requiresWholeShares && isShort
-  const configuredTotalShares = inputIsShares ? baseOrderAmount + averagingOrdersAmount : 0
-  const actualTotalShares = orders.reduce((sum, o) => sum + o.units, 0)
-  const hasOverAllocation = inputIsShares && actualTotalShares > configuredTotalShares
-  const overAllocationAmount = actualTotalShares - configuredTotalShares
-  
-  // Find max orders that fit within budget
-  const findMaxOrdersWithinBudget = React.useCallback(() => {
-    if (!inputIsShares) return ordersCount
-    
-    // Try reducing orders until we fit within budget
-    for (let tryCount = ordersCount - 1; tryCount >= 1; tryCount--) {
-      // Recalculate with fewer orders
-      const effectiveAmountMult = amountMultiplierEnabled ? amountMultiplier : 1.0
-      let totalWeight = 0
-      for (let i = 0; i < tryCount; i++) {
-        totalWeight += Math.pow(effectiveAmountMult, i)
-      }
-      const firstOrderShares = totalWeight > 0 ? averagingOrdersAmount / totalWeight : averagingOrdersAmount / tryCount
-      
-      let totalShares = Math.round(baseOrderAmount) // Base order
-      let currentShares = firstOrderShares
-      for (let i = 0; i < tryCount; i++) {
-        totalShares += Math.round(currentShares)
-        if (amountMultiplierEnabled) {
-          currentShares *= effectiveAmountMult
-        }
-      }
-      
-      if (totalShares <= configuredTotalShares) {
-        return tryCount
-      }
-    }
-    return 0
-  }, [inputIsShares, ordersCount, baseOrderAmount, averagingOrdersAmount, amountMultiplier, amountMultiplierEnabled, configuredTotalShares])
-  
-  const maxOrdersWithinBudget = React.useMemo(() => findMaxOrdersWithinBudget(), [findMaxOrdersWithinBudget])
-
-  // Validate configuration
-  const validation = React.useMemo(
-    () => validateDCAConfig({
-      ordersCount,
-      stepPercent,
-      stepMultiplier,
-      stepMultiplierEnabled,
-      isShort,
-    }),
-    [ordersCount, stepPercent, stepMultiplier, stepMultiplierEnabled, isShort]
-  )
-
-  // Handle fix button click for negative price issue
+  // Handle fix button click using API-provided suggested fix
   const handleFix = React.useCallback(() => {
-    if (onFixConfig && validation.maxValidOrdersCount > 0) {
-      onFixConfig(validation.maxValidOrdersCount, stepPercent)
+    if (onFixConfig && data?.validation?.suggested_fix) {
+      const fix = data.validation.suggested_fix
+      onFixConfig(fix.orders_count, fix.step_percent ?? stepPercent)
     }
-  }, [onFixConfig, validation.maxValidOrdersCount, stepPercent])
-  
-  // Handle fix button click for insufficient shares
-  const handleFixInsufficientShares = React.useCallback(() => {
-    if (onFixConfig && maxOrdersWithShares > 0) {
-      onFixConfig(maxOrdersWithShares, stepPercent)
-    }
-  }, [onFixConfig, maxOrdersWithShares, stepPercent])
-  
-  // Handle fix button click for over-allocation
-  const handleFixOverAllocation = React.useCallback(() => {
-    if (onFixConfig && maxOrdersWithinBudget > 0) {
-      onFixConfig(maxOrdersWithinBudget, stepPercent)
-    }
-  }, [onFixConfig, maxOrdersWithinBudget, stepPercent])
+  }, [onFixConfig, data?.validation?.suggested_fix, stepPercent])
 
+  // Loading state (only show spinner on initial load, not during stale-while-revalidate)
+  if (isLoading && !data) {
+    return (
+      <div className="flex items-center justify-center py-8 bg-muted/30 rounded-lg">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        <span className="ml-2 text-sm text-muted-foreground">Loading preview...</span>
+      </div>
+    )
+  }
+
+  // Prompt user to enter symbol when price is not available
   if (currentPrice <= 0) {
     return (
       <div className="text-xs text-muted-foreground text-center py-4 bg-muted/30 rounded-lg">
@@ -948,30 +592,61 @@ export function DCAOrderPreview({
     )
   }
 
-  if (orders.length === 0) {
+  // Error state
+  if (error && !data) {
+    return (
+      <div className="flex items-start gap-2 p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
+        <AlertTriangle className="h-4 w-4 text-destructive mt-0.5 flex-shrink-0" />
+        <div className="flex-1">
+          <p className="text-sm font-medium text-destructive">Preview Error</p>
+          <p className="text-xs text-muted-foreground">{error}</p>
+        </div>
+      </div>
+    )
+  }
+
+  // No data yet (e.g., symbol not entered)
+  if (!data || data.orders.length === 0) {
     return null
   }
 
-  // Check for invalid orders
-  const hasInvalidOrders = orders.some(o => o.isInvalid)
-  const firstInvalidOrder = orders.find(o => o.isInvalid)
+  // Extract data from API response
+  const orders = data.orders
+  const totals = data.totals
+  const validation = data.validation
 
-  // Calculate totals (only for valid orders, use adjusted amounts for stocks and crypto shorts)
-  const validOrders = orders.filter(o => !o.isInvalid)
-  // For crypto/forex shorts, input is in units so adjustedAmount has the USD value
-  // For crypto/forex longs, input is in USD so amount has the USD value
-  const inputIsUnits = isShort && !requiresWholeShares
-  const totalInvestment = requiresWholeShares || inputIsUnits
-    ? validOrders.reduce((sum, o) => sum + o.adjustedAmount, 0)
-    : validOrders.reduce((sum, o) => sum + o.amount, 0)
-  const totalUnits = validOrders.reduce((sum, o) => sum + o.units, 0)
-  const lastValidOrder = validOrders[validOrders.length - 1]
-  const maxDeviation = lastValidOrder?.priceDeviation || 0
+  // Check if any orders were adjusted for whole shares
+  const hasAdjustedOrders = orders.some(o => o.was_adjusted && !o.has_insufficient_shares)
+  
+  // Check for insufficient shares (orders that would be 0 shares)
+  const ordersWithInsufficientShares = orders.filter(o => o.has_insufficient_shares)
+  const hasInsufficientShares = ordersWithInsufficientShares.length > 0
+  const firstInsufficientOrder = ordersWithInsufficientShares[0]
+  
+  // Find validation issues by type
+  const errorIssues = validation.issues.filter(i => i.severity === 'error')
+  const warningIssues = validation.issues.filter(i => i.severity === 'warning')
+  const hasErrors = errorIssues.length > 0
+  
+  // Check for invalid orders (from API)
+  const hasInvalidOrders = orders.some(o => o.is_invalid)
+  const firstInvalidOrder = orders.find(o => o.is_invalid)
+
+  // Use totals from API
+  const totalInvestment = totals.total_investment
+  const totalUnits = totals.total_units
+  const maxDeviation = totals.max_deviation_pct
+  const finalAveragePrice = totals.final_average_price
 
   return (
-    <div className="space-y-3">
+    <div className={`space-y-3 ${isStale ? 'opacity-70' : ''}`}>
       <div className="flex items-center justify-between">
-        <Label className="text-xs text-muted-foreground uppercase">Order Preview</Label>
+        <div className="flex items-center gap-2">
+          <Label className="text-xs text-muted-foreground uppercase">Order Preview</Label>
+          {(isLoading || isStale) && (
+            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+          )}
+        </div>
         <span className="text-xs text-muted-foreground">
           Current: ${currentPrice.toLocaleString()}
         </span>
@@ -987,39 +662,41 @@ export function DCAOrderPreview({
         </div>
       )}
 
-      {/* Validation Error Banner */}
-      {hasInvalidOrders && (
+      {/* API Warning Issues */}
+      {warningIssues.map((issue, idx) => (
+        <div key={idx} className="flex items-start gap-2 p-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+          <Info className="h-4 w-4 text-yellow-600 mt-0.5 flex-shrink-0" />
+          <p className="text-xs text-yellow-700 dark:text-yellow-400">{issue.message}</p>
+        </div>
+      ))}
+
+      {/* Validation Error Banner (from API) */}
+      {hasErrors && (
         <div className="flex items-start gap-2 p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
           <AlertTriangle className="h-4 w-4 text-destructive mt-0.5 flex-shrink-0" />
           <div className="flex-1 space-y-1">
             <p className="text-sm font-medium text-destructive">
               Invalid Configuration
             </p>
-            <p className="text-xs text-muted-foreground">
-              Order {firstInvalidOrder?.orderNumber} would have a price deviation of {firstInvalidOrder?.priceDeviation}% 
-              which results in a negative price. Maximum allowed deviation is 100%.
-            </p>
-            {onFixConfig && validation.maxValidOrdersCount > 0 && (
+            {errorIssues.map((issue, idx) => (
+              <p key={idx} className="text-xs text-muted-foreground">{issue.message}</p>
+            ))}
+            {onFixConfig && validation.suggested_fix && (
               <Button
                 variant="outline"
                 size="sm"
                 className="mt-2 h-7 text-xs border-destructive/50 text-destructive hover:bg-destructive/10"
                 onClick={handleFix}
               >
-                Fix: Reduce to {validation.maxValidOrdersCount} orders
+                Fix: {validation.suggested_fix.description}
               </Button>
-            )}
-            {onFixConfig && validation.maxValidOrdersCount === 0 && (
-              <p className="text-xs text-destructive mt-1">
-                Try reducing the step percentage or disabling the step multiplier.
-              </p>
             )}
           </div>
         </div>
       )}
 
       {/* Insufficient Shares Error Banner */}
-      {hasInsufficientShares && !hasInvalidOrders && (
+      {hasInsufficientShares && !hasErrors && (
         <div className="flex items-start gap-2 p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
           <AlertTriangle className="h-4 w-4 text-destructive mt-0.5 flex-shrink-0" />
           <div className="flex-1 space-y-1">
@@ -1028,57 +705,20 @@ export function DCAOrderPreview({
             </p>
             <p className="text-xs text-muted-foreground">
               {ordersWithInsufficientShares.length === 1 
-                ? `${firstInsufficientOrder?.orderLabel} would have 0 shares.`
-                : `${ordersWithInsufficientShares.length} orders would have 0 shares (${ordersWithInsufficientShares.map(o => o.orderLabel).join(', ')}).`
+                ? `${firstInsufficientOrder?.order_label} would have 0 shares.`
+                : `${ordersWithInsufficientShares.length} orders would have 0 shares.`
               }
               {' '}Increase the total shares or reduce the number of orders.
             </p>
-            {onFixConfig && maxOrdersWithShares > 0 && (
+            {onFixConfig && validation.suggested_fix && (
               <Button
                 variant="outline"
                 size="sm"
                 className="mt-2 h-7 text-xs border-destructive/50 text-destructive hover:bg-destructive/10"
-                onClick={handleFixInsufficientShares}
+                onClick={handleFix}
               >
-                Fix: Reduce to {maxOrdersWithShares} orders
+                Fix: {validation.suggested_fix.description}
               </Button>
-            )}
-            {maxOrdersWithShares === 0 && (
-              <p className="text-xs text-destructive mt-1">
-                Increase the averaging orders quantity to at least {ordersCount} shares.
-              </p>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Over-Allocation Error Banner (for short stocks) */}
-      {hasOverAllocation && !hasInvalidOrders && !hasInsufficientShares && (
-        <div className="flex items-start gap-2 p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
-          <AlertTriangle className="h-4 w-4 text-destructive mt-0.5 flex-shrink-0" />
-          <div className="flex-1 space-y-1">
-            <p className="text-sm font-medium text-destructive">
-              Exceeds Share Budget
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Rounding to whole shares results in {actualTotalShares} shares, 
-              but only {configuredTotalShares} shares are configured ({overAllocationAmount} over budget).
-              Reduce the number of orders or increase the total shares.
-            </p>
-            {onFixConfig && maxOrdersWithinBudget > 0 && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="mt-2 h-7 text-xs border-destructive/50 text-destructive hover:bg-destructive/10"
-                onClick={handleFixOverAllocation}
-              >
-                Fix: Reduce to {maxOrdersWithinBudget} orders
-              </Button>
-            )}
-            {maxOrdersWithinBudget === 0 && (
-              <p className="text-xs text-destructive mt-1">
-                Increase the total shares to at least {actualTotalShares}.
-              </p>
             )}
           </div>
         </div>
@@ -1108,111 +748,101 @@ export function DCAOrderPreview({
             <tbody className="divide-y divide-border/50">
               {orders.map((order) => (
                 <tr 
-                  key={order.orderNumber} 
+                  key={order.order_number} 
                   className={
-                    order.isInvalid || order.hasInsufficientShares
+                    order.is_invalid || order.has_insufficient_shares
                       ? 'bg-destructive/10 text-destructive' 
-                      : order.wasAdjusted
+                      : order.was_adjusted
                         ? 'bg-yellow-500/5'
-                        : order.orderNumber === 0 
+                        : order.order_number === 0 
                           ? 'bg-primary/5' 
                           : 'hover:bg-muted/30'
                   }
                 >
                   <td className="py-1.5 px-2">
                     <span className={
-                      order.isInvalid || order.hasInsufficientShares
+                      order.is_invalid || order.has_insufficient_shares
                         ? 'text-destructive' 
-                        : order.orderNumber === 0 
+                        : order.order_number === 0 
                           ? 'font-medium text-primary' 
                           : ''
                     }>
-                      {order.orderLabel}
-                      {(order.isInvalid || order.hasInsufficientShares) && ' ⚠️'}
-                      {order.wasAdjusted && !order.isInvalid && !order.hasInsufficientShares && ' *'}
+                      {order.order_label}
+                      {(order.is_invalid || order.has_insufficient_shares) && ' ⚠️'}
+                      {order.was_adjusted && !order.is_invalid && !order.has_insufficient_shares && ' *'}
                     </span>
                   </td>
                   {requiresWholeShares ? (
                     // Stocks: Shares | Amount | Price | Dev
                     <>
                       <td className="py-1.5 px-2 text-right font-mono">
-                        {order.isInvalid ? '—' : order.hasInsufficientShares ? <span className="text-destructive">0</span> : order.units}
+                        {order.is_invalid ? '—' : order.has_insufficient_shares ? <span className="text-destructive">0</span> : order.units}
                       </td>
                       <td className="py-1.5 px-2 text-right font-mono">
-                        {order.isInvalid || order.hasInsufficientShares ? '—' : `$${order.adjustedAmount.toLocaleString()}`}
+                        {order.is_invalid || order.has_insufficient_shares ? '—' : `$${order.adjusted_amount.toLocaleString()}`}
                       </td>
                       <td className="py-1.5 px-2 text-right font-mono">
-                        {order.isInvalid ? (
+                        {order.is_invalid ? (
                           <span className="text-destructive">Invalid</span>
                         ) : (
-                          `$${order.targetPrice.toLocaleString()}`
+                          `$${order.target_price.toLocaleString()}`
                         )}
                       </td>
                       <td className="py-1.5 px-2 text-right">
-                        {order.priceDeviation === 0 ? (
+                        {order.price_deviation_pct === 0 ? (
                           <span className="text-muted-foreground">—</span>
-                        ) : order.isInvalid ? (
+                        ) : order.is_invalid ? (
                           <span className="text-destructive font-medium">
-                            {isShort ? '+' : '-'}{order.priceDeviation}%
+                            {isShort ? '+' : '-'}{order.price_deviation_pct}%
                           </span>
                         ) : (
                           <span className={isShort ? 'text-red-500' : 'text-green-500'}>
-                            {isShort ? '+' : '-'}{order.priceDeviation}%
+                            {isShort ? '+' : '-'}{order.price_deviation_pct}%
                           </span>
                         )}
                       </td>
                     </>
                   ) : (
                     // Crypto/Forex: Amount | Price | Dev | Avg Price
-                    // For shorts: input is in units, show units in Amount column
-                    // For longs: input is USD, show USD in Amount column
                     <>
                       <td className="py-1.5 px-2 text-right font-mono">
                         {isShort ? (
-                          // Short: show units (e.g., 0.0286 BTC)
                           order.units.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 8 })
                         ) : (
-                          // Long: show USD amount
                           `$${order.amount.toLocaleString()}`
                         )}
                       </td>
                       <td className="py-1.5 px-2 text-right font-mono">
-                        {order.isInvalid ? (
+                        {order.is_invalid ? (
                           <span className="text-destructive">Invalid</span>
                         ) : isShort ? (
-                          // Short: show USD value (units * price)
-                          `$${order.adjustedAmount.toLocaleString()}`
+                          `$${order.adjusted_amount.toLocaleString()}`
                         ) : (
-                          // Long: show price
-                          `$${order.targetPrice.toLocaleString()}`
+                          `$${order.target_price.toLocaleString()}`
                         )}
                       </td>
                       <td className="py-1.5 px-2 text-right font-mono">
-                        {order.isInvalid ? (
+                        {order.is_invalid ? (
                           <span className="text-destructive">Invalid</span>
                         ) : isShort ? (
-                          // Short: show price in third column
-                          `$${order.targetPrice.toLocaleString()}`
+                          `$${order.target_price.toLocaleString()}`
                         ) : (
-                          // Long: show deviation
-                          order.priceDeviation === 0 ? (
+                          order.price_deviation_pct === 0 ? (
                             <span className="text-muted-foreground">—</span>
                           ) : (
-                            <span className="text-green-500">-{order.priceDeviation}%</span>
+                            <span className="text-green-500">-{order.price_deviation_pct}%</span>
                           )
                         )}
                       </td>
                       <td className="py-1.5 px-2 text-right font-mono text-blue-600 dark:text-blue-400">
-                        {order.isInvalid ? '—' : isShort ? (
-                          // Short: show deviation in fourth column
-                          order.priceDeviation === 0 ? (
+                        {order.is_invalid ? '—' : isShort ? (
+                          order.price_deviation_pct === 0 ? (
                             <span className="text-muted-foreground">—</span>
                           ) : (
-                            <span className="text-red-500">+{order.priceDeviation}%</span>
+                            <span className="text-red-500">+{order.price_deviation_pct}%</span>
                           )
                         ) : (
-                          // Long: show avg price
-                          `$${order.averagePrice.toLocaleString()}`
+                          `$${order.average_price.toLocaleString()}`
                         )}
                       </td>
                     </>
@@ -1244,7 +874,7 @@ export function DCAOrderPreview({
         <div className="bg-muted/30 rounded-lg p-2 text-center">
           <div className="text-muted-foreground">Final Avg Price</div>
           <div className="font-medium text-blue-600 dark:text-blue-400">
-            ${lastValidOrder?.averagePrice.toLocaleString() || '—'}
+            ${finalAveragePrice.toLocaleString() || '—'}
           </div>
         </div>
         <div className="bg-muted/30 rounded-lg p-2 text-center">

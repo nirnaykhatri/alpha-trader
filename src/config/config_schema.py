@@ -44,10 +44,14 @@ class WebsocketConfig(BaseModel):
 
 
 class AlpacaApiConfig(BaseModel):
-    """Alpaca API configuration."""
-    api_key: str = Field(..., min_length=1)
-    secret_key: str = Field(..., min_length=1)
-    base_url: str = Field(..., pattern="^https?://")
+    """Alpaca API configuration.
+    
+    Note: api_key and secret_key are optional at startup.
+    Brokers can be added via the web UI at /brokers.
+    """
+    api_key: str = Field(default="")  # Optional - add via UI
+    secret_key: str = Field(default="")  # Optional - add via UI
+    base_url: str = Field(default="https://paper-api.alpaca.markets")
     timeout: int = Field(default=30, ge=1)
     max_retries: int = Field(default=3, ge=0)
     retry_delay: float = Field(default=1.0, ge=0)
@@ -59,10 +63,15 @@ class AlpacaApiConfig(BaseModel):
 
 
 class WebhookApiConfig(BaseModel):
-    """Webhook server configuration."""
+    """Webhook server configuration.
+    
+    Note:
+        Defaults are aligned with ConfigContract (config_contract.py).
+        security_enabled defaults to True for production safety.
+    """
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8080, ge=1024, le=65535)
-    security_enabled: bool = False
+    security_enabled: bool = True  # Aligned with ConfigContract.WEBHOOK_SECURITY_ENABLED
     secret: str = Field(default="")
     
     class Config:
@@ -105,7 +114,7 @@ class PositionSizingConfig(BaseModel):
     method: str = Field(default="percentage")
     initial_portfolio_percentage: float = Field(default=0.01, gt=0, le=1.0)
     risk_per_trade: float = Field(default=0.02, gt=0, le=1.0)
-    averaging: AveragingConfig
+    averaging: AveragingConfig = Field(default_factory=AveragingConfig)  # Optional with defaults
     min_quantity: int = Field(default=1, ge=1)
     max_quantity: int = Field(default=10000, ge=1)
     max_total_position_percentage: float = Field(default=0.15, gt=0, le=1.0)
@@ -338,8 +347,26 @@ class ConfigValidator:
                 'risk_per_trade': config_mgr.get_config('trading.risk_per_trade', 0.02),
                 'max_position_size': config_mgr.get_config('trading.max_position_size', 1000),
                 'max_daily_trades': config_mgr.get_config('trading.max_daily_trades', 50),
-                'position_sizing': config_mgr.get_config('trading.position_sizing', {}),
-                'order_monitoring': config_mgr.get_config('trading.order_monitoring', {}),
+                # Provide complete position_sizing defaults including averaging
+                'position_sizing': config_mgr.get_config('trading.position_sizing', {
+                    'method': 'percentage',
+                    'initial_portfolio_percentage': 0.01,
+                    'risk_per_trade': 0.02,
+                    'averaging': {
+                        'enabled': True,
+                        'multiplier': 1.5,
+                        'max_multiplier': 4.0,
+                        'max_attempts': 3,
+                    },
+                    'min_quantity': 1,
+                    'max_quantity': 10000,
+                    'max_total_position_percentage': 0.15,
+                }),
+                'order_monitoring': config_mgr.get_config('trading.order_monitoring', {
+                    'check_interval': 10,
+                    'max_pending_time': 600,
+                    'log_pending_orders': True,
+                }),
                 'allowed_directions': config_mgr.get_config('trading.allowed_directions', {'enabled': True, 'long_only': False, 'short_only': False}),
                 'position_management': config_mgr.get_config('trading.position_management', {'ignore_opposing_signals': True}),
             },
