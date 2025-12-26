@@ -390,18 +390,256 @@ function AddBrokerDialog({ onBrokerAdded }: { onBrokerAdded?: () => void }) {
 }
 
 /**
+ * Broker Settings Dialog Component
+ */
+function BrokerSettingsDialog({ 
+  broker, 
+  open, 
+  onOpenChange,
+  onUpdated 
+}: { 
+  broker: BrokerConnection
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onUpdated?: () => void
+}) {
+  const [displayName, setDisplayName] = useState(broker.name)
+  const [apiKey, setApiKey] = useState('')
+  const [apiSecret, setApiSecret] = useState('')
+  const [showApiKey, setShowApiKey] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+  const { toast } = useToast()
+
+  const hasChanges = displayName !== broker.name || apiKey.length > 0 || apiSecret.length > 0
+
+  const handleSave = async () => {
+    if (!hasChanges) return
+    
+    setIsSaving(true)
+    try {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+      const headers = await getAuthHeaders()
+      
+      // Build update payload - only include changed fields
+      const updatePayload: Record<string, unknown> = {}
+      if (displayName !== broker.name) {
+        updatePayload.name = displayName
+      }
+      if (apiKey && apiSecret) {
+        updatePayload.credentials = {
+          api_key: apiKey,
+          api_secret: apiSecret,
+        }
+      }
+      
+      const response = await fetch(`${API_URL}/api/v1/admin/brokers/${broker.id}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify(updatePayload),
+      })
+      
+      const data = await response.json().catch(() => null)
+      
+      // Check both HTTP status and explicit success flag from response
+      if (response.ok && data?.success === true) {
+        toast({
+          title: 'Settings Updated',
+          description: data?.message || `Successfully updated ${displayName}`,
+        })
+        onOpenChange(false)
+        onUpdated?.()
+        // Reset credential fields
+        setApiKey('')
+        setApiSecret('')
+      } else {
+        toast({
+          title: 'Update Failed',
+          description: data?.message || data?.detail || 'Failed to update broker settings',
+          variant: 'destructive',
+        })
+      }
+    } catch (err) {
+      toast({
+        title: 'Connection Error',
+        description: err instanceof Error ? err.message : 'Failed to connect to server',
+        variant: 'destructive',
+      })
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  // Reset form when dialog opens
+  React.useEffect(() => {
+    if (open) {
+      setDisplayName(broker.name)
+      setApiKey('')
+      setApiSecret('')
+      setShowApiKey(false)
+    }
+  }, [open, broker.name])
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-[425px]">
+        <DialogHeader>
+          <DialogTitle>Broker Settings</DialogTitle>
+          <DialogDescription>
+            Update connection settings for {broker.name}
+          </DialogDescription>
+        </DialogHeader>
+        
+        <div className="grid gap-4 py-4">
+          {/* Display Name */}
+          <div className="grid gap-2">
+            <Label htmlFor="displayName">Display Name</Label>
+            <Input
+              id="displayName"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="e.g., My Trading Account"
+            />
+          </div>
+          
+          <Separator />
+          
+          {/* API Credentials Section */}
+          <div className="space-y-2">
+            <Label className="text-sm font-medium">Update API Credentials</Label>
+            <p className="text-xs text-muted-foreground">
+              Leave blank to keep existing credentials. Both fields required to update.
+            </p>
+          </div>
+          
+          <div className="grid gap-2">
+            <Label htmlFor="apiKey">API Key</Label>
+            <div className="relative">
+              <Input
+                id="apiKey"
+                type={showApiKey ? 'text' : 'password'}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder={broker.apiKeyMasked || 'Enter new API key'}
+                className="pr-10"
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="absolute right-0 top-0 h-full px-3"
+                onClick={() => setShowApiKey(!showApiKey)}
+              >
+                {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </Button>
+            </div>
+          </div>
+          
+          <div className="grid gap-2">
+            <Label htmlFor="apiSecret">API Secret</Label>
+            <Input
+              id="apiSecret"
+              type="password"
+              value={apiSecret}
+              onChange={(e) => setApiSecret(e.target.value)}
+              placeholder="Enter new API secret"
+            />
+          </div>
+          
+          {/* Validation message */}
+          {(apiKey && !apiSecret) || (!apiKey && apiSecret) ? (
+            <p className="text-xs text-amber-500">
+              Both API Key and Secret are required to update credentials
+            </p>
+          ) : null}
+          
+          {/* Current Connection Info */}
+          <Separator />
+          <div className="rounded-lg bg-muted/50 p-3 space-y-2">
+            <p className="text-xs font-medium text-muted-foreground">Connection Info</p>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <span className="text-muted-foreground">Broker:</span>
+              <span className="font-medium capitalize">{broker.brokerType || broker.type}</span>
+              <span className="text-muted-foreground">Mode:</span>
+              <span className="font-medium">{broker.isPaper ? 'Paper Trading' : 'Live Trading'}</span>
+              <span className="text-muted-foreground">Status:</span>
+              <span className={cn(
+                'font-medium',
+                broker.status === 'connected' && 'text-green-500',
+                broker.status === 'error' && 'text-red-500'
+              )}>
+                {broker.status}
+              </span>
+            </div>
+          </div>
+        </div>
+        
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isSaving}>
+            Cancel
+          </Button>
+          <Button 
+            onClick={handleSave} 
+            disabled={isSaving || !hasChanges || (Boolean(apiKey || apiSecret) && !(apiKey && apiSecret))}
+          >
+            {isSaving ? (
+              <>
+                <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              'Save Changes'
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/**
  * Broker Card Component
  */
-function BrokerCard({ broker, onDeleted }: { broker: BrokerConnection; onDeleted?: () => void }) {
+function BrokerCard({ broker, onDeleted, onRefresh }: { broker: BrokerConnection; onDeleted?: () => void; onRefresh?: () => void }) {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const { toast } = useToast()
 
   const handleRefresh = async () => {
     setIsRefreshing(true)
-    await new Promise(resolve => setTimeout(resolve, 1500))
-    setIsRefreshing(false)
+    try {
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+      const headers = await getAuthHeaders()
+      
+      const response = await fetch(`${API_URL}/api/v1/admin/brokers/refresh`, {
+        method: 'POST',
+        headers,
+      })
+      
+      if (response.ok) {
+        toast({
+          title: 'Connections Refreshed',
+          description: 'Successfully refreshed all broker connections',
+        })
+        onRefresh?.()
+      } else {
+        const data = await response.json().catch(() => null)
+        toast({
+          title: 'Refresh Failed',
+          description: data?.message || data?.detail || 'Failed to refresh broker connections',
+          variant: 'destructive',
+        })
+      }
+    } catch (err) {
+      toast({
+        title: 'Connection Error',
+        description: err instanceof Error ? err.message : 'Failed to connect to server',
+        variant: 'destructive',
+      })
+    } finally {
+      setIsRefreshing(false)
+    }
   }
 
   const handleDelete = async () => {
@@ -468,8 +706,8 @@ function BrokerCard({ broker, onDeleted }: { broker: BrokerConnection; onDeleted
               <CardTitle className="text-lg">{broker.name}</CardTitle>
               <div className="flex items-center gap-2 mt-1">
                 <StatusBadge status={broker.status} />
-                <Badge variant="outline" className="text-xs">
-                  {broker.type}
+                <Badge variant="outline" className="text-xs capitalize">
+                  {broker.brokerType || broker.type}
                 </Badge>
               </div>
             </div>
@@ -480,15 +718,29 @@ function BrokerCard({ broker, onDeleted }: { broker: BrokerConnection; onDeleted
               size="sm"
               onClick={handleRefresh}
               disabled={isRefreshing}
+              title="Refresh account data"
             >
               <RefreshCw className={cn('h-4 w-4', isRefreshing && 'animate-spin')} />
             </Button>
-            <Button variant="ghost" size="sm">
+            <Button 
+              variant="ghost" 
+              size="sm"
+              onClick={() => setShowSettings(true)}
+              title="Connection settings"
+            >
               <Settings className="h-4 w-4" />
             </Button>
           </div>
         </div>
       </CardHeader>
+      
+      {/* Settings Dialog */}
+      <BrokerSettingsDialog
+        broker={broker}
+        open={showSettings}
+        onOpenChange={setShowSettings}
+        onUpdated={onRefresh}
+      />
 
       <CardContent className="space-y-4">
         {/* Supported Assets */}
@@ -789,18 +1041,22 @@ export default function BrokersPage() {
   const [useDemoMode, setUseDemoMode] = useState(false)
   const { data, isLoading, error, refetch } = useBrokers()
   
-  // Use real data if available, demo data only if explicitly enabled
-  const hasRealData = data !== null && data.connections && data.connections.length > 0
-  const brokers = hasRealData ? data.connections : (useDemoMode ? mockBrokers : [])
-  const isApiAvailable = hasRealData
-  const showEmptyState = !isLoading && !hasRealData && !useDemoMode && !error
+  // Separate "API reachable" from "has brokers" to avoid misleading empty-state
+  const isApiAvailable = data !== null && !error
+  const hasBrokers = isApiAvailable && data.connections && data.connections.length > 0
+  const brokers = hasBrokers ? data.connections : (useDemoMode ? mockBrokers : [])
+  
+  // Show empty state only when API failed to respond (not when list is legitimately empty)
+  const showApiFailedState = !isLoading && !isApiAvailable && !useDemoMode
+  // Show "no brokers configured" when API works but returns empty list
+  const showNoBrokersState = !isLoading && isApiAvailable && !hasBrokers && !useDemoMode
 
-  // Exit demo mode when real data becomes available
+  // Exit demo mode when real brokers become available
   React.useEffect(() => {
-    if (hasRealData && useDemoMode) {
+    if (hasBrokers && useDemoMode) {
       setUseDemoMode(false)
     }
-  }, [hasRealData, useDemoMode])
+  }, [hasBrokers, useDemoMode])
 
   return (
     <ProtectedRoute>
@@ -835,8 +1091,8 @@ export default function BrokersPage() {
               </Card>
             )}
 
-            {/* No Data State - Prompt to enable demo mode */}
-            {showEmptyState && (
+            {/* API Failed State - Connection problem, prompt demo mode */}
+            {showApiFailedState && (
               <Card className="border-muted">
                 <CardContent className="py-12">
                   <div className="flex flex-col items-center justify-center text-center space-y-4">
@@ -844,7 +1100,7 @@ export default function BrokersPage() {
                       <Wifi className="h-8 w-8 text-muted-foreground" />
                     </div>
                     <div className="space-y-2">
-                      <h3 className="text-lg font-semibold">No Broker Data</h3>
+                      <h3 className="text-lg font-semibold">Connection Failed</h3>
                       <p className="text-sm text-muted-foreground max-w-md">
                         Unable to connect to the trading API. Check your backend connection
                         or try demo mode to explore the interface.
@@ -860,6 +1116,27 @@ export default function BrokersPage() {
                         Use Demo Data
                       </Button>
                     </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* No Brokers State - API works but no brokers configured */}
+            {showNoBrokersState && (
+              <Card className="border-dashed border-2">
+                <CardContent className="py-12">
+                  <div className="flex flex-col items-center justify-center text-center space-y-4">
+                    <div className="h-16 w-16 rounded-full bg-primary/10 flex items-center justify-center">
+                      <Plus className="h-8 w-8 text-primary" />
+                    </div>
+                    <div className="space-y-2">
+                      <h3 className="text-lg font-semibold">No Brokers Configured</h3>
+                      <p className="text-sm text-muted-foreground max-w-md">
+                        Get started by adding your first broker connection.
+                        You can connect to Alpaca, TastyTrade, or other supported brokers.
+                      </p>
+                    </div>
+                    <AddBrokerDialog onBrokerAdded={refetch} />
                   </div>
                 </CardContent>
               </Card>
@@ -895,13 +1172,13 @@ export default function BrokersPage() {
             </>
           )}
 
-          {/* Error State */}
-          {error && !isLoading && (
+          {/* Error State - only show if not already showing API failed state */}
+          {error && !isLoading && !showApiFailedState && (
             <BrokersError error={error.message} onRetry={refetch} />
           )}
 
           {/* Content (shown only when we have data - real or demo) */}
-          {!isLoading && !showEmptyState && brokers.length > 0 && (
+          {!isLoading && !showApiFailedState && !showNoBrokersState && brokers.length > 0 && (
             <>
               {/* Summary Stats */}
               <SectionErrorBoundary sectionName="Broker Summary">
@@ -912,7 +1189,7 @@ export default function BrokersPage() {
               <SectionErrorBoundary sectionName="Broker Connections">
                 <div className="grid gap-4 md:grid-cols-2">
                   {brokers.map((broker) => (
-                    <BrokerCard key={broker.id} broker={broker} onDeleted={refetch} />
+                    <BrokerCard key={broker.id} broker={broker} onDeleted={refetch} onRefresh={refetch} />
                   ))}
                 </div>
               </SectionErrorBoundary>

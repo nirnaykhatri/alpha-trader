@@ -22,22 +22,31 @@ Security Note:
     
     In production, actual credentials should be stored in Azure Key Vault.
 
-Cross-Partition Query Policy:
-    This repository explicitly sets enable_cross_partition_query=True for list
-    operations because broker connections span multiple partition keys (broker_type).
+Cross-Partition Query Workaround:
+    Due to a bug in the azure-cosmos SDK async implementation where the
+    enable_cross_partition_query parameter leaks through to aiohttp
+    (causing TypeError in ClientSession._request), this repository uses
+    read_all_items() with client-side filtering instead of query_items().
     
-    SDK 4.x Note: While the Azure Cosmos DB Python SDK 4.x defaults to allowing
-    cross-partition queries, we explicitly set this flag for:
-    1. Self-documenting code - makes the cross-partition intent clear
-    2. Backwards compatibility with older SDK versions
-    3. Explicit acknowledgment of the query cost tradeoffs
+    Workaround Details:
+    - All list operations use read_all_items() to fetch all items
+    - Filtering by is_disabled, broker_type, etc. is done client-side
+    - Deduplication is performed in memory
     
-    This is ACCEPTABLE here because:
-    1. Broker connections are a small dataset (typically <10 items)
-    2. List operations are infrequent (UI load, startup sync)
-    3. Single-broker queries use partition key for efficiency
+    Tradeoffs:
+    - O(n) scan for all queries, where n = total items in container
+    - Acceptable for small datasets (typically <50 broker connections)
+    - More expensive for large datasets or high-frequency polling
     
-    For repositories with large datasets, prefer partition-scoped queries.
+    When to Switch Back:
+    - When azure-cosmos SDK fixes the parameter leaking issue
+    - Use query_items() with enable_cross_partition_query=True for:
+      1. Large datasets (>100 items)
+      2. High-frequency queries (>10/sec)
+      3. Complex filtering that benefits from server-side execution
+    
+    Note: get_connection_by_id_and_type() still uses read_item() with
+    partition key for O(1) lookups when broker_type is known.
 
 Lazy Loading:
     Azure SDK imports are deferred until initialize() is called.
@@ -222,23 +231,22 @@ class CosmosBrokerRepository(IBrokerRepository):
     CONTAINER_NAME = "broker_connections"
     PARTITION_KEY_PATH = "/broker_type"
     
-    def __init__(
-        self,
-        cosmos_endpoint: str = "",
-        database_name: str = "trading-bot",
-    ):
+    def __init__(self):
         """
         Initialize the broker repository.
         
         Uses composition pattern - depends on shared CosmosConnectionPool
         rather than inheriting from CosmosBaseRepository.
         
-        Args:
-            cosmos_endpoint: Cosmos DB endpoint (optional if pool already initialized)
-            database_name: Database name (default: trading-bot)
+        IMPORTANT: CosmosConnectionPool MUST be initialized before calling
+        any repository methods. Call `pool.initialize(endpoint, database)` 
+        during application startup before using this repository.
+        
+        Typical startup order:
+            1. CosmosConnectionPool.get_instance().initialize(endpoint, db_name)
+            2. broker_repo = CosmosBrokerRepository()
+            3. await broker_repo.initialize()
         """
-        self._endpoint = cosmos_endpoint
-        self._database_name = database_name
         self._pool = CosmosConnectionPool.get_instance()
         self._container = None
         self._initialized = False
@@ -313,22 +321,25 @@ class CosmosBrokerRepository(IBrokerRepository):
         """
         Get all broker connections.
         
+        Note: Uses read_all_items() with client-side filtering as a workaround
+        for azure-cosmos SDK bug where enable_cross_partition_query parameter
+        leaks through to aiohttp (TypeError in ClientSession._request).
+        
         Returns:
             List of all broker connection documents
         """
         await self._ensure_initialized()
         
         try:
-            query = "SELECT * FROM c WHERE c._type = 'broker_connection'"
             items = []
             
-            async for item in self._container.query_items(
-                query=query,
-                enable_cross_partition_query=True,
-            ):
-                doc = BrokerConnectionDocument.from_cosmos_doc(item)
-                if doc:
-                    items.append(doc)
+            # Workaround: Use read_all_items() instead of query_items() to avoid
+            # azure-cosmos SDK bug with enable_cross_partition_query parameter
+            async for item in self._container.read_all_items():
+                if item.get('_type') == 'broker_connection':
+                    doc = BrokerConnectionDocument.from_cosmos_doc(item)
+                    if doc:
+                        items.append(doc)
             
             logger.debug(f"Retrieved {len(items)} broker connections")
             return items
@@ -344,26 +355,40 @@ class CosmosBrokerRepository(IBrokerRepository):
         Returns only one connection per (broker_type, is_paper) combination,
         preferring env-configured brokers and newer documents.
         
+        Note: Uses read_all_items() with client-side filtering as a workaround
+        for azure-cosmos SDK bug where enable_cross_partition_query parameter
+        leaks through to aiohttp (TypeError in ClientSession._request).
+        
         Returns:
             List of active (not disabled) broker connections
         """
         await self._ensure_initialized()
         
         try:
-            query = """
-                SELECT * FROM c 
-                WHERE c._type = 'broker_connection' 
-                AND (c.is_disabled = false OR NOT IS_DEFINED(c.is_disabled))
-            """
             raw_items = []
             
-            async for item in self._container.query_items(
-                query=query,
-                enable_cross_partition_query=True,
-            ):
+            logger.info("Executing get_active_connections (using read_all_items workaround)...")
+            
+            # Workaround: Use read_all_items() instead of query_items() to avoid
+            # azure-cosmos SDK bug with enable_cross_partition_query parameter
+            async for item in self._container.read_all_items():
+                # Client-side filtering for broker connections
+                if item.get('_type') != 'broker_connection':
+                    continue
+                    
+                # Filter out disabled connections (same logic as SQL query)
+                is_disabled = item.get('is_disabled')
+                if is_disabled is True:
+                    continue
+                
+                logger.debug(f"Found item: id={item.get('id')}, broker_type={item.get('broker_type')}")
                 doc = BrokerConnectionDocument.from_cosmos_doc(item)
                 if doc:
                     raw_items.append(doc)
+                else:
+                    logger.warning(f"from_cosmos_doc returned None for item: {item.get('id')}")
+            
+            logger.info(f"Read {len(raw_items)} raw active items")
             
             # Deduplicate: keep only one per (broker_type, is_paper)
             # Prefer env-configured brokers, then most recently updated
@@ -383,16 +408,20 @@ class CosmosBrokerRepository(IBrokerRepository):
                         seen[key] = doc
             
             items = list(seen.values())
-            logger.debug(f"Retrieved {len(items)} active broker connections (deduplicated from {len(raw_items)})")
+            logger.info(f"Retrieved {len(items)} active broker connections (deduplicated from {len(raw_items)})")
             return items
             
         except Exception as e:
-            logger.error(f"Failed to get active broker connections: {e}")
+            logger.error(f"Failed to get active broker connections: {e}", exc_info=True)
             return []
     
     async def get_connection(self, connection_id: str) -> Optional[BrokerConnectionDocument]:
         """
         Get a specific broker connection by ID.
+        
+        Note: Uses read_all_items() with client-side filtering as a workaround
+        for azure-cosmos SDK bug where enable_cross_partition_query parameter
+        leaks through to aiohttp (TypeError in ClientSession._request).
         
         Args:
             connection_id: The connection ID to retrieve
@@ -403,16 +432,12 @@ class CosmosBrokerRepository(IBrokerRepository):
         await self._ensure_initialized()
         
         try:
-            # Need to query since we don't know the partition key from just ID
-            query = "SELECT * FROM c WHERE c.id = @id AND c._type = 'broker_connection'"
-            params = [{"name": "@id", "value": connection_id}]
-            
-            async for item in self._container.query_items(
-                query=query,
-                parameters=params,
-                enable_cross_partition_query=True,
-            ):
-                return BrokerConnectionDocument.from_cosmos_doc(item)
+            # Workaround: Use read_all_items() instead of query_items() to avoid
+            # azure-cosmos SDK bug with enable_cross_partition_query parameter
+            async for item in self._container.read_all_items():
+                if (item.get('_type') == 'broker_connection' and 
+                    item.get('id') == connection_id):
+                    return BrokerConnectionDocument.from_cosmos_doc(item)
             
             return None
             
@@ -517,10 +542,14 @@ class CosmosBrokerRepository(IBrokerRepository):
     
     async def disable_connection(self, connection_id: str) -> bool:
         """
-        Mark a connection as disabled (soft delete).
+        Mark a connection as disabled and clear credentials (secure soft delete).
         
-        This is preferred for env-configured brokers since we need to
-        remember that the user disabled them to prevent re-syncing.
+        This is used for env-configured brokers since we need to remember 
+        that the user disabled them to prevent re-syncing from environment.
+        
+        SECURITY: Credentials (api_key_masked, api_key_hash) are cleared to ensure
+        no secrets persist after user requests deletion. Only the minimal record
+        needed to prevent re-sync is kept.
         
         Args:
             connection_id: The connection ID to disable
@@ -535,11 +564,23 @@ class CosmosBrokerRepository(IBrokerRepository):
             if not connection:
                 return False
             
+            # Mark as disabled
             connection.is_disabled = True
             connection.status = "disabled"
+            
+            # SECURITY: Clear all credential-related data
+            connection.api_key_masked = "[DELETED]"
+            connection.api_key_hash = None
+            
+            # Clear sensitive account data
+            connection.balance = 0.0
+            connection.buying_power = 0.0
+            connection.portfolio_value = 0.0
+            connection.open_positions = 0
+            
             await self.save_connection(connection)
             
-            logger.info(f"Disabled broker connection: {connection_id}")
+            logger.info(f"Disabled broker connection and cleared credentials: {connection_id}")
             return True
             
         except Exception as e:
@@ -573,25 +614,25 @@ class CosmosBrokerRepository(IBrokerRepository):
         This is used by BrokerRouter to know which env brokers
         should not be auto-synced.
         
+        Note: Uses read_all_items() with client-side filtering as a workaround
+        for azure-cosmos SDK bug where enable_cross_partition_query parameter
+        leaks through to aiohttp (TypeError in ClientSession._request).
+        
         Returns:
             Set of disabled env broker connection IDs
         """
         await self._ensure_initialized()
         
         try:
-            query = """
-                SELECT c.id FROM c 
-                WHERE c._type = 'broker_connection' 
-                AND c.source = 'env'
-                AND c.is_disabled = true
-            """
             disabled_ids = set()
             
-            async for item in self._container.query_items(
-                query=query,
-                enable_cross_partition_query=True,
-            ):
-                disabled_ids.add(item['id'])
+            # Workaround: Use read_all_items() instead of query_items() to avoid
+            # azure-cosmos SDK bug with enable_cross_partition_query parameter
+            async for item in self._container.read_all_items():
+                if (item.get('_type') == 'broker_connection' and
+                    item.get('source') == 'env' and
+                    item.get('is_disabled') is True):
+                    disabled_ids.add(item['id'])
             
             return disabled_ids
             
@@ -637,24 +678,27 @@ class CosmosBrokerRepository(IBrokerRepository):
                 {"name": "@api_key_masked", "value": api_key_masked},
             ]
             
-            # Note: Using partition key filter (broker_type) so cross-partition not needed
+            # Single-partition query using broker_type as partition key
             async for _ in self._container.query_items(
                 query=query,
                 parameters=params,
+                partition_key=broker_type,
             ):
                 return True  # Found at least one match
             
             return False
             
         except Exception as e:
-            logger.error(f"Failed to check connection existence: {e}")
-            return False
+            # FAIL CLOSED: On error, assume duplicate exists to prevent accidental duplicates
+            logger.error(f"Failed to check connection existence: {e} - failing closed (returning True)")
+            return True
     
     async def connection_exists_by_hash(
         self, 
         broker_type: str, 
         is_paper: bool, 
-        api_key_hash: str
+        api_key_hash: str,
+        exclude_connection_id: Optional[str] = None
     ) -> bool:
         """
         Check if a connection with these parameters already exists using hash.
@@ -666,6 +710,8 @@ class CosmosBrokerRepository(IBrokerRepository):
             broker_type: The broker type
             is_paper: Whether paper trading mode
             api_key_hash: SHA256 hash of the API key
+            exclude_connection_id: Optional connection ID to exclude from the check
+                                   (useful when updating credentials)
             
         Returns:
             True if a matching connection exists
@@ -687,15 +733,82 @@ class CosmosBrokerRepository(IBrokerRepository):
                 {"name": "@api_key_hash", "value": api_key_hash},
             ]
             
-            # Note: Using partition key filter (broker_type) so cross-partition not needed
+            # Exclude a specific connection (e.g., when updating credentials)
+            if exclude_connection_id:
+                query += " AND c.id != @exclude_id"
+                params.append({"name": "@exclude_id", "value": exclude_connection_id})
+            
+            # Single-partition query using broker_type as partition key
             async for _ in self._container.query_items(
                 query=query,
                 parameters=params,
+                partition_key=broker_type,
             ):
                 return True  # Found at least one match
             
             return False
             
         except Exception as e:
-            logger.error(f"Failed to check connection existence by hash: {e}")
+            # FAIL CLOSED: On error, assume duplicate exists to prevent accidental duplicates
+            logger.error(f"Failed to check connection existence by hash: {e} - failing closed (returning True)")
+            return True
+
+    async def connection_exists_by_masked_key(
+        self,
+        broker_type: str,
+        is_paper: bool,
+        api_key_masked: str,
+        source: Optional[str] = None
+    ) -> bool:
+        """
+        Check if a connection with matching masked API key exists.
+        
+        This is a fallback check for env-configured brokers that don't have api_key_hash.
+        Less reliable than hash comparison (only uses last 4 chars), but necessary
+        for detecting duplicates with legacy or env-sourced connections.
+        
+        Args:
+            broker_type: The broker type (e.g., 'alpaca')
+            is_paper: Whether paper trading mode
+            api_key_masked: Masked API key (e.g., '****-****-****-IUEY')
+            source: Optional source filter ('env' or 'user')
+            
+        Returns:
+            True if a matching connection exists
+        """
+        await self._ensure_initialized()
+        
+        try:
+            query = """
+                SELECT c.id FROM c 
+                WHERE c._type = 'broker_connection' 
+                AND c.broker_type = @broker_type
+                AND c.is_paper = @is_paper
+                AND c.api_key_masked = @api_key_masked
+                AND (c.is_disabled = false OR NOT IS_DEFINED(c.is_disabled))
+            """
+            params = [
+                {"name": "@broker_type", "value": broker_type},
+                {"name": "@is_paper", "value": is_paper},
+                {"name": "@api_key_masked", "value": api_key_masked},
+            ]
+            
+            # Optionally filter by source
+            if source:
+                query += " AND c.source = @source"
+                params.append({"name": "@source", "value": source})
+            
+            # Single-partition query using broker_type as partition key
+            async for _ in self._container.query_items(
+                query=query,
+                parameters=params,
+                partition_key=broker_type,
+            ):
+                return True  # Found at least one match
+            
             return False
+            
+        except Exception as e:
+            # FAIL CLOSED: On error, assume duplicate exists to prevent accidental duplicates
+            logger.error(f"Failed to check connection existence by masked key: {e} - failing closed (returning True)")
+            return True

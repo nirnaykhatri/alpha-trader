@@ -15,6 +15,7 @@ import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/components/auth'
 import { useAppSettings } from '@/lib/contexts'
+import { useBotStatus } from '@/lib/hooks/use-bot-status'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -125,7 +126,7 @@ const navItems: NavItem[] = [
 
 /** Bot status for app shell display */
 interface BotStatusDisplay {
-  status: 'running' | 'paused' | 'stopped' | 'error' | 'created' | 'completed' | 'stopping'
+  status: 'running' | 'paused' | 'stopped' | 'error' | 'created' | 'completed' | 'stopping' | 'checking'
   message?: string
 }
 
@@ -139,6 +140,7 @@ interface AppShellProps {
  */
 function StatusIndicator({ status }: { status: BotStatusDisplay['status'] }) {
   const statusConfig = {
+    checking: { color: 'bg-muted-foreground', icon: AlertTriangle, label: 'Checking...' },
     created: { color: 'bg-muted-foreground', icon: AlertTriangle, label: 'Created' },
     running: { color: 'bg-profit', icon: CheckCircle, label: 'Running' },
     paused: { color: 'bg-warning', icon: AlertTriangle, label: 'Paused' },
@@ -256,6 +258,7 @@ function Sidebar({
                   botStatus.status === 'running' && 'bg-profit animate-pulse',
                   botStatus.status === 'paused' && 'bg-warning',
                   botStatus.status === 'stopped' && 'bg-muted-foreground',
+                  botStatus.status === 'checking' && 'bg-muted-foreground animate-pulse',
                   botStatus.status === 'error' && 'bg-loss animate-pulse'
                 )}
                 title={`Bot ${botStatus.status}`}
@@ -443,9 +446,13 @@ function MobileNav({ botStatus }: { botStatus: BotStatusDisplay }) {
  */
 export function AppShell({
   children,
-  botStatus = { status: 'running', message: 'Processing signals' },
+  botStatus: botStatusProp,
 }: AppShellProps): JSX.Element {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const { botStatus: fetchedStatus } = useBotStatus()
+  
+  // Use prop if provided, otherwise use fetched status from health check
+  const botStatus = botStatusProp ?? fetchedStatus
 
   return (
     <div className="min-h-screen bg-background">
