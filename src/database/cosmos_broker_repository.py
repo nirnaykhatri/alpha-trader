@@ -350,10 +350,10 @@ class CosmosBrokerRepository(IBrokerRepository):
     
     async def get_active_connections(self) -> List[BrokerConnectionDocument]:
         """
-        Get all non-disabled broker connections, deduplicated.
+        Get all non-disabled broker connections.
         
-        Returns only one connection per (broker_type, is_paper) combination,
-        preferring env-configured brokers and newer documents.
+        Returns all active connections without deduplication. Duplicate prevention
+        is handled at insert time via api_key_hash checks, not at read time.
         
         Note: Uses read_all_items() with client-side filtering as a workaround
         for azure-cosmos SDK bug where enable_cross_partition_query parameter
@@ -365,7 +365,7 @@ class CosmosBrokerRepository(IBrokerRepository):
         await self._ensure_initialized()
         
         try:
-            raw_items = []
+            items = []
             
             logger.info("Executing get_active_connections (using read_all_items workaround)...")
             
@@ -384,31 +384,11 @@ class CosmosBrokerRepository(IBrokerRepository):
                 logger.debug(f"Found item: id={item.get('id')}, broker_type={item.get('broker_type')}")
                 doc = BrokerConnectionDocument.from_cosmos_doc(item)
                 if doc:
-                    raw_items.append(doc)
+                    items.append(doc)
                 else:
                     logger.warning(f"from_cosmos_doc returned None for item: {item.get('id')}")
             
-            logger.info(f"Read {len(raw_items)} raw active items")
-            
-            # Deduplicate: keep only one per (broker_type, is_paper)
-            # Prefer env-configured brokers, then most recently updated
-            seen: Dict[tuple, BrokerConnectionDocument] = {}
-            for doc in raw_items:
-                key = (doc.broker_type, doc.is_paper)
-                existing = seen.get(key)
-                
-                if existing is None:
-                    seen[key] = doc
-                elif doc.source == 'env' and existing.source != 'env':
-                    # Prefer env-configured
-                    seen[key] = doc
-                elif doc.source == existing.source:
-                    # Same source - prefer newer (by updated_at)
-                    if doc.updated_at > existing.updated_at:
-                        seen[key] = doc
-            
-            items = list(seen.values())
-            logger.info(f"Retrieved {len(items)} active broker connections (deduplicated from {len(raw_items)})")
+            logger.info(f"Retrieved {len(items)} active broker connections")
             return items
             
         except Exception as e:
