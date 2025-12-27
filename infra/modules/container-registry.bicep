@@ -18,8 +18,8 @@ param tags object = {}
 @allowed(['Basic', 'Standard', 'Premium'])
 param sku string = 'Basic'
 
-@description('Enable admin user for the registry')
-param adminUserEnabled bool = true
+@description('Enable admin user for the registry (should use managed identity instead)')
+param adminUserEnabled bool = false
 
 // ============================================================================
 // Container Registry Resource

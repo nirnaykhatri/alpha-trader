@@ -13,13 +13,20 @@ requiring them at startup.
 
 Persistence:
     Broker connections are persisted to Cosmos DB via CosmosBrokerRepository.
-    This ensures connections survive application restarts in Azure.
+    API credentials are securely stored in Azure Key Vault via IBrokerCredentialStore.
+    This ensures connections AND credentials survive application restarts.
     
-    For env-configured brokers (credentials in Key Vault), we track
+    For env-configured brokers (credentials in environment), we track
     the 'disabled' state in Cosmos DB to remember user preferences.
 
+Secret Storage:
+    UI-added broker credentials are stored in Azure Key Vault using the naming:
+    broker-{broker_type}-{user_key}-{connection_id}-api-key/api-secret
+    
+    On broker deletion, credentials are irrecoverably purged from Key Vault.
+
 Author: Trading Bot Team
-Version: 2.0.0
+Version: 3.0.0 - Added Key Vault integration for credential persistence
 """
 
 import os
@@ -39,6 +46,10 @@ from src.signals.routers.base_router import BaseAdminRouter, handle_route_errors
 from src.database.cosmos_broker_repository import (
     CosmosBrokerRepository,
     BrokerConnectionDocument,
+)
+from src.services.broker_credential_store import (
+    IBrokerCredentialStore,
+    BrokerCredentials as StoredBrokerCredentials,
 )
 
 logger = get_logger(__name__)
@@ -321,8 +332,9 @@ class BrokerRouter(BaseAdminRouter):
     - POST /admin/brokers/refresh - Force refresh all broker connections from DB/env
     
     Persistence:
-        Uses CosmosBrokerRepository to persist broker connections to Cosmos DB.
-        This ensures connections survive application restarts in production.
+        - Metadata (name, status, masked key) stored in Cosmos DB
+        - Credentials (API key, secret) stored in Azure Key Vault
+        - Both survive application restarts
     
     Thread-Safety:
         This class is safe for concurrent async operations.
@@ -333,23 +345,33 @@ class BrokerRouter(BaseAdminRouter):
         auth_service=None,
         bot_instance=None,
         broker_repository: Optional[CosmosBrokerRepository] = None,
+        credential_store: Optional[IBrokerCredentialStore] = None,
+        user_key: str = "default",
     ):
         """
         Initialize BrokerRouter.
         
         Args:
-            auth_service: Optional authentication service for token validation
-            bot_instance: Optional trading bot instance for broker operations
-            broker_repository: Optional broker repository for persistence.
+            auth_service: Optional authentication service for token validation.
+            bot_instance: Optional trading bot instance for broker operations.
+            broker_repository: Optional broker repository for metadata persistence.
                               If not provided, creates a new instance.
+            credential_store: Optional credential store for secure API key storage.
+                             If not provided, credentials are session-only.
+            user_key: User identifier for multi-tenant credential isolation.
+                     In single-user mode, use 'default'.
         """
         super().__init__(prefix="/admin/brokers", auth_service=auth_service, tags=["brokers"])
         self.bot = bot_instance
         self._config = ConfigurationManager()
         
-        # Repository for persisting broker connections to Cosmos DB
+        # Repository for persisting broker metadata to Cosmos DB
         self._broker_repo = broker_repository or CosmosBrokerRepository()
         self._repo_initialized = False
+        
+        # Credential store for persisting API keys to Azure Key Vault
+        self._credential_store = credential_store
+        self._user_key = user_key
         
         # In-memory cache for fast access (synced from DB)
         self._connections_cache: Dict[str, BrokerConnectionInfo] = {}
@@ -357,7 +379,22 @@ class BrokerRouter(BaseAdminRouter):
         self._env_brokers_synced = False  # Track if env brokers have been synced
         
         self._setup_routes()
-        logger.info("BrokerRouter initialized with Cosmos DB persistence")
+        
+        store_type = "Key Vault" if credential_store else "session-only"
+        logger.info(f"BrokerRouter initialized with Cosmos DB + {store_type} credential storage")
+    
+    def set_bot_instance(self, bot_instance) -> None:
+        """
+        Set the trading bot instance for broker operations.
+        
+        This method provides a safe way to inject the bot dependency after
+        construction, avoiding encapsulation leaks from direct attribute access.
+        
+        Args:
+            bot_instance: The trading bot instance (TradingBot or similar).
+        """
+        self.bot = bot_instance
+        logger.debug("BrokerRouter bot instance updated")
     
     async def _ensure_repo_initialized(self) -> None:
         """Ensure the broker repository is initialized."""
@@ -608,20 +645,36 @@ class BrokerRouter(BaseAdminRouter):
             )
             await self._broker_repo.save_connection(doc)
             
+            # Persist credentials to Azure Key Vault (if configured)
+            # This enables credentials to survive container restarts
+            if self._credential_store:
+                try:
+                    await self._credential_store.save_credentials(
+                        broker_type=broker_type,
+                        connection_id=connection_id,
+                        credentials=StoredBrokerCredentials(
+                            api_key=broker_request.credentials.api_key,
+                            api_secret=broker_request.credentials.api_secret,
+                            is_paper=broker_request.credentials.is_paper,
+                        ),
+                        user_key=self._user_key,
+                    )
+                    logger.info(f"Credentials persisted to Key Vault for: {connection_id}")
+                except Exception as e:
+                    # Log warning but don't fail - credentials in runtime is sufficient
+                    # User can re-add if container restarts before credentials are saved
+                    logger.warning(
+                        f"Failed to persist credentials to Key Vault for {connection_id}: {e}. "
+                        "Credentials are session-only until Key Vault sync succeeds."
+                    )
+            
             # Update cache
             self._connections_cache[connection_id] = connection
             
             # Also update the runtime configuration so the bot can use this broker
-            # 
-            # SECURITY NOTE: This stores credentials in memory only for current session.
-            # On restart, only metadata is loaded from Cosmos; credentials must be:
-            #   - Re-entered via UI (for user-added brokers)
-            #   - Provided via environment (for env-configured brokers)
-            #   - Retrieved from Azure Key Vault (production recommended)
             #
-            # STATE: This connection is "connected but session-only" - user should
-            # understand that restart requires re-authentication unless using
-            # env vars or Key Vault integration.
+            # With Key Vault integration, credentials are now persisted and will be
+            # reloaded on startup via broker subsystem initialization.
             await self._configure_broker_runtime(
                 broker_type,
                 broker_request.credentials.api_key,
@@ -684,13 +737,80 @@ class BrokerRouter(BaseAdminRouter):
                     )
                 logger.info(f"Disabled env broker connection: {connection_id}")
             else:
-                # For user-added brokers, do hard delete
+                # For user-added brokers, do hard delete from both Key Vault and Cosmos DB
+                # IMPORTANT: Delete from Key Vault FIRST to ensure irrecoverable deletion
+                # If KV deletion fails, we abort before removing metadata (allows retry)
+                
+                # Get broker type before deletion for credential lookup
+                broker_type = None
+                if connection_doc:
+                    broker_type = connection_doc.broker_type
+                elif connection:
+                    broker_type = connection.broker_type
+                
+                # Step 1: Delete credentials from Key Vault FIRST (irrecoverable)
+                # This must succeed before we remove metadata from Cosmos DB
+                if self._credential_store and broker_type:
+                    try:
+                        await self._credential_store.delete_credentials(
+                            broker_type=broker_type,
+                            connection_id=connection_id,
+                            user_key=self._user_key,
+                        )
+                        logger.info(f"Credentials purged from Key Vault for: {connection_id}")
+                    except Exception as e:
+                        # KV deletion failed - abort to ensure irrecoverable semantics
+                        # User can retry; we don't want orphaned credentials
+                        error_msg = str(e)
+                        if "purge protection" in error_msg.lower():
+                            raise HTTPException(
+                                status_code=HTTPStatus.CONFLICT,
+                                detail=(
+                                    "Cannot irrecoverably delete credentials: Key Vault has purge "
+                                    "protection enabled. Please disable purge protection or wait "
+                                    "for the retention period to expire."
+                                )
+                            )
+                        logger.error(
+                            f"Failed to delete credentials from Key Vault for {connection_id}: {e}"
+                        )
+                        raise HTTPException(
+                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                            detail=(
+                                f"Failed to delete credentials securely. Please try again. "
+                                f"Error: {error_msg}"
+                            )
+                        )
+                
+                # Step 2: Delete metadata from Cosmos DB (only after KV success)
                 success = await self._broker_repo.delete_connection(connection_id)
                 if not success:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Failed to delete broker connection. Please try again."
+                    # Partial failure: credentials deleted but metadata remains
+                    # Mark the connection with distinct terminal state for cleanup
+                    logger.error(
+                        f"Failed to delete Cosmos metadata for {connection_id} after KV purge. "
+                        "Marking connection as cleanup_required."
                     )
+                    try:
+                        # Attempt to mark as broken so user knows to clean up
+                        connection_doc = await self._broker_repo.get_connection(connection_id)
+                        if connection_doc:
+                            connection_doc.status = "cleanup_required"
+                            connection_doc.error_message = "Credentials deleted but metadata cleanup failed. Please delete again."
+                            await self._broker_repo.save_connection(connection_doc)
+                    except Exception as mark_err:
+                        logger.error(f"Failed to mark {connection_id} as cleanup_required: {mark_err}")
+                    
+                    # Return warning to user instead of silent success
+                    return JSONResponse(
+                        status_code=HTTPStatus.PARTIAL_CONTENT,
+                        content={
+                            "success": True,
+                            "message": "Credentials deleted but metadata cleanup failed. Please refresh and try again.",
+                            "warning": "partial_delete"
+                        }
+                    )
+                
                 logger.info(f"Deleted broker connection: {connection_id}")
             
             # Remove from cache
@@ -809,6 +929,26 @@ class BrokerRouter(BaseAdminRouter):
                     connection.is_paper
                 )
                 
+                # Persist updated credentials to Key Vault (if configured)
+                if self._credential_store:
+                    try:
+                        await self._credential_store.save_credentials(
+                            broker_type=broker_type,
+                            connection_id=connection_id,
+                            credentials=StoredBrokerCredentials(
+                                api_key=creds.api_key,
+                                api_secret=creds.api_secret,
+                                is_paper=connection.is_paper,
+                            ),
+                            user_key=self._user_key,
+                        )
+                        logger.info(f"Updated credentials in Key Vault for: {connection_id}")
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to update credentials in Key Vault for {connection_id}: {e}. "
+                            "Runtime credentials updated, but Key Vault may be out of sync."
+                        )
+                
                 updates_made.append("API credentials")
                 account_data_updated = True  # Credentials update includes account data refresh
             
@@ -868,7 +1008,7 @@ class BrokerRouter(BaseAdminRouter):
             
             # Perform real connectivity test based on broker type
             # For env-configured brokers, we have credentials in config
-            # For user-added brokers, we only have masked keys (would need re-auth)
+            # For user-added brokers, check credential store first, then fall back to config
             broker_type = connection.broker_type
             
             try:
@@ -876,9 +1016,28 @@ class BrokerRouter(BaseAdminRouter):
                 start_time = time.time()
                 
                 if broker_type == "alpaca":
-                    # Check if we have live credentials in config
-                    api_key = self._config.get_config("api.alpaca.api_key", "")
-                    api_secret = self._config.get_config("api.alpaca.secret_key", "")
+                    api_key = None
+                    api_secret = None
+                    
+                    # For user-added brokers, try credential store first
+                    if connection.source == "user" and self._credential_store:
+                        try:
+                            stored_creds = await self._credential_store.get_credentials(
+                                broker_type=broker_type,
+                                connection_id=connection_id,
+                                user_key=self._user_key,
+                            )
+                            if stored_creds:
+                                api_key = stored_creds.api_key
+                                api_secret = stored_creds.api_secret
+                                logger.debug(f"Using stored credentials for test: {connection_id}")
+                        except Exception as e:
+                            logger.warning(f"Failed to retrieve stored credentials for {connection_id}: {e}")
+                    
+                    # Fall back to environment config if no stored credentials
+                    if not api_key or not api_secret:
+                        api_key = self._config.get_config("api.alpaca.api_key", "")
+                        api_secret = self._config.get_config("api.alpaca.secret_key", "")
                     
                     if api_key and api_secret:
                         result = await self._test_alpaca_connection(
@@ -1051,8 +1210,8 @@ class BrokerRouter(BaseAdminRouter):
         @self.router.post(
             "/refresh",
             summary="Refresh broker connections",
-            description="Force refresh of broker connections from database and environment. "
-                       "Use this to fetch latest account data from broker APIs."
+            description="Force refresh of broker connections from database. "
+                       "Reloads connection metadata and can trigger account data refresh from broker APIs."
         )
         @handle_route_errors("refresh_brokers")
         async def refresh_brokers(
@@ -1421,3 +1580,120 @@ class BrokerRouter(BaseAdminRouter):
                 
         except Exception as e:
             logger.error(f"Failed to register broker with subsystem: {e}")
+    
+    # =========================================================================
+    # Credential Store Integration
+    # =========================================================================
+    
+    def set_credential_store(
+        self,
+        credential_store: IBrokerCredentialStore,
+        user_key: str = "default"
+    ) -> None:
+        """
+        Set the credential store for secure credential persistence.
+        
+        This setter allows late binding of the credential store after Azure
+        is initialized. When set, credentials for UI-added brokers will be
+        persisted to Azure Key Vault and survive container restarts.
+        
+        Args:
+            credential_store: The credential store implementation.
+            user_key: User identifier for multi-tenant isolation.
+        """
+        self._credential_store = credential_store
+        self._user_key = user_key
+        logger.info(f"Credential store configured for user: {user_key}")
+    
+    async def rehydrate_user_brokers(self) -> int:
+        """
+        Rehydrate UI-added broker credentials from Key Vault on startup.
+        
+        This method should be called during application startup (after Azure
+        is initialized) to restore broker connections that were added via the
+        UI. It reads broker metadata from Cosmos DB and credentials from Key
+        Vault, then configures the runtime so brokers are immediately usable.
+        
+        Flow:
+            1. Load all user-added broker documents from Cosmos DB
+            2. For each broker, retrieve credentials from Key Vault
+            3. Configure runtime (in-memory) with the credentials
+            4. Register brokers with the broker subsystem
+        
+        Returns:
+            Number of brokers successfully rehydrated.
+        
+        Raises:
+            No exceptions - failures are logged and skipped to ensure
+            partial rehydration succeeds even if some brokers fail.
+        """
+        if not self._credential_store:
+            logger.info("No credential store configured - skipping broker rehydration")
+            return 0
+        
+        await self._ensure_repo_initialized()
+        
+        # Get all user-added (non-env) active connections from Cosmos DB
+        all_connections = await self._broker_repo.get_active_connections()
+        user_connections = [c for c in all_connections if c.source == "user"]
+        
+        if not user_connections:
+            logger.info("No user-added brokers to rehydrate")
+            return 0
+        
+        logger.info(f"Rehydrating {len(user_connections)} user-added broker(s)...")
+        
+        rehydrated_count = 0
+        for connection_doc in user_connections:
+            try:
+                # Retrieve credentials from Key Vault
+                credentials = await self._credential_store.get_credentials(
+                    broker_type=connection_doc.broker_type,
+                    connection_id=connection_doc.id,
+                    user_key=self._user_key,
+                )
+                
+                if not credentials:
+                    # Credentials not found - mark as needs_reauth
+                    logger.warning(
+                        f"Credentials not found for {connection_doc.id}. "
+                        "User must re-authenticate via UI."
+                    )
+                    connection_doc.status = "needs_reauth"
+                    connection_doc.error_message = "Credentials expired or deleted. Please re-authenticate."
+                    await self._broker_repo.save_connection(connection_doc)
+                    continue
+                
+                # Configure runtime with credentials (in-memory)
+                await self._configure_broker_runtime(
+                    broker_type=connection_doc.broker_type,
+                    api_key=credentials.api_key,
+                    api_secret=credentials.api_secret,
+                    is_paper=connection_doc.is_paper,
+                )
+                
+                # Update cache
+                connection = self._doc_to_connection_info(connection_doc)
+                if connection:
+                    self._connections_cache[connection_doc.id] = connection
+                
+                logger.info(
+                    f"✅ Rehydrated broker: {connection_doc.id} ({connection_doc.broker_type})"
+                )
+                rehydrated_count += 1
+                
+            except Exception as e:
+                logger.error(
+                    f"Failed to rehydrate broker {connection_doc.id}: {e}. "
+                    "Broker will require re-authentication."
+                )
+                # Mark as error state
+                connection_doc.status = "error"
+                connection_doc.error_message = f"Rehydration failed: {str(e)}"
+                try:
+                    await self._broker_repo.save_connection(connection_doc)
+                except Exception:
+                    pass  # Best effort status update
+        
+        logger.info(f"Broker rehydration complete: {rehydrated_count}/{len(user_connections)} successful")
+        return rehydrated_count

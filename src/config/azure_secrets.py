@@ -349,18 +349,135 @@ class AzureKeyVaultSecrets:
                 raise TradingBotException(f"Failed to set secret: {e.message}")
             raise
     
-    async def health_check(self) -> Dict[str, any]:
+    async def delete_secret(
+        self,
+        secret_name: str,
+        purge: bool = False
+    ) -> bool:
+        """
+        Delete a secret from Key Vault.
+        
+        When purge=True, the secret is irrecoverably deleted (requires purge 
+        protection to be disabled on the Key Vault). Default is False to be
+        safe on purge-protected vaults; explicitly pass True when permanent
+        deletion is required (e.g., UI-added broker credentials).
+        
+        Note: This requires Key Vault Secrets Officer role.
+        
+        Args:
+            secret_name: Name of the secret to delete.
+            purge: If True, permanently purge after soft-delete (default: False).
+                   Set to True for irrecoverable deletion on non-protected vaults.
+        
+        Returns:
+            bool: True if deletion was successful, False if secret not found.
+        
+        Raises:
+            TradingBotException: If deletion fails due to permissions or other errors.
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        try:
+            # Step 1: Begin soft-delete (required before purge)
+            poller = await self._client.begin_delete_secret(secret_name)
+            # Use result() for proper typing and awaiting the LRO completion
+            deleted_secret = await poller.result()
+            
+            logger.info(f"Secret '{secret_name}' soft-deleted from Key Vault")
+            
+            # Remove from cache immediately
+            self._cache.pop(secret_name, None)
+            
+            # Step 2: Purge if requested (makes deletion irrecoverable)
+            if purge:
+                await self.purge_deleted_secret(secret_name)
+            
+            return True
+            
+        except Exception as e:
+            from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
+            
+            if isinstance(e, ResourceNotFoundError):
+                logger.warning(f"Secret '{secret_name}' not found for deletion")
+                # Remove from cache even if not found in Key Vault
+                self._cache.pop(secret_name, None)
+                return False
+            elif isinstance(e, HttpResponseError):
+                logger.error(f"Failed to delete secret '{secret_name}': {e.message}")
+                raise TradingBotException(f"Failed to delete secret: {e.message}")
+            raise
+    
+    async def purge_deleted_secret(self, secret_name: str) -> bool:
+        """
+        Permanently purge a soft-deleted secret (irrecoverable).
+        
+        This can only be called after delete_secret() and requires:
+        1. Key Vault purge protection to be DISABLED
+        2. Key Vault Secrets Officer role
+        
+        Warning: This operation is irreversible. The secret cannot be recovered.
+        
+        Args:
+            secret_name: Name of the deleted secret to purge.
+        
+        Returns:
+            bool: True if purge succeeded, False if secret not in deleted state.
+        
+        Raises:
+            TradingBotException: If purge fails (e.g., purge protection enabled).
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        try:
+            await self._client.purge_deleted_secret(secret_name)
+            logger.info(f"Secret '{secret_name}' permanently purged from Key Vault")
+            return True
+            
+        except Exception as e:
+            from azure.core.exceptions import ResourceNotFoundError, HttpResponseError
+            
+            if isinstance(e, ResourceNotFoundError):
+                logger.warning(f"Deleted secret '{secret_name}' not found for purge")
+                return False
+            elif isinstance(e, HttpResponseError):
+                # Common cause: purge protection is enabled
+                if "purge protection" in str(e.message).lower():
+                    logger.error(
+                        f"Cannot purge secret '{secret_name}': "
+                        "Key Vault has purge protection enabled. "
+                        "Secret will be auto-deleted after retention period."
+                    )
+                else:
+                    logger.error(f"Failed to purge secret '{secret_name}': {e.message}")
+                raise TradingBotException(f"Failed to purge secret: {e.message}")
+            raise
+    
+    async def health_check(self) -> Dict[str, Any]:
         """
         Check Key Vault connectivity.
         
         Returns:
-            Health check result with status and latency
+            Health check result with status and latency.
+            Never throws - returns error state in response dict.
         """
         if not self._vault_url:
             return {
                 'healthy': False,
                 'error': 'Key Vault not configured',
             }
+        
+        # Ensure client is initialized before health check
+        if not self._initialized or not self._client:
+            try:
+                await self.initialize()
+            except Exception as e:
+                return {
+                    'healthy': False,
+                    'vault_url': self._vault_url,
+                    'error': f'Initialization failed: {str(e)}',
+                }
         
         start = datetime.utcnow()
         try:

@@ -11,7 +11,7 @@ Author: Trading Bot Team
 Version: 2.0.0
 """
 
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from fastapi import APIRouter
 
 from src.core.logging_config import get_logger
@@ -26,6 +26,10 @@ from src.signals.routers.fund_router import FundRouter
 from src.signals.routers.analytics_router import AnalyticsRouter
 from src.signals.routers.dca_preview_router import DCAPreviewRouter
 from src.signals.routers.broker_router import BrokerRouter
+
+# Credential store interface (for type hints only)
+if TYPE_CHECKING:
+    from src.services.broker_credential_store import IBrokerCredentialStore
 
 # Service interfaces
 try:
@@ -244,8 +248,38 @@ class AdminRouterComposite:
         self.config_router.set_bot_instance(bot_instance)
         self.fund_router.set_bot_instance(bot_instance)
         self.analytics_router.set_bot_instance(bot_instance)
+        self.broker_router.set_bot_instance(bot_instance)
         
         logger.info("Bot instance set for all admin sub-routers")
+    
+    def set_credential_store(
+        self,
+        credential_store: "IBrokerCredentialStore",
+        user_key: str = "default"
+    ) -> None:
+        """
+        Set the credential store for broker credential persistence.
+        
+        This enables UI-added broker credentials to be persisted to Azure
+        Key Vault and survive container restarts.
+        
+        Args:
+            credential_store: The credential store implementation.
+            user_key: User identifier for multi-tenant isolation.
+        """
+        self.broker_router.set_credential_store(credential_store, user_key)
+    
+    async def rehydrate_user_brokers(self) -> int:
+        """
+        Rehydrate UI-added brokers from Key Vault on startup.
+        
+        This should be called after Azure is initialized to restore broker
+        connections that were added via the UI.
+        
+        Returns:
+            Number of brokers successfully rehydrated.
+        """
+        return await self.broker_router.rehydrate_user_brokers()
     
     # ==========================================================================
     # Health and status

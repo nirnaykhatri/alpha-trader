@@ -267,8 +267,11 @@ function PortfolioSummary({ positions }: { positions: AssetPosition[] }) {
   const totalPnL = positions.reduce((sum, p) => sum + p.unrealizedPnL, 0)
   const totalDayPnL = positions.reduce((sum, p) => sum + p.dayPnL, 0)
   const totalCost = positions.reduce((sum, p) => sum + p.avgCost * p.quantity, 0)
-  const totalPnLPercent = (totalPnL / totalCost) * 100
-  const dayPnLPercent = (totalDayPnL / (totalValue - totalDayPnL)) * 100
+  
+  // Guard against divide-by-zero for empty/zero-cost portfolios
+  const totalPnLPercent = totalCost > 0 ? (totalPnL / totalCost) * 100 : 0
+  const dayPnLDenominator = totalValue - totalDayPnL
+  const dayPnLPercent = dayPnLDenominator > 0 ? (totalDayPnL / dayPnLDenominator) * 100 : 0
 
   return (
     <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">

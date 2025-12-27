@@ -119,7 +119,7 @@ module containerRegistry 'modules/container-registry.bicep' = {
 module keyVault 'modules/key-vault.bicep' = {
   name: 'deploy-key-vault'
   params: {
-    name: 'kv-${resourcePrefix}-${uniqueSuffix}'
+    name: 'kv${take(uniqueSuffix, 22)}'
     location: location
     tags: tags
     enableSoftDelete: environment == 'live'
@@ -134,7 +134,7 @@ module keyVault 'modules/key-vault.bicep' = {
 module appConfiguration 'modules/app-configuration.bicep' = {
   name: 'deploy-app-configuration'
   params: {
-    name: 'appcs-${resourcePrefix}'
+    name: 'appcs-${resourcePrefix}-${uniqueSuffix}'
     location: location
     tags: tags
     sku: 'free'
@@ -175,6 +175,11 @@ module cosmosDb 'modules/cosmos-db.bicep' = {
         partitionKeyPath: '/symbol'
         defaultTtl: 2592000 // 30 days
       }
+      {
+        name: 'broker_connections'
+        partitionKeyPath: '/id'
+        defaultTtl: -1 // No TTL
+      }
     ]
   }
 }
@@ -186,7 +191,7 @@ module cosmosDb 'modules/cosmos-db.bicep' = {
 module signalR 'modules/signalr.bicep' = {
   name: 'deploy-signalr'
   params: {
-    name: 'signalr-${resourcePrefix}'
+    name: 'signalr-${resourcePrefix}-${uniqueSuffix}'
     location: location
     tags: tags
     sku: 'Free_F1'
@@ -224,7 +229,7 @@ module containerApps 'modules/container-apps.bicep' = {
 module staticWebApp 'modules/static-web-app.bicep' = {
   name: 'deploy-static-web-app'
   params: {
-    name: 'swa-${resourcePrefix}'
+    name: 'swa-${resourcePrefix}-${uniqueSuffix}'
     location: location
     tags: tags
     sku: 'Free'
@@ -261,6 +266,7 @@ module keyVaultAccess 'modules/key-vault-access.bicep' = {
     keyVaultName: keyVault.outputs.name
     principalId: containerApps.outputs.identityPrincipalId
     principalType: 'ServicePrincipal'
+    grantSecretsOfficer: true
   }
 }
 
