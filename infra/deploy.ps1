@@ -318,6 +318,268 @@ if (-not $WhatIf) {
 }
 
 # ============================================================================
+# Create Entra ID App Registrations
+# ============================================================================
+
+if (-not $WhatIf) {
+    Write-Step "Creating Entra ID App Registrations"
+    
+    try {
+        # Get current tenant and user info
+        $currentUser = az ad signed-in-user show | ConvertFrom-Json
+        $tenantId = (az account show | ConvertFrom-Json).tenantId
+        
+        Write-Info "Creating app registrations in tenant: $tenantId"
+        
+        # ========================================================================
+        # 1. Create API App Registration (Backend)
+        # ========================================================================
+        
+        Write-Info "Creating API app registration..."
+        
+        $apiAppName = "alpha-trader-api-$Environment"
+        $apiAppIdUri = "api://alpha-trader-$Environment"
+        
+        # Check if API app already exists
+        $existingApiApp = az ad app list --filter "displayName eq '$apiAppName'" | ConvertFrom-Json
+        
+        if ($existingApiApp.Count -gt 0) {
+            Write-Info "API app already exists, using existing: $apiAppName"
+            $apiApp = $existingApiApp[0]
+            $apiAppId = $apiApp.appId
+            $apiObjectId = $apiApp.id
+            
+            # Query existing scopes to get scope ID for permission assignment
+            $existingScopes = $apiApp.api.oauth2PermissionScopes
+            $accessAsUserScope = $existingScopes | Where-Object { $_.value -eq 'access_as_user' }
+            if ($accessAsUserScope) {
+                $scopeId = $accessAsUserScope.id
+                Write-Info "Found existing access_as_user scope: $scopeId"
+            } else {
+                # Create scope if it doesn't exist on existing app
+                $scopeId = [guid]::NewGuid().ToString()
+                Write-Info "Creating access_as_user scope on existing app..."
+                
+                # Use Graph REST API for reliable scope creation
+                $scopeBody = @{
+                    api = @{
+                        oauth2PermissionScopes = @(
+                            @{
+                                id = $scopeId
+                                adminConsentDescription = "Allows the app to access the Alpha Trader API"
+                                adminConsentDisplayName = "Access Alpha Trader API"
+                                isEnabled = $true
+                                type = "User"
+                                userConsentDescription = "Allows the app to access the Alpha Trader API on your behalf"
+                                userConsentDisplayName = "Access Alpha Trader API"
+                                value = "access_as_user"
+                            }
+                        )
+                    }
+                } | ConvertTo-Json -Depth 5 -Compress
+                
+                az rest --method PATCH `
+                    --uri "https://graph.microsoft.com/v1.0/applications/$apiObjectId" `
+                    --headers "Content-Type=application/json" `
+                    --body $scopeBody
+                
+                Write-Success "Created API scope: access_as_user"
+            }
+        }
+        else {
+            # Create API app
+            $apiApp = az ad app create `
+                --display-name $apiAppName `
+                --sign-in-audience "AzureADMyOrg" `
+                --identifier-uris $apiAppIdUri | ConvertFrom-Json
+            
+            $apiAppId = $apiApp.appId
+            $apiObjectId = $apiApp.id
+            
+            Write-Success "Created API app: $apiAppName (App ID: $apiAppId)"
+            
+            # Create API scope for access using Graph REST API (more reliable than --set)
+            $scopeId = [guid]::NewGuid().ToString()
+            $scopeBody = @{
+                api = @{
+                    oauth2PermissionScopes = @(
+                        @{
+                            id = $scopeId
+                            adminConsentDescription = "Allows the app to access the Alpha Trader API"
+                            adminConsentDisplayName = "Access Alpha Trader API"
+                            isEnabled = $true
+                            type = "User"
+                            userConsentDescription = "Allows the app to access the Alpha Trader API on your behalf"
+                            userConsentDisplayName = "Access Alpha Trader API"
+                            value = "access_as_user"
+                        }
+                    )
+                }
+            } | ConvertTo-Json -Depth 5 -Compress
+            
+            az rest --method PATCH `
+                --uri "https://graph.microsoft.com/v1.0/applications/$apiObjectId" `
+                --headers "Content-Type=application/json" `
+                --body $scopeBody
+            
+            Write-Success "Created API scope: access_as_user"
+        }
+        
+        # ========================================================================
+        # 2. Create SPA App Registration (Frontend)
+        # ========================================================================
+        
+        Write-Info "Creating SPA app registration..."
+        
+        $spaAppName = "alpha-trader-spa-$Environment"
+        $spaRedirectUri = "https://$($outputs.staticWebAppUrl.value)"
+        
+        # Check if SPA app already exists
+        $existingSpaApp = az ad app list --filter "displayName eq '$spaAppName'" | ConvertFrom-Json
+        
+        if ($existingSpaApp.Count -gt 0) {
+            Write-Info "SPA app already exists, updating configuration: $spaAppName"
+            $spaApp = $existingSpaApp[0]
+            $spaAppId = $spaApp.appId
+            $spaObjectId = $spaApp.id
+            
+            # Update redirect URIs for existing app (idempotent)
+            $spaBody = @{
+                spa = @{
+                    redirectUris = @(
+                        $spaRedirectUri,
+                        "$spaRedirectUri/",
+                        "http://localhost:3000",
+                        "http://localhost:3000/"
+                    )
+                }
+            } | ConvertTo-Json -Depth 5 -Compress
+            
+            az rest --method PATCH `
+                --uri "https://graph.microsoft.com/v1.0/applications/$spaObjectId" `
+                --headers "Content-Type=application/json" `
+                --body $spaBody
+            
+            Write-Success "Updated SPA redirect URIs"
+            
+            # Check and add API permission if not already present
+            $existingPermissions = az ad app permission list --id $spaObjectId | ConvertFrom-Json
+            $hasApiPermission = $existingPermissions | Where-Object { $_.resourceAppId -eq $apiAppId }
+            
+            if (-not $hasApiPermission) {
+                az ad app permission add `
+                    --id $spaObjectId `
+                    --api $apiAppId `
+                    --api-permissions "${scopeId}=Scope"
+                
+                Write-Success "Added API permission to SPA"
+                Write-Info "⚠️  Admin consent required: az ad app permission admin-consent --id $spaAppId"
+            }
+            else {
+                Write-Info "API permission already configured"
+            }
+        }
+        else {
+            # Create SPA app
+            $spaApp = az ad app create `
+                --display-name $spaAppName `
+                --sign-in-audience "AzureADMyOrg" `
+                --web-redirect-uris "$spaRedirectUri" "$spaRedirectUri/" `
+                --enable-id-token-issuance true `
+                --enable-access-token-issuance true | ConvertFrom-Json
+            
+            $spaAppId = $spaApp.appId
+            $spaObjectId = $spaApp.id
+            
+            Write-Success "Created SPA app: $spaAppName (App ID: $spaAppId)"
+            
+            # Configure SPA redirect URIs using Graph REST API (more reliable)
+            $spaBody = @{
+                spa = @{
+                    redirectUris = @(
+                        $spaRedirectUri,
+                        "$spaRedirectUri/",
+                        "http://localhost:3000",
+                        "http://localhost:3000/"
+                    )
+                }
+            } | ConvertTo-Json -Depth 5 -Compress
+            
+            az rest --method PATCH `
+                --uri "https://graph.microsoft.com/v1.0/applications/$spaObjectId" `
+                --headers "Content-Type=application/json" `
+                --body $spaBody
+            
+            Write-Success "Configured SPA redirect URIs"
+            
+            # Add API permission (requires admin consent)
+            az ad app permission add `
+                --id $spaObjectId `
+                --api $apiAppId `
+                --api-permissions "${scopeId}=Scope"
+            
+            Write-Success "Added API permission to SPA"
+            Write-Info "⚠️  Admin consent required: az ad app permission admin-consent --id $spaAppId"
+        }
+        
+        # ========================================================================
+        # 3. Update Container App with Entra ID Settings
+        # ========================================================================
+        
+        Write-Info "Updating Container App with Entra ID settings..."
+        
+        # NOTE: We use ENTRA_* prefixed vars to avoid conflicts with Azure SDK's AZURE_CLIENT_ID
+        # which is used for managed identity authentication. These are for Entra ID token validation.
+        az containerapp update `
+            --name $outputs.containerAppName.value `
+            --resource-group $ResourceGroup `
+            --set-env-vars `
+                "ENTRA_TENANT_ID=$tenantId" `
+                "ENTRA_API_CLIENT_ID=$apiAppId" `
+                "ENTRA_API_AUDIENCE=$apiAppIdUri"
+        
+        Write-Success "Updated Container App environment variables"
+        
+        # ========================================================================
+        # 4. Update Static Web App with Entra ID Settings
+        # ========================================================================
+        
+        Write-Info "Updating Static Web App with Entra ID settings..."
+        
+        # NOTE: SPA uses ENTRA_* vars consistently with backend
+        az staticwebapp appsettings set `
+            --name $outputs.staticWebAppName.value `
+            --resource-group $ResourceGroup `
+            --setting-names `
+                ENTRA_TENANT_ID="$tenantId" `
+                ENTRA_SPA_CLIENT_ID="$spaAppId" `
+                ENTRA_API_CLIENT_ID="$apiAppId" `
+                ENTRA_API_SCOPE="$apiAppIdUri/access_as_user"
+        
+        Write-Success "Updated Static Web App settings"
+        
+        # ========================================================================
+        # Display Summary
+        # ========================================================================
+        
+        Write-Host ""
+        Write-Host "📋 Entra ID Configuration:" -ForegroundColor Yellow
+        Write-Host "  Tenant ID:        $tenantId" -ForegroundColor White
+        Write-Host "  API App ID:       $apiAppId" -ForegroundColor White
+        Write-Host "  SPA App ID:       $spaAppId" -ForegroundColor White
+        Write-Host "  API Audience:     $apiAppIdUri" -ForegroundColor White
+        Write-Host "  API Scope:        $apiAppIdUri/access_as_user" -ForegroundColor White
+        Write-Host ""
+        
+    }
+    catch {
+        Write-Host "⚠️  Warning: Failed to create Entra ID app registrations" -ForegroundColor Yellow
+        Write-Host "Error: $_" -ForegroundColor Yellow
+        Write-Host "You can create these manually later or run the deployment again." -ForegroundColor Yellow
+    }
+}
+
+# ============================================================================
 # Build and Push Container (Optional)
 # ============================================================================
 

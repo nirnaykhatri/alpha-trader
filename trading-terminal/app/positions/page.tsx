@@ -9,7 +9,7 @@
 
 'use client'
 
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useCallback } from 'react'
 import { AppShell } from '@/components/layout'
 import { ProtectedRoute } from '@/components/auth'
 import { 
@@ -25,15 +25,17 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
   Skeleton,
 } from '@/components/ui'
+import { useToast } from '@/components/ui/use-toast'
 import { 
   TrendingUp, 
   TrendingDown, 
@@ -51,6 +53,7 @@ import {
 } from 'lucide-react'
 import { formatCurrency, formatPercent, getPnLTextColor, cn } from '@/lib/utils'
 import { usePositions, type Position } from '@/lib/hooks/use-admin-api'
+import { closePosition as adminClosePosition } from '@/lib/admin-api'
 
 /** Position data structure for display */
 interface DisplayPosition {
@@ -150,57 +153,78 @@ const mockPositions: DisplayPosition[] = [
 
 /**
  * ClosePositionDialog Component
+ * 
+ * Confirmation dialog for closing a position via the admin API.
  */
-function ClosePositionDialog({ position }: { position: DisplayPosition }) {
+function ClosePositionDialog({ 
+  position, 
+  open, 
+  onOpenChange,
+  onConfirm,
+  isClosing,
+}: { 
+  position: DisplayPosition
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onConfirm: () => void
+  isClosing: boolean
+}) {
   return (
-    <Dialog>
-      <DialogTrigger asChild>
-        <Button variant="danger" size="sm">Close Position</Button>
-      </DialogTrigger>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Close Position: {position.symbol}</DialogTitle>
-          <DialogDescription>
-            This will close your entire position in {position.symbol}.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="py-4 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <p className="text-sm text-muted-foreground">Quantity</p>
-              <p className="font-medium">{position.quantity} shares</p>
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Current Price</p>
-              <p className="font-medium">{formatCurrency(position.currentPrice)}</p>
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Market Value</p>
-              <p className="font-medium">{formatCurrency(position.marketValue)}</p>
-            </div>
-            <div>
-              <p className="text-sm text-muted-foreground">Unrealized P&L</p>
-              <p className={`font-medium ${getPnLTextColor(position.unrealizedPnL)}`}>
-                {formatCurrency(position.unrealizedPnL)}
+    <AlertDialog open={open} onOpenChange={onOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Close Position: {position.symbol}</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-3">
+              <p>
+                This will close your entire position of <strong>{position.quantity}</strong> shares
+                of <strong>{position.symbol}</strong>.
               </p>
+              <div className="rounded-lg bg-muted p-3 space-y-2">
+                <div className="flex justify-between text-sm">
+                  <span>Quantity</span>
+                  <span className="font-medium">{position.quantity} shares</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span>Current Price</span>
+                  <span className="font-medium">{formatCurrency(position.currentPrice)}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span>Market Value</span>
+                  <span className="font-medium">{formatCurrency(position.marketValue)}</span>
+                </div>
+                <div className="flex justify-between text-sm border-t pt-2">
+                  <span>Unrealized P&L</span>
+                  <span className={`font-bold ${getPnLTextColor(position.unrealizedPnL)}`}>
+                    {formatCurrency(position.unrealizedPnL)}
+                  </span>
+                </div>
+              </div>
+              <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
+                <div className="flex items-center gap-2 text-yellow-500">
+                  <AlertTriangle className="h-4 w-4" />
+                  <span className="text-sm font-medium">Market Order Warning</span>
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  This will execute a market order to close your position immediately.
+                  Actual fill price may vary.
+                </p>
+              </div>
             </div>
-          </div>
-          <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
-            <div className="flex items-center gap-2 text-yellow-500">
-              <AlertTriangle className="h-4 w-4" />
-              <span className="text-sm font-medium">Market Order Warning</span>
-            </div>
-            <p className="text-xs text-muted-foreground mt-1">
-              This will execute a market order to close your position immediately.
-            </p>
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline">Cancel</Button>
-          <Button variant="danger">Close Position</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={isClosing}>Cancel</AlertDialogCancel>
+          <AlertDialogAction 
+            onClick={onConfirm}
+            disabled={isClosing}
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+          >
+            {isClosing ? 'Closing...' : 'Close Position'}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   )
 }
 
@@ -208,8 +232,13 @@ function ClosePositionDialog({ position }: { position: DisplayPosition }) {
  * PositionCard Component
  * 
  * Displays detailed position information in a card format.
+ * Includes functional close position capability via admin API.
  */
-function PositionCard({ position }: { position: DisplayPosition }) {
+function PositionCard({ position, onRefresh }: { position: DisplayPosition; onRefresh?: () => void }) {
+  const { toast } = useToast()
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false)
+  const [isClosing, setIsClosing] = useState(false)
+  
   const isProfitable = position.unrealizedPnL >= 0
   const isDayProfitable = position.dayPnL >= 0
 
@@ -218,72 +247,99 @@ function PositionCard({ position }: { position: DisplayPosition }) {
     medium: 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20',
     high: 'bg-red-500/10 text-red-500 border-red-500/20',
   }
+  
+  // Handle Close Position - uses the admin API
+  const handleClosePosition = useCallback(async () => {
+    setIsClosing(true)
+    try {
+      await adminClosePosition(position.symbol, {
+        quantity: position.quantity,
+        order_type: 'market',
+      })
+
+      toast({
+        title: 'Position Closed',
+        description: `Successfully closed ${position.quantity} shares of ${position.symbol}`,
+      })
+      setShowCloseConfirm(false)
+      onRefresh?.()
+    } catch (error) {
+      toast({
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to close position',
+        variant: 'destructive',
+      })
+    } finally {
+      setIsClosing(false)
+    }
+  }, [position, toast, onRefresh])
 
   return (
-    <Card className="hover:border-primary/50 transition-colors">
-      <CardHeader className="pb-2">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary/20 to-primary/5 flex items-center justify-center">
-              <span className="font-bold text-sm">{position.symbol[0]}</span>
-            </div>
-            <div>
-              <CardTitle className="text-lg">{position.symbol}</CardTitle>
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className="text-xs">
-                  {position.side.toUpperCase()}
-                </Badge>
-                <Badge className={`${riskColors[position.riskScore]} text-xs`} variant="outline">
-                  {position.riskScore} risk
-                </Badge>
+    <>
+      <Card className="hover:border-primary/50 transition-colors">
+        <CardHeader className="pb-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary/20 to-primary/5 flex items-center justify-center">
+                <span className="font-bold text-sm">{position.symbol[0]}</span>
+              </div>
+              <div>
+                <CardTitle className="text-lg">{position.symbol}</CardTitle>
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="text-xs">
+                    {position.side.toUpperCase()}
+                  </Badge>
+                  <Badge className={`${riskColors[position.riskScore]} text-xs`} variant="outline">
+                    {position.riskScore} risk
+                  </Badge>
+                </div>
               </div>
             </div>
+            <Button variant="ghost" size="sm">
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
           </div>
-          <Button variant="ghost" size="sm">
-            <MoreHorizontal className="h-4 w-4" />
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {/* Price and P&L */}
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <p className="text-xs text-muted-foreground">Current Price</p>
-            <p className="text-xl font-bold">{formatCurrency(position.currentPrice)}</p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Price and P&L */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-xs text-muted-foreground">Current Price</p>
+              <p className="text-xl font-bold">{formatCurrency(position.currentPrice)}</p>
+            </div>
+            <div className="text-right">
+              <p className="text-xs text-muted-foreground">Unrealized P&L</p>
+              <p className={`text-xl font-bold ${getPnLTextColor(position.unrealizedPnL)}`}>
+                {formatCurrency(position.unrealizedPnL)}
+              </p>
+              <p className={`text-xs ${getPnLTextColor(position.unrealizedPnL)}`}>
+                {formatPercent(position.unrealizedPnLPercent)}
+              </p>
+            </div>
           </div>
-          <div className="text-right">
-            <p className="text-xs text-muted-foreground">Unrealized P&L</p>
-            <p className={`text-xl font-bold ${getPnLTextColor(position.unrealizedPnL)}`}>
-              {formatCurrency(position.unrealizedPnL)}
-            </p>
-            <p className={`text-xs ${getPnLTextColor(position.unrealizedPnL)}`}>
-              {formatPercent(position.unrealizedPnLPercent)}
-            </p>
-          </div>
-        </div>
 
-        {/* Position Details */}
-        <div className="grid grid-cols-3 gap-2 text-sm">
-          <div>
-            <p className="text-xs text-muted-foreground">Quantity</p>
-            <p className="font-medium">{position.quantity}</p>
+          {/* Position Details */}
+          <div className="grid grid-cols-3 gap-2 text-sm">
+            <div>
+              <p className="text-xs text-muted-foreground">Quantity</p>
+              <p className="font-medium">{position.quantity}</p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Avg Cost</p>
+              <p className="font-medium">{formatCurrency(position.avgCost)}</p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Market Value</p>
+              <p className="font-medium">{formatCurrency(position.marketValue)}</p>
+            </div>
           </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Avg Cost</p>
-            <p className="font-medium">{formatCurrency(position.avgCost)}</p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Market Value</p>
-            <p className="font-medium">{formatCurrency(position.marketValue)}</p>
-          </div>
-        </div>
 
-        {/* Day P&L and DCA Layers */}
-        <div className="flex items-center justify-between pt-2 border-t border-border">
-          <div>
-            <p className="text-xs text-muted-foreground">Day P&L</p>
-            <p className={`font-medium ${getPnLTextColor(position.dayPnL)}`}>
-              {formatCurrency(position.dayPnL)} ({formatPercent(position.dayPnLPercent)})
+          {/* Day P&L and DCA Layers */}
+          <div className="flex items-center justify-between pt-2 border-t border-border">
+            <div>
+              <p className="text-xs text-muted-foreground">Day P&L</p>
+              <p className={`font-medium ${getPnLTextColor(position.dayPnL)}`}>
+                {formatCurrency(position.dayPnL)} ({formatPercent(position.dayPnLPercent)})
             </p>
           </div>
           <div className="text-right">
@@ -306,10 +362,26 @@ function PositionCard({ position }: { position: DisplayPosition }) {
           <Button variant="outline" size="sm" className="flex-1">
             Add to Position
           </Button>
-          <ClosePositionDialog position={position} />
+          <Button 
+            variant="destructive" 
+            size="sm" 
+            onClick={() => setShowCloseConfirm(true)}
+          >
+            Close Position
+          </Button>
         </div>
       </CardContent>
     </Card>
+    
+    {/* Close Position Confirmation Dialog */}
+    <ClosePositionDialog
+      position={position}
+      open={showCloseConfirm}
+      onOpenChange={setShowCloseConfirm}
+      onConfirm={handleClosePosition}
+      isClosing={isClosing}
+    />
+  </>
   )
 }
 
@@ -677,7 +749,7 @@ export default function PositionsPage() {
             {filteredPositions.length > 0 ? (
               <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {filteredPositions.map((position) => (
-                  <PositionCard key={position.symbol} position={position} />
+                  <PositionCard key={position.symbol} position={position} onRefresh={handleRefresh} />
                 ))}
               </div>
             ) : positions.length > 0 && hasActiveFilters ? (
